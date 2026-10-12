@@ -11,11 +11,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::instance::host_resources::HostResourcesConfig;
 use easytier_core::instance::host_resources::{HostDiskResourcesSnapshot, HostResourcesSnapshot};
 use tokio::sync::Mutex;
-
-const RESOURCE_CACHE_TTL: Duration = Duration::from_secs(5);
-const DISK_CACHE_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CpuCounters {
@@ -34,26 +32,44 @@ struct CollectorState {
     disks_failed: bool,
 }
 
-#[derive(Default)]
 struct ResourceCollector {
     state: Arc<Mutex<CollectorState>>,
+    config: HostResourcesConfig,
+}
+
+impl Default for ResourceCollector {
+    fn default() -> Self {
+        Self::new(HostResourcesConfig::default())
+    }
 }
 
 static COLLECTOR: OnceLock<ResourceCollector> = OnceLock::new();
 
 pub(crate) async fn snapshot() -> Option<HostResourcesSnapshot> {
     COLLECTOR
-        .get_or_init(ResourceCollector::default)
+        .get_or_init(|| ResourceCollector::new(*crate::instance::host_resources::configuration()))
         .snapshot()
         .await
 }
 
 impl ResourceCollector {
+    fn new(config: HostResourcesConfig) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(CollectorState::default())),
+            config,
+        }
+    }
+
     async fn snapshot(&self) -> Option<HostResourcesSnapshot> {
+        if !self.config.enabled {
+            return None;
+        }
+        let resource_cache_ttl = Duration::from_secs(self.config.interval_seconds);
+        let disk_cache_ttl = Duration::from_secs(self.config.disk_interval_seconds);
         let mut state = self.state.clone().lock_owned().await;
         if state
             .last_sample_at
-            .is_some_and(|at| at.elapsed() < RESOURCE_CACHE_TTL)
+            .is_some_and(|at| at.elapsed() < resource_cache_ttl)
         {
             return state.snapshot.clone();
         }
@@ -65,7 +81,7 @@ impl ResourceCollector {
             // timestamp reflects the observation rather than disk latency.
             if state
                 .last_disk_attempt_at
-                .is_none_or(|at| at.elapsed() >= DISK_CACHE_TTL)
+                .is_none_or(|at| at.elapsed() >= disk_cache_ttl)
             {
                 state.last_disk_attempt_at = Some(Instant::now());
                 match sample_disks() {
@@ -411,7 +427,8 @@ mod tests {
             // Expire only the general cache: the CPU gets a real interval,
             // but disks keep their independent original observation time.
             let mut state = collector.state.lock().await;
-            state.last_sample_at = Some(Instant::now() - RESOURCE_CACHE_TTL);
+            state.last_sample_at =
+                Some(Instant::now() - Duration::from_secs(collector.config.interval_seconds));
         }
         let refreshed = collector.snapshot().await.unwrap();
         assert_eq!(
@@ -422,5 +439,53 @@ mod tests {
         if let Some(cpu) = refreshed.cpu_usage_percent {
             assert!((0.0..=100.0).contains(&cpu));
         }
+    }
+
+    #[tokio::test]
+    async fn disabled_collection_does_not_sample_or_return_cached_values() {
+        let collector = ResourceCollector::new(HostResourcesConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        {
+            let mut state = collector.state.lock().await;
+            state.snapshot = Some(HostResourcesSnapshot {
+                sampled_at_unix_ms: 1000,
+                ..Default::default()
+            });
+        }
+        assert_eq!(collector.snapshot().await, None);
+        let state = collector.state.lock().await;
+        assert!(state.last_sample_at.is_none());
+        assert!(state.last_disk_attempt_at.is_none());
+        assert!(state.previous_cpu.is_none());
+    }
+
+    #[tokio::test]
+    async fn configurable_resource_and_disk_caches_expire_independently() {
+        let collector = ResourceCollector::new(HostResourcesConfig {
+            enabled: true,
+            interval_seconds: 3,
+            disk_interval_seconds: 30,
+        });
+        let first = collector.snapshot().await.unwrap();
+        let cached = collector.snapshot().await.unwrap();
+        assert_eq!(cached, first);
+        {
+            let mut state = collector.state.lock().await;
+            state.last_sample_at = Some(Instant::now() - Duration::from_secs(4));
+            state.last_disk_attempt_at = Some(Instant::now() - Duration::from_secs(4));
+            state.disks_sampled_at_unix_ms = Some(1234);
+        }
+        let resources_only = collector.snapshot().await.unwrap();
+        assert_eq!(resources_only.disks_sampled_at_unix_ms, Some(1234));
+        {
+            let mut state = collector.state.lock().await;
+            state.last_sample_at = Some(Instant::now() - Duration::from_secs(4));
+            state.last_disk_attempt_at = Some(Instant::now() - Duration::from_secs(31));
+        }
+        let both = collector.snapshot().await.unwrap();
+        assert_ne!(both.disks_sampled_at_unix_ms, Some(1234));
+        assert!(both.disks_sampled_at_unix_ms.is_some());
     }
 }

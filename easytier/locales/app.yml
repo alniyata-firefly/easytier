@@ -14,11 +14,20 @@ core_clap:
     zh-CN: |+
       Web 配置服务器通过 machine id 来识别机器，用于断线重连后的配置恢复，需要保证唯一且固定不变。默认从本地持久化状态读取；首次启动时可能基于系统信息迁移或生成，之后保持固定不变。
   config_file:
-    en: "path to the config file, NOTE: the options set by cmdline args will override options in config file"
-    zh-CN: "配置文件路径，注意：命令行中的配置的选项会覆盖配置文件中的选项"
+    en: "TOML configuration path: legacy single network or [[instances]] bundle with optional process-wide [host_resources]. CLI network overrides apply only to eligible single-instance files."
+    zh-CN: "TOML 配置路径：支持原单网络格式，或使用 [[instances]] 配置多个实例，并可添加进程级 [host_resources]。命令行网络选项仅覆盖符合条件的单实例文件。"
   config_dir:
-    en: "Load all .toml files in the directory to start network instances, and store the received configurations in this directory."
-    zh-CN: "加载目录中的所有 .toml 文件以启动网络实例，并将下发的配置保存在此目录中。"
+    en: "Load .toml files (legacy or multi-instance) in this directory, and store received configurations here. A file selected by both --config-file and --config-dir is loaded once."
+    zh-CN: "加载目录中的 .toml 文件（原单实例或多实例格式），并在此目录保存下发配置；同时由 --config-file 和 --config-dir 指定的同一文件只加载一次。"
+  host_resources_enabled:
+    en: "Enable demand-driven host resource sampling (true or false; default true). Applies to every network in this process; restart to change."
+    zh-CN: "启用按需主机资源采集（true 或 false，默认 true）。作用于进程内所有网络，修改后需重启。"
+  host_resources_interval:
+    en: "Minimum interval between host CPU/memory/process samples, in seconds (1..3600; default 5). CLI > environment > main TOML [host_resources] > default."
+    zh-CN: "CPU、内存及进程资源的最小采样间隔，单位秒（1..3600，默认 5）。优先级：命令行 > 环境变量 > 主 TOML 的 [host_resources] > 默认值。"
+  host_resources_disk_interval:
+    en: "Minimum interval between filesystem samples, in seconds (1..86400; default 60); must not be smaller than the host resource interval."
+    zh-CN: "磁盘的最小采样间隔，单位秒（1..86400，默认 60）；不得小于主机资源采样间隔。"
   disable_env_parsing:
     en: "disable environment variable parsing in config file"
     zh-CN: "禁用配置文件中的环境变量解析"
@@ -288,8 +297,8 @@ core_clap:
     en: "path to credential storage file for persisting generated credentials across restarts (admin nodes)"
     zh-CN: "凭据存储文件路径，用于在管理节点重启后保留已生成的凭据"
   check_config:
-    en: Check config validity without starting the network
-    zh-CN: 检查配置文件的有效性并退出
+    en: "Validate network instances and process resource settings without starting networks; resource-only TOML is accepted."
+    zh-CN: "检查网络实例及进程资源配置后退出，不启动网络；支持仅包含 [host_resources] 的 TOML。"
   daemon:
     en: Run in daemon mode
     zh-CN: 以守护进程模式运行

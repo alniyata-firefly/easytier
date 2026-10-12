@@ -253,6 +253,13 @@ pub trait InstanceRuntimeHost: std::any::Any + Send + Sync + 'static {
         false
     }
 
+    /// Optional process policy; absent on Hosts that do not expose a sampler.
+    fn host_resource_collection_policy(
+        &self,
+    ) -> Option<host_resources::HostResourceCollectionPolicy> {
+        None
+    }
+
     /// Hosts should share cached observations across all network instances.
     async fn host_resources(&self) -> Option<host_resources::HostResourcesSnapshot> {
         None

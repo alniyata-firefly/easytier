@@ -304,6 +304,15 @@ where
         Ok(GetStatsResponse {
             host_resources,
             host_resources_supported: Some(instance.host_resources_supported()),
+            host_resources_enabled: instance
+                .host_resource_collection_policy()
+                .map(|policy| policy.enabled),
+            host_resources_interval_seconds: instance
+                .host_resource_collection_policy()
+                .map(|policy| policy.interval_seconds),
+            host_resources_disk_interval_seconds: instance
+                .host_resource_collection_policy()
+                .map(|policy| policy.disk_interval_seconds),
             metrics: instance
                 .metric_snapshots()
                 .into_iter()
@@ -333,6 +342,10 @@ where
             &mut prometheus_text,
             instance.host_resources_supported(),
             resources.as_ref(),
+        );
+        crate::instance::host_resources::append_host_resource_policy_metrics(
+            &mut prometheus_text,
+            instance.host_resource_collection_policy().as_ref(),
         );
         Ok(GetPrometheusStatsResponse { prometheus_text })
     }

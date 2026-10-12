@@ -68,6 +68,31 @@ pub trait ConfigFileStorage: Send + Sync + 'static {
     async fn write(&self, path: &Path, contents: &[u8]) -> anyhow::Result<()>;
 
     async fn remove(&self, path: &Path) -> anyhow::Result<()>;
+
+    /// Reads only the selected Instance when a Host stores several Instances
+    /// in one file. Existing single-file Hosts retain their original contract.
+    async fn read_instance(
+        &self,
+        path: &Path,
+        _instance_id: uuid::Uuid,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        self.read(path).await
+    }
+
+    /// Persists one Instance without replacing siblings in a shared file.
+    async fn write_instance(
+        &self,
+        path: &Path,
+        _instance_id: uuid::Uuid,
+        contents: &[u8],
+    ) -> anyhow::Result<()> {
+        self.write(path, contents).await
+    }
+
+    /// Removes one Instance without deleting a shared process configuration.
+    async fn remove_instance(&self, path: &Path, _instance_id: uuid::Uuid) -> anyhow::Result<()> {
+        self.remove(path).await
+    }
 }
 
 #[derive(Default)]
@@ -182,9 +207,17 @@ where
 
     async fn apply_file_cleanup(&self, cleanup: ConfigFileCleanup) {
         let result = match cleanup {
-            ConfigFileCleanup::Remove(path) => self.storage.remove(&path).await,
-            ConfigFileCleanup::Restore { path, contents } => {
-                self.storage.write(&path, &contents).await
+            ConfigFileCleanup::Remove { path, instance_id } => {
+                self.storage.remove_instance(&path, instance_id).await
+            }
+            ConfigFileCleanup::Restore {
+                path,
+                instance_id,
+                contents,
+            } => {
+                self.storage
+                    .write_instance(&path, instance_id, &contents)
+                    .await
             }
         };
         if let Err(error) = result {
@@ -276,12 +309,16 @@ where
         if !control.is_read_only()
             && let Some(path) = control.path.as_deref()
         {
-            let cleanup = match self.storage.read(path).await {
+            let cleanup = match self.storage.read_instance(path, instance_id).await {
                 Ok(Some(contents)) => Some(ConfigFileCleanup::Restore {
                     path: path.to_owned(),
+                    instance_id,
                     contents,
                 }),
-                Ok(None) => Some(ConfigFileCleanup::Remove(path.to_owned())),
+                Ok(None) => Some(ConfigFileCleanup::Remove {
+                    path: path.to_owned(),
+                    instance_id,
+                }),
                 Err(error) => {
                     return Err(anyhow::anyhow!(
                         "failed to back up config file {} before overwrite: {error}",
@@ -289,7 +326,16 @@ where
                     ));
                 }
             };
-            if let Err(error) = self.storage.write(path, config.dump().as_bytes()).await {
+            if let Err(error) = self
+                .storage
+                .write_instance(path, instance_id, config.dump().as_bytes())
+                .await
+            {
+                if replacing {
+                    return Err(anyhow::anyhow!(
+                        "failed to persist configuration for existing instance {instance_id}: {error}"
+                    ));
+                }
                 tracing::warn!(%error, path = %path.display(), "failed to write config file");
                 control.set_read_only(true);
             } else {
@@ -410,7 +456,9 @@ where
             };
             if removable {
                 removed.push(instance_id);
-                files.extend(control.path);
+                if let Some(path) = control.path {
+                    files.push((path, instance_id));
+                }
             }
         }
         let remaining = self
@@ -418,11 +466,11 @@ where
             .delete_network_instances(removed.clone())
             .await?;
         self.notify_removed_instances(&removed).await?;
-        for path in files {
+        for (path, instance_id) in files {
             if remote_managed && self.storage.inspect(&path).await.is_read_only() {
                 continue;
             }
-            if let Err(error) = self.storage.remove(&path).await {
+            if let Err(error) = self.storage.remove_instance(&path, instance_id).await {
                 tracing::warn!(%error, path = %path.display(), "failed to remove config file");
             }
         }
@@ -522,8 +570,15 @@ where
 }
 
 enum ConfigFileCleanup {
-    Remove(PathBuf),
-    Restore { path: PathBuf, contents: Vec<u8> },
+    Remove {
+        path: PathBuf,
+        instance_id: uuid::Uuid,
+    },
+    Restore {
+        path: PathBuf,
+        instance_id: uuid::Uuid,
+        contents: Vec<u8>,
+    },
 }
 
 /// Protobuf projection over transport-independent process management.

@@ -249,7 +249,9 @@ async fn persist_config_patch(
             path.display()
         );
     }
-    storage.write(path, config.dump().as_bytes()).await
+    storage
+        .write_instance(path, config.get_id(), config.dump().as_bytes())
+        .await
 }
 
 #[async_trait::async_trait]
@@ -277,6 +279,7 @@ mod config_patch_persistence_tests {
 
     use super::*;
     use crate::{
+        config::toml::ConfigLoader as _,
         instance::manager::{ConfigFileControl, ConfigFilePermission},
         management::ConfigFileStorage,
     };
@@ -286,6 +289,7 @@ mod config_patch_persistence_tests {
         read_only: AtomicBool,
         inspections: AtomicUsize,
         writes: AtomicUsize,
+        written_instance: std::sync::Mutex<Option<uuid::Uuid>>,
     }
 
     #[async_trait::async_trait]
@@ -311,6 +315,16 @@ mod config_patch_persistence_tests {
 
         async fn remove(&self, _path: &Path) -> anyhow::Result<()> {
             unreachable!("config patch persistence does not remove files")
+        }
+
+        async fn write_instance(
+            &self,
+            path: &Path,
+            instance_id: uuid::Uuid,
+            contents: &[u8],
+        ) -> anyhow::Result<()> {
+            *self.written_instance.lock().unwrap() = Some(instance_id);
+            self.write(path, contents).await
         }
     }
 
@@ -343,6 +357,25 @@ mod config_patch_persistence_tests {
         assert!(error.to_string().contains("managed.toml is read-only"));
         assert_eq!(storage.inspections.load(Ordering::Relaxed), 1);
         assert_eq!(storage.writes.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn config_patch_persists_the_selected_instance_uuid() {
+        let storage = RecordingStorage::default();
+        let control = ConfigFileControl::new(
+            Some(PathBuf::from("shared-core.toml")),
+            ConfigFilePermission::default(),
+        );
+        let config = TomlConfig::default();
+        let id = uuid::Uuid::new_v4();
+        config.set_id(id);
+
+        persist_config_patch(&storage, &control, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(*storage.written_instance.lock().unwrap(), Some(id));
+        assert_eq!(storage.writes.load(Ordering::Relaxed), 1);
     }
 }
 

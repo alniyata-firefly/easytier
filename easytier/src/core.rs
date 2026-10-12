@@ -5,12 +5,16 @@ use crate::{
             ConfigFileControl, ConfigLoader, ConsoleLoggerConfig, EncryptionAlgorithm,
             FileLoggerConfig, LoggingConfigLoader, NetworkIdentity, PeerConfig, PortForwardConfig,
             TomlConfigLoader, VpnPortalClientConfig, VpnPortalConfig, add_proxy_network_to_config,
-            load_config_from_file, load_toml_config_from_path, parse_mapped_listener_urls,
+            parse_mapped_listener_urls,
         },
         constants::EASYTIER_VERSION,
         log,
+        process_config::load_process_config_file,
     },
-    instance::factory::native_cli_instance_manager,
+    instance::{
+        factory::native_cli_instance_manager,
+        host_resources::{HostResourcesConfig, HostResourcesOptions},
+    },
     proto::common::{CompressionAlgoPb, SecureModeConfig},
     rpc_service::ApiRpcServer,
     utils::panic::setup_panic_handler,
@@ -23,13 +27,13 @@ use easytier_core::config::normalize_secure_mode_config;
 use guarden::defer;
 use rust_i18n::t;
 use std::{
+    collections::HashSet,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     process::ExitCode,
     sync::{Arc, atomic::AtomicBool},
 };
 use strum::VariantArray;
-use tokio::io::AsyncReadExt;
 
 use crate::tunnel::IpScheme;
 #[cfg(feature = "jemalloc-prof")]
@@ -125,6 +129,9 @@ struct Cli {
 
     #[command(flatten)]
     rpc_portal_options: RpcPortalOptions,
+
+    #[command(flatten)]
+    host_resources_options: HostResourcesOptions,
 
     #[clap(long, help = t!("core_clap.generate_completions").to_string())]
     gen_autocomplete: Option<ShellType>,
@@ -1521,6 +1528,20 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     defer!(dump_profile(0););
     log::init(&cli.logging_options, true)?;
 
+    // Resource sampling is process-wide and must be fixed before an RPC or
+    // network instance can lazily initialize the shared collector.
+    let mut startup = load_startup_configs(&cli).await?;
+    let resource_config = cli.host_resources_options.resolve(startup.host_resources)?;
+    let cli_config = prepare_network_options(&cli, &mut startup)?;
+    ensure_startup_has_network(&cli, &startup, cli_config.as_ref())?;
+    crate::instance::host_resources::configure(resource_config)?;
+    log::info!(
+        enabled = resource_config.enabled,
+        interval_seconds = resource_config.interval_seconds,
+        disk_interval_seconds = resource_config.disk_interval_seconds,
+        "Host resource sampling configured"
+    );
+
     let manager = Arc::new(native_cli_instance_manager().with_config_path(cli.config_dir.clone()));
 
     let _rpc_server = ApiRpcServer::new(
@@ -1561,69 +1582,7 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
         None
     };
 
-    let explicit_config_file_count = cli.config_file.as_ref().map_or(0, |files| files.len());
-    let mut config_dir_file_count = 0;
-    let mut config_files = if let Some(v) = cli.config_file {
-        v.iter()
-            .cloned()
-            .map(|path| (path, ConfigFileSource::CliConfigFile))
-            .collect()
-    } else {
-        vec![]
-    };
-    if let Some(config_dir) = cli.config_dir.as_ref() {
-        if !config_dir.is_dir() {
-            anyhow::bail!("config_dir {} is not a directory", config_dir.display());
-        }
-
-        for entry in std::fs::read_dir(config_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(ext) = path.extension() else {
-                continue;
-            };
-            if ext != "toml" {
-                continue;
-            }
-            config_dir_file_count += 1;
-            config_files.push((path, ConfigFileSource::ConfigDir));
-        }
-    }
-    let config_file_count = config_files.len();
-    let mut crate_cli_network = {
-        if cli.daemon {
-            false
-        } else if config_file_count == 0 && cli.config_server.is_none() {
-            true
-        } else {
-            cli.network_options.network_name.is_some()
-        }
-    };
-    for (config_file, source) in config_files {
-        let (cfg, mut control) = load_config_from_file(
-            &config_file,
-            cli.config_dir.as_ref(),
-            cli.disable_env_parsing,
-        )
-        .await?;
-
-        if cli.network_options.can_merge(
-            &cfg,
-            source,
-            explicit_config_file_count,
-            config_dir_file_count,
-        ) {
-            cli.network_options
-                .merge_into(&cfg)
-                .with_context(|| format!("failed to merge config from cli: {:?}", config_file))?;
-            crate_cli_network = false;
-            control.set_read_only(true);
-            control.set_no_delete(true);
-        }
-
+    for (cfg, control, _) in startup.instances {
         log::info!(
             "\
             Starting easytier from config file {:?}({:?}) with config:\n\
@@ -1631,18 +1590,14 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
             {}\n\
             -----------------------------------\n\
             ",
-            config_file,
+            control.path,
             control.permission,
             cfg.dump_redacted()
         );
         manager.run_network_instance(cfg, control)?;
     }
 
-    if crate_cli_network {
-        let cfg = TomlConfigLoader::default();
-        cli.network_options
-            .merge_into(&cfg)
-            .with_context(|| "failed to create config from cli".to_string())?;
+    if let Some(cfg) = cli_config {
         log::info!(
             "\
             Starting easytier from cli with config:\n\
@@ -1779,7 +1734,8 @@ pub async fn main() -> ExitCode {
     // Verify configurations
     if cli.check_config {
         if let Err(error) = validate_config(&cli).await {
-            log::error!(%error, "Config validation failed");
+            // Logging is initialized in run_main, which a dry run never calls.
+            eprintln!("Config validation failed: {error:#}");
             return ExitCode::FAILURE;
         } else {
             return ExitCode::SUCCESS;
@@ -1789,6 +1745,7 @@ pub async fn main() -> ExitCode {
     let mut ret_code = 0;
 
     if let Err(error) = run_main(cli).await {
+        eprintln!("Failed to start easytier: {error:#}");
         log::error!(%error);
         ret_code = 1;
     }
@@ -1799,32 +1756,364 @@ pub async fn main() -> ExitCode {
     ExitCode::from(ret_code)
 }
 
-async fn validate_config(cli: &Cli) -> anyhow::Result<()> {
-    // Check if a config file is provided
-    let config_files = cli
-        .config_file
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("--config-file is required when using --check-config"))?;
-
-    for config_file in config_files {
-        if config_file == &PathBuf::from("-") {
-            let mut stdin = String::new();
-            _ = tokio::io::stdin()
-                .read_to_string(&mut stdin)
-                .await
-                .context("failed to read config from stdin")?;
-            TomlConfigLoader::new_from_str_with_source("stdin", stdin.as_str())?;
+fn collect_network_config_files(cli: &Cli) -> anyhow::Result<Vec<(PathBuf, ConfigFileSource)>> {
+    let mut config_files = Vec::new();
+    let mut seen_paths = HashSet::new();
+    for path in cli.config_file.iter().flatten() {
+        let identity = if path.as_os_str() == "-" {
+            path.clone()
         } else {
-            load_toml_config_from_path(config_file)?;
+            std::fs::canonicalize(path).with_context(|| {
+                format!("failed to resolve configuration path: {}", path.display())
+            })?
         };
+        if seen_paths.insert(identity) {
+            config_files.push((path.clone(), ConfigFileSource::CliConfigFile));
+        }
     }
+    if let Some(config_dir) = cli.config_dir.as_ref() {
+        anyhow::ensure!(
+            config_dir.is_dir(),
+            "config_dir {} is not a directory",
+            config_dir.display()
+        );
+        let mut paths = std::fs::read_dir(config_dir)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        paths.sort();
+        for path in paths {
+            if !path.is_file() || path.extension().is_none_or(|ext| ext != "toml") {
+                continue;
+            }
+            let identity = std::fs::canonicalize(&path).with_context(|| {
+                format!("failed to resolve configuration path: {}", path.display())
+            })?;
+            if seen_paths.insert(identity) {
+                config_files.push((path, ConfigFileSource::ConfigDir));
+            }
+        }
+    }
+    Ok(config_files)
+}
 
+#[derive(Default)]
+struct StartupConfigs {
+    host_resources: Option<HostResourcesConfig>,
+    instances: Vec<(TomlConfigLoader, ConfigFileControl, ConfigFileSource)>,
+    single_instance_files: HashSet<uuid::Uuid>,
+    file_count: usize,
+    explicit_file_count: usize,
+    directory_file_count: usize,
+}
+
+async fn load_startup_configs(cli: &Cli) -> anyhow::Result<StartupConfigs> {
+    let config_files = collect_network_config_files(cli)?;
+    let mut startup = StartupConfigs {
+        file_count: config_files.len(),
+        ..Default::default()
+    };
+    let mut instance_ids = HashSet::new();
+    for (path, source) in config_files {
+        match source {
+            ConfigFileSource::CliConfigFile => startup.explicit_file_count += 1,
+            ConfigFileSource::ConfigDir => startup.directory_file_count += 1,
+        }
+        let loaded =
+            load_process_config_file(&path, cli.config_dir.as_ref(), cli.disable_env_parsing)
+                .await?;
+        if let Some(policy) = loaded.host_resources {
+            anyhow::ensure!(
+                startup
+                    .host_resources
+                    .is_none_or(|previous| previous == policy),
+                "conflicting [host_resources] policies across configuration files"
+            );
+            startup.host_resources = Some(policy);
+        }
+        let can_overlay = loaded.instances.len() == 1;
+        for (config, control) in loaded.instances {
+            let id = config.get_id();
+            anyhow::ensure!(
+                instance_ids.insert(id),
+                "duplicate instance_id {id} across configuration files"
+            );
+            if can_overlay {
+                startup.single_instance_files.insert(id);
+            }
+            startup.instances.push((config, control, source));
+        }
+    }
+    Ok(startup)
+}
+
+fn prepare_network_options(
+    cli: &Cli,
+    startup: &mut StartupConfigs,
+) -> anyhow::Result<Option<TomlConfigLoader>> {
+    let mut create_cli_network = if cli.daemon {
+        false
+    } else if startup.file_count == 0 && cli.config_server.is_none() {
+        true
+    } else {
+        cli.network_options.network_name.is_some()
+    };
+    for (config, control, source) in &mut startup.instances {
+        // Legacy eligible file rules remain intact. A multi-instance bundle
+        // cannot receive one ambiguous CLI override across all of its members.
+        if startup.single_instance_files.contains(&config.get_id())
+            && cli.network_options.can_merge(
+                config,
+                *source,
+                startup.explicit_file_count,
+                startup.directory_file_count,
+            )
+        {
+            cli.network_options.merge_into(config).with_context(|| {
+                format!(
+                    "failed to merge CLI options into instance {}",
+                    config.get_id()
+                )
+            })?;
+            create_cli_network = false;
+            control.set_read_only(true);
+            control.set_no_delete(true);
+        }
+    }
+    if !create_cli_network {
+        return Ok(None);
+    }
+    let config = TomlConfigLoader::default();
+    cli.network_options
+        .merge_into(&config)
+        .context("failed to create config from CLI")?;
+    Ok(Some(config))
+}
+
+fn ensure_startup_has_network(
+    cli: &Cli,
+    startup: &StartupConfigs,
+    cli_config: Option<&TomlConfigLoader>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        startup.file_count == 0
+            || !startup.instances.is_empty()
+            || cli_config.is_some()
+            || cli.config_server.is_some(),
+        "configuration contains no network instances; add [[instances]], use a legacy network configuration, or connect to a configuration server"
+    );
+    Ok(())
+}
+
+async fn validate_config(cli: &Cli) -> anyhow::Result<()> {
+    let mut startup = load_startup_configs(cli).await?;
+    anyhow::ensure!(
+        startup.file_count > 0,
+        "--check-config requires --config-file or TOML files in --config-dir"
+    );
+    cli.host_resources_options.resolve(startup.host_resources)?;
+    prepare_network_options(cli, &mut startup)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use clap::FromArgMatches as _;
+
     use super::*;
+
+    fn startup_cli(args: &[&str]) -> Cli {
+        let matches = Cli::command()
+            .mut_args(|arg| arg.env(None::<&str>))
+            .try_get_matches_from(args)
+            .unwrap();
+        Cli::from_arg_matches(&matches).unwrap()
+    }
+
+    fn write_startup_file(directory: &std::path::Path, name: &str, text: &str) -> PathBuf {
+        let path = directory.join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn resource_only_main_file_is_valid_dry_run_without_implicit_network() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_startup_file(
+            directory.path(),
+            "resources.toml",
+            "[host_resources]\nenabled = false\ninterval_seconds = 10\ndisk_interval_seconds = 120\n",
+        );
+        let cli = startup_cli(&["test", "-c", path.to_str().unwrap(), "--check-config"]);
+        validate_config(&cli).await.unwrap();
+        let mut startup = load_startup_configs(&cli).await.unwrap();
+        assert!(startup.instances.is_empty());
+        let cli_config = prepare_network_options(&cli, &mut startup).unwrap();
+        assert!(cli_config.is_none());
+        assert!(ensure_startup_has_network(&cli, &startup, None).is_err());
+        let managed = startup_cli(&[
+            "test",
+            "-c",
+            path.to_str().unwrap(),
+            "--config-server",
+            "udp://127.0.0.1:32220/example",
+        ]);
+        assert!(ensure_startup_has_network(&managed, &startup, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn startup_deduplicates_explicit_directory_and_symlink_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_startup_file(
+            directory.path(),
+            "main.toml",
+            "instance_id = '018f85a8-a9d0-7d4c-b73d-4ab62c048a20'\ninstance_name = 'legacy'\n",
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&path, directory.path().join("alias.toml")).unwrap();
+        let cli = startup_cli(&[
+            "test",
+            "-c",
+            path.to_str().unwrap(),
+            path.to_str().unwrap(),
+            "--config-dir",
+            directory.path().to_str().unwrap(),
+        ]);
+        let startup = load_startup_configs(&cli).await.unwrap();
+        assert_eq!(startup.file_count, 1);
+        assert_eq!(startup.explicit_file_count, 1);
+        assert_eq!(startup.directory_file_count, 0);
+        assert_eq!(startup.instances.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_instance_ids_across_main_files_are_rejected_before_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = write_startup_file(
+            directory.path(),
+            "first.toml",
+            "instance_id = '018f85a8-a9d0-7d4c-b73d-4ab62c048a20'\ninstance_name = 'a'\n",
+        );
+        let second = write_startup_file(
+            directory.path(),
+            "second.toml",
+            "instance_id = '018f85a8-a9d0-7d4c-b73d-4ab62c048a20'\ninstance_name = 'b'\n",
+        );
+        let cli = startup_cli(&[
+            "test",
+            "-c",
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+        ]);
+        let error = load_startup_configs(&cli).await.err().unwrap();
+        assert!(error.to_string().contains("duplicate instance_id"));
+    }
+
+    #[tokio::test]
+    async fn process_policy_conflicts_are_rejected_and_identical_policies_are_accepted() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = write_startup_file(
+            directory.path(),
+            "first.toml",
+            "[host_resources]\ninterval_seconds = 5\n",
+        );
+        let second = write_startup_file(
+            directory.path(),
+            "second.toml",
+            "[host_resources]\ninterval_seconds = 10\n",
+        );
+        let cli = startup_cli(&[
+            "test",
+            "-c",
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+        ]);
+        assert!(
+            load_startup_configs(&cli)
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("conflicting [host_resources]")
+        );
+        std::fs::write(&second, "[host_resources]\ninterval_seconds = 5\n").unwrap();
+        let startup = load_startup_configs(&cli).await.unwrap();
+        assert_eq!(startup.host_resources, Some(HostResourcesConfig::default()));
+        assert!(startup.instances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cli_overlay_keeps_legacy_single_file_behavior_and_skips_multi_instance_bundle() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_startup_file(directory.path(), "single.toml", "hostname = 'before'\n");
+        let cli = startup_cli(&["test", "-c", path.to_str().unwrap(), "--hostname", "after"]);
+        let mut startup = load_startup_configs(&cli).await.unwrap();
+        assert!(
+            prepare_network_options(&cli, &mut startup)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(startup.instances[0].0.get_hostname(), "after");
+        assert!(startup.instances[0].1.is_read_only());
+
+        let path = write_startup_file(
+            directory.path(),
+            "bundle.toml",
+            concat!(
+                "[[instances]]\ninstance_id = '018f85a8-a9d0-7d4c-b73d-4ab62c048a20'\ninstance_name = 'a'\nhostname = 'first'\n",
+                "[[instances]]\ninstance_id = '018f85a8-a9d0-7d4c-b73d-4ab62c048a21'\ninstance_name = 'b'\nhostname = 'second'\n"
+            ),
+        );
+        let cli = startup_cli(&["test", "-c", path.to_str().unwrap(), "--hostname", "after"]);
+        let mut startup = load_startup_configs(&cli).await.unwrap();
+        assert!(
+            prepare_network_options(&cli, &mut startup)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(startup.instances[0].0.get_hostname(), "first");
+        assert_eq!(startup.instances[1].0.get_hostname(), "second");
+    }
+
+    #[tokio::test]
+    async fn main_resource_policy_and_cli_override_are_validated_together() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_startup_file(
+            directory.path(),
+            "main.toml",
+            "[host_resources]\ninterval_seconds = 10\ndisk_interval_seconds = 120\n",
+        );
+        let cli = startup_cli(&[
+            "test",
+            "-c",
+            path.to_str().unwrap(),
+            "--host-resources-interval",
+            "20",
+            "--host-resources-enabled",
+            "false",
+        ]);
+        let startup = load_startup_configs(&cli).await.unwrap();
+        let config = cli
+            .host_resources_options
+            .resolve(startup.host_resources)
+            .unwrap();
+        assert_eq!(
+            config,
+            HostResourcesConfig {
+                enabled: false,
+                interval_seconds: 20,
+                disk_interval_seconds: 120
+            }
+        );
+        validate_config(&cli).await.unwrap();
+        let invalid = startup_cli(&[
+            "test",
+            "-c",
+            path.to_str().unwrap(),
+            "--host-resources-interval",
+            "0",
+        ]);
+        assert!(validate_config(&invalid).await.is_err());
+    }
 
     #[test]
     fn test_parse_listeners() {

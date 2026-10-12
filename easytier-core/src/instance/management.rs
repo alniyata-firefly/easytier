@@ -93,6 +93,12 @@ where
         self.instance_runtime.host_resources_supported()
     }
 
+    pub fn host_resource_collection_policy(
+        &self,
+    ) -> Option<super::host_resources::HostResourceCollectionPolicy> {
+        self.instance_runtime.host_resource_collection_policy()
+    }
+
     pub async fn host_resources(&self) -> Option<super::host_resources::HostResourcesSnapshot> {
         self.instance_runtime.host_resources().await
     }

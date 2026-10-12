@@ -1,0 +1,47 @@
+# 一个 Core 进程的统一配置：根资源设置 + 多个独立网络实例。
+# 修改采集参数后重启 Core 生效；收到查询时按需采集。
+# CLI > 环境变量 > 本文件 > 默认值。
+[host_resources]
+enabled = true
+# 允许 1..3600 秒。
+interval_seconds = 5
+# 允许 1..86400 秒，且必须 >= interval_seconds。
+disk_interval_seconds = 60
+
+# 验证示例：无公网对等节点、无配置服务器，仅本地监听、不建立 TUN。
+# 全新正式部署请生成独立的 UUID 和网络密钥；既有部署沿用原来的值。
+[[instances]]
+instance_id = "80e5e024-7a63-447e-99f1-c4b58d031ad9"
+instance_name = "alpha"
+hostname = "example-node"
+ipv4 = "10.250.1.1/24"
+listeners = ["tcp://127.0.0.1:21101", "udp://127.0.0.1:21101"]
+
+[instances.network_identity]
+network_name = "example-alpha"
+network_secret = "REPLACE_WITH_ALPHA_RANDOM_NETWORK_SECRET"
+
+[instances.flags]
+no_tun = true
+disable_upnp = true
+disable_p2p = true
+disable_udp_hole_punching = true
+disable_tcp_hole_punching = true
+
+[[instances]]
+instance_id = "24c8d713-026b-4c1f-bf53-0792efa84307"
+instance_name = "beta"
+hostname = "example-node"
+ipv4 = "10.250.2.1/24"
+listeners = ["tcp://127.0.0.1:21102", "udp://127.0.0.1:21102"]
+
+[instances.network_identity]
+network_name = "example-beta"
+network_secret = "REPLACE_WITH_BETA_RANDOM_NETWORK_SECRET"
+
+[instances.flags]
+no_tun = true
+disable_upnp = true
+disable_p2p = true
+disable_udp_hole_punching = true
+disable_tcp_hole_punching = true

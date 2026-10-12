@@ -1,5 +1,5 @@
 import java.util.Properties
-import java.io.FileInputStream
+import java.io.File
 import groovy.json.JsonSlurper
 
 plugins {
@@ -12,6 +12,25 @@ val tauriProperties = Properties().apply {
     val propFile = file("tauri.properties")
     if (propFile.exists()) {
         propFile.inputStream().use { load(it) }
+    }
+}
+
+// Keep private adaptation signing material outside the Git checkout. The
+// repository's public development keystore must never sign adapted releases.
+val privateKeystorePropertiesFile = System.getenv("ET_ANDROID_KEYSTORE_PROPERTIES")
+    ?.takeIf { it.isNotBlank() }
+    ?.let { File(it) }
+val privateKeystoreProperties = Properties().apply {
+    if (privateKeystorePropertiesFile != null) {
+        check(privateKeystorePropertiesFile.isFile) {
+            "ET_ANDROID_KEYSTORE_PROPERTIES must point to a private signing properties file"
+        }
+        privateKeystorePropertiesFile.inputStream().use { load(it) }
+        for (property in listOf("keyAlias", "keyPassword", "storeFile", "storePassword")) {
+            check(!getProperty(property).isNullOrBlank()) {
+                "Private signing properties are missing $property"
+            }
+        }
     }
 }
 
@@ -56,21 +75,19 @@ android {
         versionName = tauriVersionName
     }
     signingConfigs {
-        create("release") {
-            val keystorePropertiesFile = rootProject.file("keystore.properties")
-            val keystoreProperties = Properties()
-            if (keystorePropertiesFile.exists()) {
-                keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+        if (privateKeystorePropertiesFile != null) {
+            create("adaptedRelease") {
+                keyAlias = privateKeystoreProperties.getProperty("keyAlias")
+                keyPassword = privateKeystoreProperties.getProperty("keyPassword")
+                storeFile = File(privateKeystoreProperties.getProperty("storeFile"))
+                check(storeFile?.isFile == true) { "Private signing keystore does not exist" }
+                storePassword = privateKeystoreProperties.getProperty("storePassword")
             }
-
-            keyAlias = keystoreProperties["keyAlias"] as String
-            keyPassword = keystoreProperties["keyPassword"] as String
-            storeFile = file(keystoreProperties["storeFile"] as String)
-            storePassword = keystoreProperties["storePassword"] as String
         }
     }
     buildTypes {
         getByName("debug") {
+            applicationIdSuffix = ".adapted.debug"
             manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true
@@ -82,13 +99,14 @@ android {
             }
         }
         getByName("release") {
+            applicationIdSuffix = ".adapted"
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
                     .toList().toTypedArray()
             )
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("adaptedRelease")
         }
     }
     kotlinOptions {
@@ -96,6 +114,13 @@ android {
     }
     buildFeatures {
         buildConfig = true
+    }
+}
+
+gradle.taskGraph.whenReady {
+    val buildsRelease = allTasks.any { it.project == project && it.name.contains("Release", ignoreCase = true) }
+    check(!buildsRelease || privateKeystorePropertiesFile != null) {
+        "Adapted release APKs require ET_ANDROID_KEYSTORE_PROPERTIES; the public repository key is not used"
     }
 }
 

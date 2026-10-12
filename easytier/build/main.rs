@@ -1,10 +1,8 @@
 use cfg_aliases::cfg_aliases;
 use std::env;
 
-#[cfg(target_os = "windows")]
 struct WindowsBuild {}
 
-#[cfg(target_os = "windows")]
 impl WindowsBuild {
     pub fn check_for_win() {
         // add third_party dir to link search path
@@ -84,8 +82,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thunk::thunk();
     }
 
-    #[cfg(target_os = "windows")]
-    WindowsBuild::check_for_win();
+    // Build scripts run on the host: cfg(target_os) would incorrectly skip
+    // Windows import libraries when cross-compiling from Linux or macOS.
+    if target_os == "windows" {
+        WindowsBuild::check_for_win();
+    }
 
     check_locale();
     Ok(())

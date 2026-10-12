@@ -15,6 +15,8 @@ pub mod netns;
 pub mod network;
 #[cfg(feature = "management")]
 pub mod os_info;
+#[cfg(feature = "management")]
+pub mod process_config;
 pub mod stun;
 #[cfg(feature = "management")]
 pub mod tracing_rolling_appender;

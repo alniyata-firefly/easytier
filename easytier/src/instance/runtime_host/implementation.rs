@@ -33,6 +33,12 @@ impl InstanceRuntimeHost for NativeInstanceRuntimeHost {
         cfg!(all(target_os = "linux", not(mobile)))
     }
 
+    fn host_resource_collection_policy(
+        &self,
+    ) -> Option<easytier_core::instance::host_resources::HostResourceCollectionPolicy> {
+        crate::instance::host_resources::collection_policy()
+    }
+
     async fn host_resources(
         &self,
     ) -> Option<easytier_core::instance::host_resources::HostResourcesSnapshot> {

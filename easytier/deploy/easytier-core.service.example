@@ -1,0 +1,29 @@
+[Unit]
+Description=EasyTier Core VPN node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/var/lib/easytier
+EnvironmentFile=/etc/easytier/core.env
+ExecStart=/opt/easytier/bin/easytier-core --config-file /etc/easytier/core.toml --rpc-portal 127.0.0.1:15888 --console-log-level warn
+Restart=on-failure
+RestartSec=3s
+KillSignal=SIGINT
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# 定向更新采用同目录原子替换，需要配置父目录可写。
+ReadWritePaths=/var/lib/easytier /etc/easytier
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+
+[Install]
+WantedBy=multi-user.target

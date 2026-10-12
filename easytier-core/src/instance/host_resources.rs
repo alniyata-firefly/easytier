@@ -5,6 +5,44 @@
 
 use std::fmt::Write as _;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostResourceCollectionPolicy {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub disk_interval_seconds: u64,
+}
+
+/// Collection configuration is separate from platform capability and readings.
+pub fn append_host_resource_policy_metrics(
+    text: &mut String,
+    policy: Option<&HostResourceCollectionPolicy>,
+) {
+    let Some(policy) = policy else {
+        return;
+    };
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    gauge(
+        text,
+        "easytier_host_resources_enabled",
+        "Whether machine resource collection is enabled in this process.",
+        u8::from(policy.enabled),
+    );
+    gauge(
+        text,
+        "easytier_host_resources_interval_seconds",
+        "Demand-driven machine resource cache interval in seconds.",
+        policy.interval_seconds,
+    );
+    gauge(
+        text,
+        "easytier_host_resources_disk_interval_seconds",
+        "Demand-driven filesystem cache interval in seconds.",
+        policy.disk_interval_seconds,
+    );
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HostResourcesSnapshot {
     pub sampled_at_unix_ms: u64,
@@ -149,6 +187,28 @@ pub fn append_host_resource_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_policy_is_distinct_from_unsupported_platform() {
+        let mut text = String::new();
+        append_host_resource_metrics(&mut text, true, None);
+        append_host_resource_policy_metrics(
+            &mut text,
+            Some(&HostResourceCollectionPolicy {
+                enabled: false,
+                interval_seconds: 7,
+                disk_interval_seconds: 70,
+            }),
+        );
+        assert!(text.contains("easytier_host_resources_supported 1\n"));
+        assert!(text.contains("easytier_host_resources_enabled 0\n"));
+        assert!(text.contains("easytier_host_resources_interval_seconds 7\n"));
+        assert!(text.contains("easytier_host_resources_disk_interval_seconds 70\n"));
+        assert!(!text.contains("easytier_host_memory_total_bytes"));
+        let mut absent = String::new();
+        append_host_resource_policy_metrics(&mut absent, None);
+        assert!(absent.is_empty());
+    }
 
     #[test]
     fn missing_resources_are_not_zero_gauges() {
