@@ -231,6 +231,8 @@ pub struct NetworkCredentialInfo {
     pub device_id: Option<String>,
 }
 
+type PublicationErrors = BTreeMap<(UserIdInDb, Option<Uuid>), String>;
+
 #[derive(Clone)]
 pub struct CentralNetworkService {
     pub(crate) db: Db,
@@ -238,7 +240,7 @@ pub struct CentralNetworkService {
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
     network_instances: Option<Arc<crate::central_network::gateway::NetworkInstanceManager>>,
     reconciler_started: Arc<AtomicBool>,
-    publication_errors: Arc<tokio::sync::RwLock<BTreeMap<(UserIdInDb, Option<Uuid>), String>>>,
+    publication_errors: Arc<tokio::sync::RwLock<PublicationErrors>>,
 }
 
 impl CentralNetworkService {
@@ -1167,10 +1169,10 @@ impl CentralNetworkService {
             .or_else(|| errors.get(&(intent.user_id, None)))
             .cloned();
         drop(errors);
-        if last_error.is_none() {
-            if let Some(session) = &session {
-                last_error = session.reconciliation_error().await;
-            }
+        if last_error.is_none()
+            && let Some(session) = &session
+        {
+            last_error = session.reconciliation_error().await;
         }
         // The revision is per-device and includes every managed instance. Also
         // compare this network's durable desired config to the published row so

@@ -1215,8 +1215,7 @@ impl Session {
 
     pub(crate) async fn reconciliation_error(&self) -> Option<String> {
         let data = self.data.read().await;
-        let error = data.managed_runtime().last_reconciliation_error.clone();
-        error
+        data.managed_runtime().last_reconciliation_error.clone()
     }
 
     pub(crate) async fn belongs_to_device_token(

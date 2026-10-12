@@ -395,10 +395,10 @@ impl NetworkInstanceManager {
         let retired = {
             let mut state = self.state.write().await;
             let retired = state.by_key.remove(&key);
-            if let Some(retired) = &retired {
-                if state.mesh_name_to_key.get(&retired.spec.mesh_name) == Some(&key) {
-                    state.mesh_name_to_key.remove(&retired.spec.mesh_name);
-                }
+            if let Some(retired) = &retired
+                && state.mesh_name_to_key.get(&retired.spec.mesh_name) == Some(&key)
+            {
+                state.mesh_name_to_key.remove(&retired.spec.mesh_name);
             }
             state.mesh_name_to_key.insert(spec.mesh_name.clone(), key);
             state.by_key.insert(

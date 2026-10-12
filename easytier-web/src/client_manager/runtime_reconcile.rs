@@ -576,7 +576,7 @@ mod tests {
         assert_eq!(patch.exit_nodes.len(), 3);
         assert_eq!(patch.exit_nodes[0].action, ConfigPatchAction::Clear as i32);
         assert_eq!(
-            std::net::IpAddr::from(patch.exit_nodes[1].node.clone().unwrap()).to_string(),
+            std::net::IpAddr::from(patch.exit_nodes[1].node.unwrap()).to_string(),
             "fd00::2"
         );
         desired.exit_nodes.clear();

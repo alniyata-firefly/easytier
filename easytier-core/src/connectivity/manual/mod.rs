@@ -82,10 +82,10 @@ fn redacted_endpoint_error(error: &anyhow::Error, endpoint: &Url) -> String {
             continue;
         }
         message = message.replace(&component, "<redacted>");
-        if let Ok(decoded) = percent_decode_str(&component).decode_utf8() {
-            if decoded != component {
-                message = message.replace(decoded.as_ref(), "<redacted>");
-            }
+        if let Ok(decoded) = percent_decode_str(&component).decode_utf8()
+            && decoded != component
+        {
+            message = message.replace(decoded.as_ref(), "<redacted>");
         }
     }
     message
@@ -532,7 +532,7 @@ where
     pub fn remove_connector(&self, url: &Url) -> bool {
         let _state_guard = self.data.state.state_lock.lock().unwrap();
         if self.data.state.connectors.remove(url).is_some() {
-            tracing::warn!(url = %redacted_endpoint_url(&url), "manual connector removed");
+            tracing::warn!(url = %redacted_endpoint_url(url), "manual connector removed");
             return true;
         }
         if self.data.state.reconnecting.contains(url) {

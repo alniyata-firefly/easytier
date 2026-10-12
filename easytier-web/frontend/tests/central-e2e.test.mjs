@@ -64,7 +64,9 @@ async function revokeDeviceToken(page, label, id) {
     const deletedResponse = page.waitForResponse(response => response.url().endsWith(`/api/v1/device-access-tokens/${id}`) && response.request().method() === 'DELETE');
     const row = dialog.getByRole('row').filter({ hasText: label });
     await row.getByRole('button', { name: 'Revoke', exact: true }).click();
-    assert.equal((await deletedResponse).status(), 204);
+    const response = await deletedResponse;
+    assert.equal(response.status(), 200);
+    assert.equal((await response.json()).status, 'revoked');
     await row.getByText('Revoked', { exact: true }).waitFor();
     assert.equal(await dialog.locator('code').count(), 0);
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
@@ -106,7 +108,7 @@ test('real browser, Web API and native Core agree on central management', { time
         const cookies = await context.cookies(base);
         cookies.forEach(cookie => trackSecret(cookie.value));
         const api = httpApi(base, cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; '));
-        assert.equal((await api.get('/api/v1/auth/config')).registration_enabled, false);
+        assert.equal((await api.get('/auth/config')).registration_enabled, false);
 
         // Enroll clean daemon-only Cores, then stop them before adding managed instances.
         for (const device of devices) {
@@ -120,7 +122,7 @@ test('real browser, Web API and native Core agree on central management', { time
         await waitFor(async () => { const machines = (await api.get('/api/v1/machines')).machines; return machines.length === devices.length && machines.every(machine => !machine.online); }, 'offline clean daemons');
 
         await page.goto('/#/h/networks');
-        await page.getByRole('button', { name: 'Create Network', exact: true }).click();
+        await page.getByRole('button', { name: 'Create Network', exact: true }).first().click();
         await page.locator('#network-display-name').fill('Native Browser E2E');
         await page.getByRole('dialog').getByRole('button', { name: 'Confirm', exact: true }).click();
         await page.waitForURL(/\/networks\/[0-9a-f-]{36}$/);
@@ -147,7 +149,8 @@ test('real browser, Web API and native Core agree on central management', { time
             const config = await api.get(`/api/v1/networks/${networkId}/members/${device.id}/config`);
             assert.ok(!config.network_secret, 'ordinary devices never receive the shared network secret');
             trackSecret(config.secure_mode?.local_private_key);
-            Object.assign(config, { no_tun: true, disable_upnp: true, disable_udp_hole_punching: true, disable_tcp_hole_punching: true });
+            Object.assign(config, { no_tun: true, disable_upnp: true, bind_device: false, disable_p2p: true,
+                listener_urls: ['tcp://127.0.0.1:0'], disable_udp_hole_punching: true, disable_tcp_hole_punching: true });
             await api.put(`/api/v1/networks/${networkId}/members/${device.id}/config`, { config });
         }
         await page.getByRole('tab', { name: 'Settings', exact: true }).click();
@@ -184,7 +187,7 @@ test('real browser, Web API and native Core agree on central management', { time
         }, 'actual Core metrics');
         proof.stats_metric_count = stats.metrics.length;
         await waitFor(async () => {
-            const cells = nodeDrawer.locator('tbody tr').first().locator('td');
+            const cells = nodeDrawer.getByRole('tabpanel').locator('tbody tr').first().locator('td');
             return await cells.count() === 4 && /^[a-z][a-z0-9_]+$/.test((await cells.first().textContent()).trim());
         }, 'real metrics rendered in the browser');
         if (screenshotDir) await nodeDrawer.screenshot({ path: join(screenshotDir, 'native-core-metrics.png'), animations: 'disabled' });

@@ -317,35 +317,6 @@ fn parse_advertised_config_server_url(value: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
-#[cfg(test)]
-mod entry_url_tests {
-    use super::parse_advertised_config_server_url;
-
-    #[test]
-    fn advertised_entry_keeps_ipv6_and_websocket_path_prefix() {
-        assert_eq!(
-            parse_advertised_config_server_url("udp://[2001:db8::1]:22020").unwrap(),
-            "udp://[2001:db8::1]:22020"
-        );
-        assert_eq!(
-            parse_advertised_config_server_url("wss://vpn.example.com/config/managed/").unwrap(),
-            "wss://vpn.example.com/config/managed/"
-        );
-        for invalid in [
-            "vpn.example.com",
-            "https://vpn.example.com",
-            "udp://user:secret@vpn.example.com:22020",
-            "udp://vpn.example.com:22020?secret=value",
-            "ws://vpn.example.com/#secret",
-        ] {
-            assert!(
-                parse_advertised_config_server_url(invalid).is_err(),
-                "{invalid}"
-            );
-        }
-    }
-}
-
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     let locale = sys_locale::get_locale().unwrap_or_else(|| String::from("en-US"));
@@ -546,4 +517,33 @@ async fn main() {
     };
 
     tokio::signal::ctrl_c().await.unwrap();
+}
+
+#[cfg(test)]
+mod entry_url_tests {
+    use super::parse_advertised_config_server_url;
+
+    #[test]
+    fn advertised_entry_keeps_ipv6_and_websocket_path_prefix() {
+        assert_eq!(
+            parse_advertised_config_server_url("udp://[2001:db8::1]:22020").unwrap(),
+            "udp://[2001:db8::1]:22020"
+        );
+        assert_eq!(
+            parse_advertised_config_server_url("wss://vpn.example.com/config/managed/").unwrap(),
+            "wss://vpn.example.com/config/managed/"
+        );
+        for invalid in [
+            "vpn.example.com",
+            "https://vpn.example.com",
+            "udp://user:secret@vpn.example.com:22020",
+            "udp://vpn.example.com:22020?secret=value",
+            "ws://vpn.example.com/#secret",
+        ] {
+            assert!(
+                parse_advertised_config_server_url(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
 }
