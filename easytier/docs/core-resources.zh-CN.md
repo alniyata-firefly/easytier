@@ -101,7 +101,7 @@ install -m 600 deploy/easytier-core.env.example /etc/easytier/core.env
 install -m 644 deploy/easytier-core.service.example /etc/systemd/system/easytier-core.service
 ```
 
-服务模板以 root 运行，能力限制到 TUN 和网络套接字操作。它读取统一配置及 `core.env`，工作目录为 `/var/lib/easytier`，RPC 只监听 `127.0.0.1:15888`。单实例更新按 UUID 定向写回主配置，保留其他实例和根资源设置；原子替换需要 `/etc/easytier` 目录可写，因此模板允许写入该目录。
+服务模板以 root 运行，保留 TUN/网络设置、原始套接字和低端口监听所需的 `CAP_NET_ADMIN`、`CAP_NET_RAW`、`CAP_NET_BIND_SERVICE`。模板设置 `XDG_DATA_HOME=/var/lib`，管理接入的设备身份文件固定在 `/var/lib/easytier/machine_id`，与 `ProtectHome=true` 和可写状态目录一致。它读取统一配置及 `core.env`，工作目录为 `/var/lib/easytier`，RPC 只监听 `127.0.0.1:15888`。单实例更新按 UUID 定向写回主配置，保留其他实例和根资源设置；原子替换需要 `/etc/easytier` 目录可写，因此模板允许写入该目录。自定义持久凭据或日志文件时，使用 `/var/lib/easytier` 下的路径，避免把状态文件放进此模板隐藏的 HOME 或其他只读目录。
 
 编辑配置后检查，再由部署人员启动：
 
@@ -130,7 +130,7 @@ CLI 使用同一个本机 RPC，`--instance-id`（`-i`）按 UUID 选择实例�
   --instance-id 80e5e024-7a63-447e-99f1-c4b58d031ad9 stats prometheus
 ```
 
-CLI 语法来自当前程序的 `--help` 和多实例选择实现。Web 通过既有实例列表及按 UUID 选择的 RPC 获取各网络状态，本次没有改造 Web 页面，也没有声明其单文件多实例展示已经通过浏览器验证。
+CLI 语法来自当前程序的 `--help` 和多实例选择实现。Web 通过既有实例列表及按 UUID 选择的 RPC 获取各网络状态；交付验证记录提供旧适配 Web 查看和切换本地双实例的实际浏览器结果，本次没有新增 Web 产品功能。
 
 ## 指标和验证方法
 
@@ -148,6 +148,6 @@ CLI 语法来自当前程序的 `--help` 和多实例选择实现。Web 通过�
 
 ## 以后迁移到中心管理
 
-保持 `machine_id` 及其本地持久状态。迁移每个网络时保留 `instance_id`、`instance_name`、`network_identity`、虚拟地址、监听端口、Secure Mode 私钥与凭据，以及 WireGuard Portal 的服务端和客户端密钥。只保留网络名称不能替代这些身份字段。
+保持 `machine_id` 及其本地持久状态。已有进程若没有设置 `XDG_DATA_HOME`，Linux 默认身份文件可能在 `$HOME/.local/share/easytier/machine_id`。改为此服务部署前，应将原身份文件按 0600 权限迁移到 `/var/lib/easytier/machine_id`；也可以在 `core.env` 明确设置 `ET_MACHINE_ID` 为原设备 UUID。不要在迁移旧设备时仅更换状态路径并让管理接入生成新身份。迁移每个网络时保留 `instance_id`、`instance_name`、`network_identity`、虚拟地址、监听端口、Secure Mode 私钥与凭据，以及 WireGuard Portal 的服务端和客户端密钥。只保留网络名称不能替代这些身份字段。
 
 后续 Web 需要先导入已有网络，再接管对应实例；当前本包没有实现一键导入接管。控制器管理令牌和 VPN 网络密钥是两套不同凭据。添加 `ET_CONFIG_SERVER` 前应确认控制器与原实例身份一致，避免同时从本地与中心加载重复实例。资源设置保留在主文件根部，作用于整个进程，不需给每个网络重复配置，也不需重新编译。

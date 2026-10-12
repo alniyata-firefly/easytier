@@ -8,6 +8,8 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/var/lib/easytier
+# 管理接入的持久设备身份也存放在允许读写的状态目录。
+Environment=XDG_DATA_HOME=/var/lib
 EnvironmentFile=/etc/easytier/core.env
 ExecStart=/opt/easytier/bin/easytier-core --config-file /etc/easytier/core.toml --rpc-portal 127.0.0.1:15888 --console-log-level warn
 Restart=on-failure
@@ -21,7 +23,7 @@ ProtectSystem=strict
 ProtectHome=true
 # 定向更新采用同目录原子替换，需要配置父目录可写。
 ReadWritePaths=/var/lib/easytier /etc/easytier
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 DevicePolicy=closed
 DeviceAllow=/dev/net/tun rw
 
