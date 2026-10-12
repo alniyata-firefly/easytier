@@ -349,6 +349,54 @@ event:
   UdpBroadcastRelayStartResult: UDP Broadcast Relay Start Result
 
 web:
+  observability:
+    host_resources: Host resources
+    cpu: CPU usage
+    memory_used: Memory used
+    core_rss: Core resident memory
+    total: Total
+    disks: Disk usage
+    resources_old_core: This Core does not support host resource reporting yet.
+    resources_unsupported: Host resource collection is unavailable on this platform.
+    resources_unavailable: Host resources are temporarily unavailable.
+    resources_stale: Host resource samples are stale.
+    disks_stale: Disk samples are stale.
+    collection_failed: 'Collection failed: {components}'
+    component_cpu: CPU
+    component_memory: Memory
+    component_process_rss: Core resident memory
+    component_disks: Disks
+    history: Historical metrics
+    refresh_history: Refresh historical metrics
+    history_metric: Metric type
+    history_range: Time range
+    history_disabled: Historical metrics storage is not configured. Live metrics remain available.
+    history_unavailable: Historical metrics are temporarily unavailable
+    history_request_failed: Query failed. Please try again later.
+    history_empty: No available samples for this device in the selected time range.
+    history_group_traffic: VPN traffic
+    history_group_cpu: CPU usage
+    history_group_memory: Memory usage
+    history_group_disks: Disk usage
+    history_group_rpc: RPC errors
+    metric_traffic_rx_rate: Receive
+    metric_traffic_tx_rate: Send
+    metric_host_cpu_percent: CPU
+    metric_host_memory_used_bytes: Host memory
+    metric_host_process_rss_bytes: Core resident memory
+    metric_host_disk_used_bytes: Disk used
+    metric_rpc_error_rate: Errors
+    range_3600: 1 hour
+    range_21600: 6 hours
+    range_86400: 24 hours
+    range_604800: 7 days
+    range_2592000: 30 days
+    range_custom: Custom
+    start_time: Start time
+    end_time: End time
+    apply_range: Apply range
+    custom_invalid: Choose a valid time range ending no later than now and spanning at most 31 days.
+    chart_time: Chart time
   adaptation:
     member_role: "Member role"
     member_role_device: "Device (dedicated credential)"

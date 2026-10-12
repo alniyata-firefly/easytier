@@ -4,6 +4,7 @@ mod build_capabilities;
 mod config;
 #[cfg(feature = "proxy-smoltcp-stack")]
 mod data_plane_extension;
+pub mod host_resources;
 mod lifecycle;
 mod management;
 #[cfg(feature = "web-client")]
@@ -245,6 +246,16 @@ pub trait InstanceRuntimeHost: std::any::Any + Send + Sync + 'static {
     /// journal.
     fn management_events(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Machine resources are optional, and remain outside the portable Core.
+    fn host_resources_supported(&self) -> bool {
+        false
+    }
+
+    /// Hosts should share cached observations across all network instances.
+    async fn host_resources(&self) -> Option<host_resources::HostResourcesSnapshot> {
+        None
     }
 
     /// Applies Host-side cached views of fields already committed to the

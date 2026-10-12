@@ -8,13 +8,13 @@ use easytier_proto::{
             GenerateCredentialRequest, GenerateCredentialResponse, GetAclStatsRequest,
             GetAclStatsResponse, GetPrometheusStatsRequest, GetPrometheusStatsResponse,
             GetStatsRequest, GetStatsResponse, GetVpnPortalInfoRequest, GetVpnPortalInfoResponse,
-            GetWhitelistRequest, GetWhitelistResponse, ListCredentialsRequest,
-            ListCredentialsResponse, ListMappedListenerRequest, ListMappedListenerResponse,
-            ListPortForwardRequest, ListPortForwardResponse, MappedListener,
-            MappedListenerManageRpc, MetricSnapshot, PeerManageRpc, PortForwardManageRpc,
-            RevokeCredentialRequest, RevokeCredentialResponse, StatsRpc, UpsertCredentialRequest,
-            UpsertCredentialResponse, VpnPortalClientInfo, VpnPortalClientState, VpnPortalInfo,
-            VpnPortalRpc,
+            GetWhitelistRequest, GetWhitelistResponse, HostDiskResources, HostResources,
+            ListCredentialsRequest, ListCredentialsResponse, ListMappedListenerRequest,
+            ListMappedListenerResponse, ListPortForwardRequest, ListPortForwardResponse,
+            MappedListener, MappedListenerManageRpc, MetricSnapshot, PeerManageRpc,
+            PortForwardManageRpc, RevokeCredentialRequest, RevokeCredentialResponse, StatsRpc,
+            UpsertCredentialRequest, UpsertCredentialResponse, VpnPortalClientInfo,
+            VpnPortalClientState, VpnPortalInfo, VpnPortalRpc,
         },
     },
     common::PortForwardConfigPb,
@@ -279,9 +279,32 @@ where
         _: BaseController,
         request: GetStatsRequest,
     ) -> rpc_types::error::Result<GetStatsResponse> {
+        let instance = self.instance(request.instance.as_ref())?;
+        let host_resources = instance
+            .host_resources()
+            .await
+            .map(|snapshot| HostResources {
+                sampled_at_unix_ms: snapshot.sampled_at_unix_ms,
+                cpu_usage_percent: snapshot.cpu_usage_percent,
+                memory_total_bytes: snapshot.memory_total_bytes,
+                memory_available_bytes: snapshot.memory_available_bytes,
+                process_rss_bytes: snapshot.process_rss_bytes,
+                disks: snapshot
+                    .disks
+                    .into_iter()
+                    .map(|disk| HostDiskResources {
+                        mount_point: disk.mount_point,
+                        total_bytes: disk.total_bytes,
+                        available_bytes: disk.available_bytes,
+                    })
+                    .collect(),
+                disks_sampled_at_unix_ms: snapshot.disks_sampled_at_unix_ms,
+                collection_errors: snapshot.collection_errors,
+            });
         Ok(GetStatsResponse {
-            metrics: self
-                .instance(request.instance.as_ref())?
+            host_resources,
+            host_resources_supported: Some(instance.host_resources_supported()),
+            metrics: instance
                 .metric_snapshots()
                 .into_iter()
                 .map(|snapshot| MetricSnapshot {
@@ -303,11 +326,15 @@ where
         _: BaseController,
         request: GetPrometheusStatsRequest,
     ) -> rpc_types::error::Result<GetPrometheusStatsResponse> {
-        Ok(GetPrometheusStatsResponse {
-            prometheus_text: self
-                .instance(request.instance.as_ref())?
-                .prometheus_metrics(),
-        })
+        let instance = self.instance(request.instance.as_ref())?;
+        let resources = instance.host_resources().await;
+        let mut prometheus_text = instance.prometheus_metrics();
+        crate::instance::host_resources::append_host_resource_metrics(
+            &mut prometheus_text,
+            instance.host_resources_supported(),
+            resources.as_ref(),
+        );
+        Ok(GetPrometheusStatsResponse { prometheus_text })
     }
 }
 

@@ -349,6 +349,54 @@ event:
   UdpBroadcastRelayStartResult: UDP广播中继启动结果
 
 web:
+  observability:
+    host_resources: 主机资源
+    cpu: CPU 使用率
+    memory_used: 内存已用
+    core_rss: Core 常驻内存
+    total: 总计
+    disks: 磁盘使用
+    resources_old_core: 此 Core 尚未支持主机资源上报。
+    resources_unsupported: 此设备平台暂不支持主机资源采集。
+    resources_unavailable: 主机资源暂时不可用。
+    resources_stale: 主机资源采样已过期。
+    disks_stale: 磁盘采样已过期。
+    collection_failed: '采集失败：{components}'
+    component_cpu: CPU
+    component_memory: 内存
+    component_process_rss: Core 常驻内存
+    component_disks: 磁盘
+    history: 历史指标
+    refresh_history: 刷新历史指标
+    history_metric: 指标类型
+    history_range: 时间范围
+    history_disabled: 尚未配置历史指标存储。实时指标仍可查看。
+    history_unavailable: 历史指标暂时不可用
+    history_request_failed: 查询失败，请稍后重试。
+    history_empty: 此设备在所选时间范围内没有可用采样。
+    history_group_traffic: VPN 流量
+    history_group_cpu: CPU 使用率
+    history_group_memory: 内存使用
+    history_group_disks: 磁盘使用
+    history_group_rpc: RPC 错误
+    metric_traffic_rx_rate: 接收
+    metric_traffic_tx_rate: 发送
+    metric_host_cpu_percent: CPU
+    metric_host_memory_used_bytes: 主机内存
+    metric_host_process_rss_bytes: Core 常驻内存
+    metric_host_disk_used_bytes: 磁盘已用
+    metric_rpc_error_rate: 错误
+    range_3600: 1 小时
+    range_21600: 6 小时
+    range_86400: 24 小时
+    range_604800: 7 天
+    range_2592000: 30 天
+    range_custom: 自定义
+    start_time: 开始时间
+    end_time: 结束时间
+    apply_range: 查询
+    custom_invalid: 请选择有效的起止时间，结束时间不能晚于当前时间，单次查询最多 31 天。
+    chart_time: 图表时间
   adaptation:
     member_role: "成员角色"
     member_role_device: "普通设备（独立凭据）"

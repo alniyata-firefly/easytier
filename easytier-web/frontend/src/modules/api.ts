@@ -1,5 +1,5 @@
 import axios, { AxiosError, AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
-import { type Api, NetworkTypes, Utils, RuntimeDisplay } from 'easytier-frontend-lib';
+import { type Api, NetworkTypes, Utils, RuntimeDisplay, ObservabilityDisplay } from 'easytier-frontend-lib';
 import { Md5 } from 'ts-md5';
 
 export interface ValidateConfigResponse {
@@ -159,6 +159,9 @@ export interface NodeAclRuleStat {
 }
 
 export interface MetricSnapshot { name: string; value?: number | string; labels?: Record<string, string>; }
+export interface NodeStatsSnapshot { metrics: MetricSnapshot[]; host_resources?: ObservabilityDisplay.HostResources; host_resources_supported?: boolean; }
+export interface ObservabilityCapabilities { history_available: boolean; collector_enabled: boolean; min_step_seconds: number; max_range_seconds: number; max_points_per_series: number; metrics: Array<{ id: string; unit: string }>; }
+export interface MetricHistory { available: boolean; metric: string; unit: string; start: number; end: number; step: number; series: ObservabilityDisplay.HistorySeries[]; }
 
 export interface InterfaceNetwork { name: string; address: { ipv4?: NetworkTypes.Ipv4Addr; ipv6?: NetworkTypes.Ipv6Addr }; prefix_length?: number; }
 
@@ -586,11 +589,23 @@ export class ApiClient {
         return response.node_info;
     }
     public async get_node_stats(machine_id: string, inst_id: string): Promise<MetricSnapshot[]> {
-        const response = await this.client.post<any, { metrics?: MetricSnapshot[] }>(`/machines/${machine_id}/proxy-rpc`, {
+        return (await this.get_node_stats_snapshot(machine_id, inst_id)).metrics;
+    }
+    public async get_node_stats_snapshot(machine_id: string, inst_id: string): Promise<NodeStatsSnapshot> {
+        const response = await this.client.post<any, Partial<NodeStatsSnapshot>>(`/machines/${machine_id}/proxy-rpc`, {
             service_name: 'api.instance.StatsRpcService', method_name: 'get_stats',
             payload: { instance: { id: Utils.StrToUuid(inst_id) } },
         });
-        return RuntimeDisplay.normalizeMetrics(response.metrics);
+        return { metrics: RuntimeDisplay.normalizeMetrics(response.metrics),
+            host_resources: ObservabilityDisplay.normalizeHostResources(response.host_resources),
+            host_resources_supported: response.host_resources_supported };
+    }
+    public async get_observability_capabilities(): Promise<ObservabilityCapabilities> {
+        return this.client.get<any, ObservabilityCapabilities>('/observability/capabilities', { timeout: 10000 });
+    }
+    public async get_node_metrics_history(machine_id: string, inst_id: string, metric: string, start: number, end: number, step: number): Promise<MetricHistory> {
+        const response = await this.client.get<any, MetricHistory>(`/machines/${encodeURIComponent(machine_id)}/networks/${encodeURIComponent(inst_id)}/metrics/history`, { params: { metric, start, end, step }, timeout: 20000 });
+        return { ...response, series: (response.series ?? []).map(series => ({ labels: series.labels ?? {}, values: ObservabilityDisplay.historyPoints(series.values, response.step) })) };
     }
     public async get_node_prometheus_stats(machine_id: string, inst_id: string): Promise<string> {
         const response = await this.client.post<any, { prometheus_text?: string }>(`/machines/${machine_id}/proxy-rpc`, {

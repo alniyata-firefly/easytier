@@ -340,7 +340,32 @@ message MetricSnapshot {
 
 message GetStatsRequest { InstanceIdentifier instance = 1; }
 
-message GetStatsResponse { repeated MetricSnapshot metrics = 1; }
+// Machine-wide resources, shared by every network in one Core process.
+// Missing optional values are unknown/unavailable, never an implicit zero.
+message HostDiskResources {
+  string mount_point = 1;
+  uint64 total_bytes = 2;
+  uint64 available_bytes = 3;
+}
+
+message HostResources {
+  uint64 sampled_at_unix_ms = 1;
+  optional double cpu_usage_percent = 2;
+  optional uint64 memory_total_bytes = 3;
+  optional uint64 memory_available_bytes = 4;
+  optional uint64 process_rss_bytes = 5;
+  repeated HostDiskResources disks = 6;
+  optional uint64 disks_sampled_at_unix_ms = 7;
+  // Fixed component identifiers only: cpu, memory, process_rss, disks.
+  repeated string collection_errors = 8;
+}
+
+message GetStatsResponse {
+  repeated MetricSnapshot metrics = 1;
+  HostResources host_resources = 2;
+  // Absent on older Core versions, false when the embedding Host has no sampler.
+  optional bool host_resources_supported = 3;
+}
 
 message GetPrometheusStatsRequest { InstanceIdentifier instance = 1; }
 

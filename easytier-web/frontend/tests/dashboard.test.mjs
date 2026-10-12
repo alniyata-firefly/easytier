@@ -43,7 +43,7 @@ function fixture() {
         online_member_count: 1, member_count: 2, network_secret: 'test-secret', peer_urls: i === 0 ? [] : ['tcp://192.0.2.1:11010'],
     }));
     const members = [{ member_id: id(101), device_id: id(1), hostname: 'Amsterdam gateway', hostname_override: null, virtual_ipv4: '10.126.126.1', online: true, running: true, version: '2.4.5', error_msg: null, runtime_virtual_ipv4: '10.126.126.1' }];
-    return { machines, networks, members, memberConfig: {}, aclPolicy: { default_action: 'allow', rules: [] }, credentials: [], temporaryPeers: [], nodeRoutes: [], nodePeers: [], nodeAclStats: [], loggerConfig: { level: 'INFO' }, writes: [], requests: [], failures: new Set(), gatewayDelay: 0, gatewayEnabled: true, tokens: [], nodeInfo: { peer_id: 1, ip_list: {} }, nodeStats: [] };
+    return { machines, networks, members, memberConfig: {}, aclPolicy: { default_action: 'allow', rules: [] }, credentials: [], temporaryPeers: [], nodeRoutes: [], nodePeers: [], nodeAclStats: [], loggerConfig: { level: 'INFO' }, writes: [], requests: [], failures: new Set(), gatewayDelay: 0, gatewayEnabled: true, tokens: [], nodeInfo: { peer_id: 1, ip_list: {} }, nodeStats: [], historyEnabled: false, historyQueries: [] };
 }
 
 async function open(t, route = '/h', options = {}, configure = () => {}) {
@@ -85,6 +85,17 @@ async function open(t, route = '/h', options = {}, configure = () => {}) {
         if (path === '/summary') result = { device_count: state.machines.length };
         else if (path === '/console-info') result = { username: 'test-user', config_server_protocol: 'udp', config_server_port: 22020, webhook_auth: state.externalConsole ?? false, advertised_config_server_url: state.advertisedEntry, registration_enabled: state.registrationEnabled ?? true };
         else if (path === '/auth/config') result = { registration_enabled: state.registrationEnabled ?? true };
+        else if (path === '/observability/capabilities') result = { history_available: state.historyEnabled, collector_enabled: state.historyEnabled, min_step_seconds: 15, max_range_seconds: 2678400, max_points_per_series: 2000, metrics: [
+            { id: 'traffic_rx_rate', unit: 'bytes_per_second' }, { id: 'traffic_tx_rate', unit: 'bytes_per_second' }, { id: 'host_cpu_percent', unit: 'percent' }, { id: 'host_memory_used_bytes', unit: 'bytes' }, { id: 'host_process_rss_bytes', unit: 'bytes' }, { id: 'host_disk_used_bytes', unit: 'bytes' }, { id: 'rpc_error_rate', unit: 'errors_per_second' },
+        ] };
+        else if (path.endsWith('/metrics/history')) {
+            const params = new URL(request.url()).searchParams;
+            const query = { machine: path.split('/')[2], instance: path.split('/')[4], metric: params.get('metric'), start: Number(params.get('start')), end: Number(params.get('end')), step: Number(params.get('step')) };
+            state.historyQueries.push(query);
+            if (state.historyDelayByMachine?.[query.machine]) await delay(state.historyDelayByMachine[query.machine]);
+            const series = state.historySeries?.(query) ?? [];
+            result = { available: true, ...query, unit: query.metric === 'host_cpu_percent' ? 'percent' : query.metric.startsWith('traffic_') ? 'bytes_per_second' : query.metric === 'rpc_error_rate' ? 'errors_per_second' : 'bytes', series };
+        }
         else if (path === '/device-access-tokens') {
             if (method === 'POST') {
                 const info = { id: `token-${state.tokens.length}`, label: payload.label, machine_id: payload.machine_id || null, created_at: new Date().toISOString(), revoked_at: null };
@@ -139,7 +150,7 @@ async function open(t, route = '/h', options = {}, configure = () => {}) {
             else if (payload.method_name === 'get_logger_config') result = state.loggerConfig;
             else if (payload.method_name === 'set_logger_config') state.loggerConfig = { level: ['DISABLED', 'ERROR', 'WARNING', 'INFO', 'DEBUG', 'TRACE'][payload.payload.level] };
             else if (payload.method_name === 'show_node_info') result = { node_info: { config: '[instance]\nname = "Engineering"', ...(state.nodeInfoByMachine?.[path.split('/')[2]] ?? state.nodeInfo) } };
-            else if (payload.method_name === 'get_stats') result = { metrics: state.nodeStats };
+            else if (payload.method_name === 'get_stats') result = { metrics: state.nodeStats, host_resources: state.hostResourcesByMachine?.[machineId] ?? state.hostResources, host_resources_supported: state.hostResourcesSupported };
             else if (payload.method_name === 'get_prometheus_stats') result = { prometheus_text: 'easytier_fixture 1\n' };
         } else if (/\/machines\/[^/]+\/networks$/.test(path)) result = { running_inst_ids: [uuid(100)], disabled_inst_ids: [] };
         else if (path.endsWith('/networks/metas')) result = { metas: { [id(100)]: { network_name: 'Engineering', config_permission: 7 } } };
@@ -725,6 +736,105 @@ test('node metrics show real uint64 values and WireGuard scope labels; unsupport
     state.failStats = true;
     await drawer.getByText('Core statistics are unavailable:', { exact: false }).waitFor();
     assert.equal(await drawer.getByRole('button', { name: 'Export Prometheus' }).isDisabled(), true);
+});
+
+test('host resources show reported CPU, exact memory and each disk; unknown fields and old cores are explicit', async t => {
+    const { page, state } = await open(t, `/h/networks/${id(100)}`, {}, state => {
+        state.networks[0].network_id = id(100);
+        state.hostResourcesSupported = true;
+        state.hostResources = { sampled_at_unix_ms: String(Date.now()), cpu_usage_percent: 0, memory_total_bytes: '8589934592', memory_available_bytes: '2147483648', process_rss_bytes: '536870912', disks_sampled_at_unix_ms: String(Date.now()), disks: [
+            { mount_point: '/', total_bytes: '274877906944', available_bytes: '206158430208' },
+            { mount_point: '/data', total_bytes: '2199023255552', available_bytes: '1099511627776' },
+        ] };
+    });
+    await page.getByRole('button', { name: 'Node Detail', exact: true }).click();
+    const drawer = page.locator('.console-node-drawer');
+    await drawer.getByRole('tab', { name: 'Runtime metrics', exact: true }).click();
+    await drawer.getByTestId('host-cpu').getByText('0.0%', { exact: true }).waitFor();
+    await drawer.getByTestId('host-memory').getByText('6 GiB', { exact: true }).waitFor();
+    await drawer.getByTestId('host-rss').getByText('512 MiB', { exact: true }).waitFor();
+    assert.equal(await drawer.getByTestId('host-cpu').evaluate(element => getComputedStyle(element).borderTopStyle), 'solid', 'teleported resource cards retain their themed border');
+    await drawer.getByTestId('host-disks').getByText('64 GiB / 256 GiB', { exact: true }).waitFor();
+    await drawer.getByTestId('host-disks').getByText('1 TiB / 2 TiB', { exact: true }).waitFor();
+    await drawer.getByText('Historical metrics storage is not configured. Live metrics remain available.', { exact: true }).waitFor();
+    assert.equal(state.historyQueries.length, 0);
+    if (screenshotDir) await drawer.screenshot({ path: `${screenshotDir}/host-resources.png`, animations: 'disabled' });
+    state.hostResources.cpu_usage_percent = undefined;
+    state.hostResources.memory_available_bytes = undefined;
+    state.hostResources.collection_errors = ['cpu'];
+    await drawer.getByTestId('host-cpu').getByText('—', { exact: true }).waitFor();
+    await drawer.getByTestId('host-memory').getByText('—', { exact: true }).waitFor();
+    await drawer.getByText('Collection failed: CPU', { exact: true }).waitFor();
+    state.hostResources = undefined; state.hostResourcesSupported = undefined;
+    await drawer.getByText('This Core does not support host resource reporting yet.', { exact: true }).waitFor();
+    state.hostResourcesSupported = false;
+    await drawer.getByText('Host resource collection is unavailable on this platform.', { exact: true }).waitFor();
+});
+
+test('historical metrics use scoped queries, preserve gaps, and support bounded older date ranges', async t => {
+    const { page, state } = await open(t, `/h/networks/${id(100)}`, {}, state => {
+        state.networks[0].network_id = id(100); state.historyEnabled = true;
+        state.historySeries = query => [{ labels: {}, values: [[query.end - query.step * 2, query.metric === 'host_cpu_percent' ? 5 : 1024], [query.end - query.step, null], [query.end, query.metric === 'host_cpu_percent' ? 12.5 : 2048]] }];
+    });
+    await page.getByRole('button', { name: 'Node Detail', exact: true }).click();
+    const drawer = page.locator('.console-node-drawer');
+    assert.equal(state.historyQueries.length, 0, 'history is not queried while its tab is hidden');
+    await drawer.getByRole('tab', { name: 'Runtime metrics', exact: true }).click();
+    const history = drawer.getByTestId('metrics-history');
+    await history.getByRole('img', { name: 'VPN traffic', exact: true }).waitFor();
+    assert.equal(await history.getByTestId('history-chart').evaluate(element => getComputedStyle(element).borderTopStyle), 'solid', 'teleported history charts retain their themed border');
+    assert.equal(state.historyQueries.length, 2);
+    assert.ok(state.historyQueries.every(query => query.machine === id(1) && query.instance === id(100) && query.end - query.start === 3600 && query.step >= 15));
+    const paths = await history.getByTestId('history-chart').locator('svg path').evaluateAll(elements => elements.map(element => element.getAttribute('d')));
+    assert.equal(paths.length, 2);
+    assert.ok(paths.every(path => (path.match(/M/g) ?? []).length === 2), 'missing samples break rather than bridge the lines');
+    await history.getByRole('button', { name: '30 days', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="metrics-history"]')?.getAttribute('aria-busy') === 'false');
+    assert.ok(state.historyQueries.some(query => query.end - query.start === 2592000 && Math.floor(2592000 / query.step) + 1 <= 2000));
+    await history.getByRole('combobox', { name: 'Metric type', exact: true }).click();
+    await page.getByRole('option', { name: 'CPU usage', exact: true }).click();
+    await history.getByRole('img', { name: 'CPU usage', exact: true }).waitFor();
+    await history.getByText('12.5%', { exact: true }).waitFor();
+    await history.getByRole('button', { name: 'Custom', exact: true }).click();
+    await history.getByLabel('Start time', { exact: true }).fill('2026-08-01T12:00');
+    await history.getByLabel('End time', { exact: true }).fill('2026-08-02T12:00');
+    await history.getByRole('button', { name: 'Apply range', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="metrics-history"]')?.getAttribute('aria-busy') === 'false');
+    const customQuery = state.historyQueries.at(-1);
+    assert.equal(customQuery.end - customQuery.start, 86400);
+    assert.equal(customQuery.start, await page.evaluate(() => Math.floor(new Date('2026-08-01T12:00').getTime() / 1000)));
+    const count = state.historyQueries.length;
+    await history.getByLabel('End time', { exact: true }).fill('2026-09-02T12:00');
+    await history.getByRole('button', { name: 'Apply range', exact: true }).click();
+    await history.getByText('Choose a valid time range ending no later than now and spanning at most 31 days.', { exact: true }).waitFor();
+    assert.equal(state.historyQueries.length, count, 'invalid range is not sent');
+    if (screenshotDir) await drawer.screenshot({ path: `${screenshotDir}/historical-metrics.png`, animations: 'disabled' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+});
+
+test('switching nodes cannot apply stale host resources or historical samples to the selected device', async t => {
+    const { page, state } = await open(t, `/h/networks/${id(100)}`, {}, state => {
+        state.networks[0].network_id = id(100); state.historyEnabled = true;
+        state.members.push({ ...state.members[0], device_id: id(2), member_id: id(102), hostname: 'Build server' });
+        state.hostResourcesByMachine = { [id(1)]: { sampled_at_unix_ms: String(Date.now()), cpu_usage_percent: 99 }, [id(2)]: { sampled_at_unix_ms: String(Date.now()), cpu_usage_percent: 11 } };
+        state.historyDelayByMachine = { [id(1)]: 1200 };
+        state.historySeries = query => [{ labels: {}, values: [[query.end, query.machine === id(1) ? 999999 : 1111]] }];
+    });
+    await page.getByRole('row').filter({ hasText: 'Amsterdam gateway' }).getByRole('button', { name: 'Node Detail', exact: true }).click();
+    await page.locator('.console-node-drawer').getByRole('tab', { name: 'Runtime metrics', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="metrics-history"]')?.getAttribute('aria-busy') === 'true');
+    state.rpcDelayByMachine = { [id(1)]: 1200 };
+    await page.keyboard.press('Escape');
+    await page.locator('.console-node-drawer').waitFor({ state: 'hidden' });
+    await page.getByRole('row').filter({ hasText: 'Build server' }).getByRole('button', { name: 'Node Detail', exact: true }).click();
+    const drawer = page.locator('.console-node-drawer');
+    await drawer.getByRole('tab', { name: 'Runtime metrics', exact: true }).click();
+    await drawer.getByTestId('host-cpu').getByText('11.0%', { exact: true }).waitFor();
+    await drawer.getByTestId('history-chart').getByText('1.08 KiB/s', { exact: true }).first().waitFor();
+    await delay(1400);
+    assert.equal(await drawer.getByTestId('host-cpu').getByText('99.0%', { exact: true }).count(), 0);
+    assert.equal(await drawer.getByTestId('history-chart').getByText('976.56 KiB/s', { exact: true }).count(), 0);
 });
 
 test('LAN candidates retain true masks, filter public interfaces, and never guess an old core mask', async t => {

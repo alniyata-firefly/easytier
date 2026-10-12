@@ -16,7 +16,6 @@ use easytier::{
         constants::EASYTIER_VERSION,
         error::Error,
         log,
-        network::{local_ipv4, local_ipv6},
     },
     proto::rpc::standalone::{runtime_rpc_listener, runtime_udp_tunnel_listener},
     utils::panic::setup_panic_handler,
@@ -185,6 +184,9 @@ struct Cli {
 
     #[command(flatten)]
     webhook: WebhookOptions,
+
+    #[command(flatten)]
+    metrics: restful::observability::MetricsOptions,
 }
 
 #[derive(Debug, Clone, Default, clap::Args)]
@@ -282,23 +284,21 @@ async fn get_dual_stack_listener(
     let scheme = protocol
         .parse()
         .map_err(|_| Error::InvalidUrl(protocol.to_string()))?;
-    let v6_listener =
-        if local_ipv6().await.is_ok() && matches!(scheme, IpScheme::Tcp | IpScheme::Udp) {
-            get_listener_by_url(
-                scheme,
-                &format!("{protocol}://[::]:{port}").parse().unwrap(),
-            )
-        } else {
-            None
-        };
-    let v4_listener = if local_ipv4().await.is_ok() {
+    // Wildcard binding does not require an Internet route (or even a
+    // configured global address). Let the actual bind report support for
+    // each address family instead of probing an external destination.
+    let v6_listener = if matches!(scheme, IpScheme::Tcp | IpScheme::Udp) {
         get_listener_by_url(
             scheme,
-            &format!("{protocol}://0.0.0.0:{port}").parse().unwrap(),
+            &format!("{protocol}://[::]:{port}").parse().unwrap(),
         )
     } else {
         None
     };
+    let v4_listener = get_listener_by_url(
+        scheme,
+        &format!("{protocol}://0.0.0.0:{port}").parse().unwrap(),
+    );
     Ok((v6_listener, v4_listener))
 }
 
@@ -325,6 +325,11 @@ async fn main() {
 
     let cli = Cli::parse();
     log::init_with_default_console_targets(&cli, false, &["CORE", "easytier_web"]).unwrap();
+    let metrics = restful::observability::Observability::from_options(cli.metrics.clone())
+        .unwrap_or_else(|error| {
+            eprintln!("Invalid metrics configuration: {error}");
+            std::process::exit(2);
+        });
     tracing::info!(
         version = EASYTIER_VERSION,
         web_instance_id = ?cli.webhook.web_instance_id,
@@ -422,20 +427,27 @@ async fn main() {
         get_dual_stack_listener(&cli.config_server_protocol, cli.config_server_port)
             .await
             .unwrap();
-    if v4_listener.is_none() && v6_listener.is_none() {
-        panic!("Listen to both IPv4 and IPv6 failed");
-    }
     for listener in [v6_listener, v4_listener].into_iter().flatten() {
-        if let Some(instances) = network_instances.as_ref() {
+        // add_listener owns listen(). A family that is unavailable must not
+        // prevent the other family from serving LAN-only clients.
+        let result = if let Some(instances) = network_instances.as_ref() {
             mgr.add_listener(gateway::listener::GatewayListener::new(
                 listener,
                 instances.clone(),
             ))
             .await
-            .unwrap();
         } else {
-            mgr.add_listener(listener).await.unwrap();
+            mgr.add_listener(listener).await
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, "configuration listener address family unavailable");
         }
+    }
+    if !mgr.is_running() {
+        eprintln!(
+            "Cannot bind a configuration-server listener; check protocol, port and address-family support"
+        );
+        std::process::exit(2);
     }
 
     let mgr = Arc::new(mgr);
@@ -492,6 +504,7 @@ async fn main() {
         cli.config_server_protocol.clone(),
         cli.config_server_port,
         cli.advertised_config_server_url,
+        Arc::new(metrics),
     )
     .await
     .unwrap()
@@ -522,6 +535,18 @@ async fn main() {
 #[cfg(test)]
 mod entry_url_tests {
     use super::parse_advertised_config_server_url;
+
+    #[tokio::test]
+    async fn listener_candidates_do_not_require_external_routes() {
+        for protocol in ["tcp", "udp"] {
+            let (v6, v4) = super::get_dual_stack_listener(protocol, 0).await.unwrap();
+            assert!(v6.is_some());
+            assert!(v4.is_some());
+        }
+        let (v6, v4) = super::get_dual_stack_listener("ws", 0).await.unwrap();
+        assert!(v6.is_none());
+        assert!(v4.is_some());
+    }
 
     #[test]
     fn advertised_entry_keeps_ipv6_and_websocket_path_prefix() {

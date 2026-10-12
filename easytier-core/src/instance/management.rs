@@ -89,6 +89,14 @@ where
         self.instance_runtime.management_events()
     }
 
+    pub fn host_resources_supported(&self) -> bool {
+        self.instance_runtime.host_resources_supported()
+    }
+
+    pub async fn host_resources(&self) -> Option<super::host_resources::HostResourcesSnapshot> {
+        self.instance_runtime.host_resources().await
+    }
+
     pub fn global_peer_map_snapshot(&self) -> crate::proto::peer_rpc::GetGlobalPeerMapResponse {
         self.peer_center.global_peer_map_snapshot()
     }

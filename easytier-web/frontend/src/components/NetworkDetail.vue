@@ -6,8 +6,10 @@ import { useRoute, useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { Config, NetworkTypes, UrlListInput, Utils } from 'easytier-frontend-lib';
 import NetworkTopology from './NetworkTopology.vue';
+import HostResourcesPanel from './HostResourcesPanel.vue';
+import NodeMetricsHistory from './NodeMetricsHistory.vue';
 import { useVisiblePolling } from '../modules/polling';
-import { RuntimeDisplay } from 'easytier-frontend-lib';
+import { RuntimeDisplay, ObservabilityDisplay } from 'easytier-frontend-lib';
 import AclPolicyTab from './AclPolicyTab.vue';
 import ApiClient, { type CentralNetworkDetail, type CentralNetworkMember, type NetworkCredential, type NodeAclRuleStat, type NodePeerInfo, type NodeRouteInfo, type TemporaryPeer, type MetricSnapshot, type NodeRuntimeInfo, type DeploymentStatus } from '../modules/api';
 
@@ -546,6 +548,9 @@ let nodeDetailRequest = 0;
 let nodeSelectionGeneration = 0;
 const nodeInfo = ref<NodeRuntimeInfo>();
 const nodeStats = ref<MetricSnapshot[]>();
+const nodeHostResources = ref<ObservabilityDisplay.HostResources>();
+const nodeHostResourcesSupported = ref<boolean>();
+const nodeDetailTab = ref('overview');
 const nodeStatsError = ref('');
 const nodeStatsTime = ref('');
 const nodeStatRates = ref(new Map<string, number | undefined>());
@@ -581,14 +586,16 @@ const loadNodeDetail = async () => {
     const results = await Promise.allSettled([
         api?.get_node_routes(machineId, instId), api?.get_node_peers(machineId, instId),
         api?.get_node_acl_stats(machineId, instId), api?.get_node_info(machineId, instId),
-        api?.get_node_stats(machineId, instId),
+        api?.get_node_stats_snapshot(machineId, instId),
     ]);
     if (request !== nodeDetailRequest || machineId !== nodeDetailDeviceId.value || instId !== networkId.value || !nodeDetailVisible.value) return;
     nodeRoutes.value = results[0].status === 'fulfilled' ? results[0].value ?? [] : undefined;
     nodePeers.value = results[1].status === 'fulfilled' ? results[1].value ?? [] : undefined;
     nodeAclStats.value = results[2].status === 'fulfilled' ? results[2].value ?? [] : undefined;
     nodeInfo.value = results[3].status === 'fulfilled' ? results[3].value : undefined;
-    nodeStats.value = results[4].status === 'fulfilled' ? results[4].value ?? [] : undefined;
+    nodeStats.value = results[4].status === 'fulfilled' ? results[4].value?.metrics ?? [] : undefined;
+    nodeHostResources.value = results[4].status === 'fulfilled' ? results[4].value?.host_resources : undefined;
+    nodeHostResourcesSupported.value = results[4].status === 'fulfilled' ? results[4].value?.host_resources_supported : undefined;
     nodeStatsError.value = results[4].status === 'rejected' ? String(results[4].reason?.response?.data?.message ?? results[4].reason) : '';
     if (nodeStats.value) {
         const now = performance.now(), next = new Map<string, number | undefined>();
@@ -610,6 +617,7 @@ const openNodeDetail = (member: CentralNetworkMember) => {
     nodeSelectionGeneration++; nodeDetailRequest++; nodeDetailDeviceId.value = member.device_id;
     nodeRoutes.value = undefined; nodePeers.value = undefined; nodeAclStats.value = undefined;
     nodeInfo.value = undefined; nodeStats.value = undefined; nodeStatsTime.value = ''; nodeStatsError.value = '';
+    nodeHostResources.value = undefined; nodeHostResourcesSupported.value = undefined; nodeDetailTab.value = 'overview';
     statRateSamples.clear(); nodeStatRates.value.clear();
     nodeDetailVisible.value = true; nodeLoggerLevel.value = undefined;
     void loadNodeDetail(); void loadNodeGeneral();
@@ -1544,7 +1552,7 @@ const switchTab = async (tab: string) => {
                     <span class="node-drawer-metric-label">{{ t('web.network_detail.node_conns') }}</span>
                 </div>
             </section>
-            <Tabs value="overview" class="node-drawer-tabs">
+            <Tabs v-model:value="nodeDetailTab" class="node-drawer-tabs">
                 <TabList>
                     <Tab value="overview">{{ t('web.network_detail.node_overview') }}</Tab>
                     <Tab value="metrics">{{ t('web.adaptation.metrics') }}</Tab>
@@ -1662,6 +1670,8 @@ const switchTab = async (tab: string) => {
                         </details>
                     </TabPanel>
                     <TabPanel value="metrics" class="node-drawer-panel">
+                        <HostResourcesPanel :resources="nodeHostResources" :supported="nodeHostResourcesSupported" :loading="nodeStats === undefined && !nodeStatsError" :error="nodeStatsError" />
+                        <NodeMetricsHistory v-if="nodeDetailDeviceId" :api="api" :machine-id="nodeDetailDeviceId" :instance-id="networkId" :active="nodeDetailVisible && nodeDetailTab === 'metrics'" />
                         <div class="flex justify-between items-center mb-3"><span class="text-xs muted">{{ nodeStatsTime || '—' }}</span>
                             <Button :label="t('web.adaptation.export_prometheus')" icon="pi pi-download" severity="secondary" outlined :disabled="!!nodeStatsError || !nodeStats" @click="downloadMetrics" /></div>
                         <Message v-if="nodeStatsError" severity="warn" :closable="false">{{ t('web.adaptation.stats_unavailable') }}: {{ nodeStatsError }}</Message>

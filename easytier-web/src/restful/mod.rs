@@ -3,6 +3,7 @@ pub(crate) mod captcha;
 mod central_network;
 mod device_access_tokens;
 mod network;
+pub(crate) mod observability;
 pub(crate) mod oidc;
 mod rpc;
 mod users;
@@ -52,6 +53,7 @@ pub struct RestfulServer {
     config_server_protocol: String,
     config_server_port: u16,
     advertised_config_server_url: Option<String>,
+    observability: Arc<observability::Observability>,
     db: Db,
     oidc_config: oidc::OidcConfig,
     web_router: Option<Router>,
@@ -171,6 +173,7 @@ impl RestfulServer {
         config_server_protocol: String,
         config_server_port: u16,
         advertised_config_server_url: Option<String>,
+        observability: Arc<observability::Observability>,
     ) -> anyhow::Result<Self> {
         assert!(client_mgr.is_running());
 
@@ -183,6 +186,7 @@ impl RestfulServer {
             config_server_protocol,
             config_server_port,
             advertised_config_server_url,
+            observability,
             db,
             oidc_config,
             web_router,
@@ -367,6 +371,7 @@ impl RestfulServer {
             .merge(NetworkApi::build_route())
             .merge(rpc::router())
             .merge(device_access_tokens::router())
+            .merge(observability::router())
             .route_layer(login_required!(Backend))
             .merge(auth::router().layer(Extension(self.feature_flags.clone())))
             .merge(oidc::router())
@@ -378,6 +383,7 @@ impl RestfulServer {
             )
             .route("/api/v1/parse-config", post(Self::handle_parse_config))
             .layer(Extension(self.central_service.clone()))
+            .layer(Extension(self.observability.clone()))
             .layer(Extension(self.oidc_config.clone()))
             .layer(Extension(ConsoleInfoConfig {
                 config_server_protocol: self.config_server_protocol.clone(),
@@ -395,6 +401,11 @@ impl RestfulServer {
         if let Some(internal_routes) = internal_app {
             app = app.merge(internal_routes);
         }
+        app = app.merge(observability::collector_router(
+            self.client_mgr.clone(),
+            self.observability.clone(),
+            self.central_service.clone(),
+        ));
 
         #[cfg(feature = "embed")]
         let app = if let Some(web_router) = self.web_router.take() {

@@ -29,6 +29,23 @@ impl InstanceRuntimeHost for NativeInstanceRuntimeHost {
         self.management_events_snapshot()
     }
 
+    fn host_resources_supported(&self) -> bool {
+        cfg!(all(target_os = "linux", not(mobile)))
+    }
+
+    async fn host_resources(
+        &self,
+    ) -> Option<easytier_core::instance::host_resources::HostResourcesSnapshot> {
+        #[cfg(all(target_os = "linux", not(mobile)))]
+        {
+            super::resources::snapshot().await
+        }
+        #[cfg(not(all(target_os = "linux", not(mobile))))]
+        {
+            None
+        }
+    }
+
     #[cfg(feature = "web-client")]
     fn synchronize_config(
         &self,

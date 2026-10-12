@@ -13,6 +13,8 @@ mod event_journal;
 mod implementation;
 #[cfg(feature = "tun")]
 mod magic_dns;
+#[cfg(all(target_os = "linux", not(mobile)))]
+mod resources;
 #[cfg(feature = "tun")]
 mod tun_common;
 #[cfg(not(feature = "tun"))]

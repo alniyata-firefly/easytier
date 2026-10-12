@@ -17,6 +17,7 @@ import { vTooltip } from 'floating-vue';
 import * as Api from './modules/api';
 import * as Utils from './modules/utils';
 import * as RuntimeDisplay from './modules/runtimeDisplay';
+import * as ObservabilityDisplay from './modules/observabilityDisplay';
 
 export interface FrontendLibOptions {
     /// Skip the built-in PrimeVue theme config so the host app can install
@@ -72,4 +73,4 @@ const EasytierFrontendLib: { install: (app: App, options?: FrontendLibOptions) =
 
 export default EasytierFrontendLib;
 
-export { Config, ConfigEditDialog, RemoteManagement, Status, UrlListInput, I18nUtils, NetworkTypes, Api, Utils, RuntimeDisplay };
+export { Config, ConfigEditDialog, RemoteManagement, Status, UrlListInput, I18nUtils, NetworkTypes, Api, Utils, RuntimeDisplay, ObservabilityDisplay };

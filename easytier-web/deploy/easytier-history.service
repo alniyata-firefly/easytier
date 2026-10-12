@@ -1,0 +1,25 @@
+[Unit]
+Description=EasyTier VictoriaMetrics history
+After=network-online.target easytier-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=easytier
+Group=easytier
+WorkingDirectory=/var/lib/easytier
+ExecStart=/opt/easytier/bin/victoria-metrics-prod -httpListenAddr=127.0.0.1:8428 -storageDataPath=/var/lib/easytier/history -retentionPeriod=180d -memory.allowedBytes=256MiB -promscrape.config=/etc/easytier/promscrape.yml -promscrape.httpSDCheckInterval=30s -loggerLevel=WARN
+Restart=on-failure
+RestartSec=3s
+KillSignal=SIGINT
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/easytier/history
+
+[Install]
+WantedBy=multi-user.target

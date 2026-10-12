@@ -408,7 +408,7 @@ pub fn router() -> Router<super::AppStateInner> {
         )
 }
 
-async fn prometheus_stats_for_session(
+pub(super) async fn prometheus_stats_for_session(
     session: &crate::client_manager::session::Session,
     instance_id: uuid::Uuid,
 ) -> Result<Response, HttpHandleError> {

@@ -39,6 +39,8 @@ GET /api/internal/users/{user-id}/machines/{machine-id}/networks/{instance-id}/m
 
 第一项使用 Web 登录会话及设备归属校验；第二项仅在配置既有 `--internal-auth-token` 后启用，使用 `X-Internal-Auth`，适合受信任的内部采集器。被撤销的设备会话不能继续导出指标。输出为 Prometheus 文本，不在 Web 中另建长期时序数据库。
 
+本适配还提供独立只读采集接口、VictoriaMetrics 历史查询，以及 Linux 主机 CPU/RAM/RSS/磁盘采集。部署采集时使用只读采集令牌；既有 internal token 同时拥有管理权限。配置与页面入口见[资源与历史指标说明](observability.zh-CN.md)。
+
 ## 编译和运行
 
 使用仓库锁定的 Rust 1.95、pnpm 10.12.4，并安装 Protobuf 编译器及开发头文件、CMake 和项目要求的链接器。先构建前端，再构建 embed 后端：

@@ -1,0 +1,26 @@
+[Unit]
+Description=EasyTier Web and VPN Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=easytier
+Group=easytier
+WorkingDirectory=/var/lib/easytier
+EnvironmentFile=/etc/easytier/web.env
+ExecStart=/opt/easytier/bin/easytier-web
+Restart=on-failure
+RestartSec=3s
+KillSignal=SIGINT
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/easytier
+
+[Install]
+WantedBy=multi-user.target
