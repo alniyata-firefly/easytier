@@ -11,20 +11,19 @@ use crate::{
 #[derive(Debug)]
 pub struct DeviceAuth {
     db: Db,
-    allow_auto_create_user: bool,
 }
 
 impl DeviceAuth {
-    pub fn new(db: Db, allow_auto_create_user: bool) -> Self {
-        Self {
-            db,
-            allow_auto_create_user,
-        }
+    pub fn new(db: Db, _allow_auto_create_user: bool) -> Self {
+        Self { db }
     }
 }
 
 #[async_trait::async_trait]
 impl WebhookHandler for DeviceAuth {
+    fn uses_local_device_tokens(&self) -> bool {
+        true
+    }
     async fn validate_token(
         &self,
         request: &ValidateTokenRequest,
@@ -38,46 +37,32 @@ impl WebhookHandler for DeviceAuth {
         let Ok(machine_id) = Uuid::parse_str(&request.machine_id) else {
             return Ok(response);
         };
-        let user_id = match self.db.get_user_id_by_token(&request.token).await? {
-            Some(user_id) => user_id,
-            None if self.allow_auto_create_user => {
-                self.db.auto_create_user(&request.token).await?.id
-            }
-            None => return Ok(response),
-        };
-        let device = (user_id, machine_id);
-        if self
+        let identity = self
             .db
-            .record_blocked_attempt(device, &request.hostname)
-            .await?
-        {
-            return Ok(response);
-        }
-
-        // Validation carries a public IP, not the transport URL. Keep any
-        // historical URL; REST obtains current addresses from live sessions.
-        let client_url = self
-            .db
-            .get_device(device)
-            .await?
-            .map(|device| device.client_url)
-            .unwrap_or_default();
-        self.db
-            .upsert_device_heartbeat(DeviceHeartbeatRecord {
-                user_id,
-                machine_id,
-                hostname: request.hostname.clone(),
-                easytier_version: request.version.clone(),
-                device_os: serde_json::to_string(&DeviceOsInfo {
-                    os_type: request.os_type.clone().unwrap_or_default(),
-                    version: request.os_version.clone().unwrap_or_default(),
-                    distribution: request.os_distribution.clone().unwrap_or_default(),
-                })?,
-                client_url,
-            })
+            .authenticate_device_access_token(
+                &request.token,
+                DeviceHeartbeatRecord {
+                    // Ownership is resolved transactionally from the credential.
+                    user_id: 0,
+                    machine_id,
+                    hostname: request.hostname.clone(),
+                    easytier_version: request.version.clone(),
+                    device_os: serde_json::to_string(&DeviceOsInfo {
+                        os_type: request.os_type.clone().unwrap_or_default(),
+                        version: request.os_version.clone().unwrap_or_default(),
+                        distribution: request.os_distribution.clone().unwrap_or_default(),
+                    })?,
+                    client_url: String::new(),
+                },
+            )
             .await?;
+        let Some(identity) = identity else {
+            return Ok(response);
+        };
+        let device = (identity.user_id, machine_id);
         response.valid = true;
         response.pre_approved = true;
+        response.binding_version = identity.auth_generation;
         response.config_revision = self
             .db
             .get_managed_config_revision(device)
@@ -142,13 +127,18 @@ mod tests {
     async fn web_client_registers_receives_full_config_and_cannot_reconnect_when_blocked() {
         let db = Db::memory_db().await;
         let user_id = db.auto_create_user("local-owner").await.unwrap().id;
+        let token = db
+            .create_device_access_token(user_id, "local-device", None, None)
+            .await
+            .unwrap()
+            .token;
         let machine_id = Uuid::new_v4();
         let instance_id = Uuid::new_v4();
         let core = Arc::new(native_instance_manager());
         let (manager, url) = start_config_server(db.clone()).await;
         let client = WebClient::new(
             runtime_udp_tunnel_dialer(url),
-            "local-owner",
+            &token,
             machine_id,
             "local-device",
             false,
@@ -215,9 +205,14 @@ mod tests {
             .await
             .unwrap();
         let (manager, url) = start_config_server(db.clone()).await;
+        let blocked_token = db
+            .create_device_access_token(user_id, "blocked-reenrollment", None, None)
+            .await
+            .unwrap()
+            .token;
         let _blocked_client = WebClient::new(
             runtime_udp_tunnel_dialer(url),
-            "local-owner",
+            &blocked_token,
             machine_id,
             "blocked-device",
             false,
@@ -269,29 +264,218 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_token_requires_auto_creation_and_a_valid_machine_id() {
+    async fn live_revocation_retires_every_management_session_and_rotation_reconnects() {
         let db = Db::memory_db().await;
-        let mut req = request("new-user", Uuid::new_v4());
-        let auth = DeviceAuth::new(db.clone(), false);
-        assert!(!auth.validate_token(&req).await.unwrap().valid);
-        assert!(db.get_user_id_by_token(&req.token).await.unwrap().is_none());
+        let owner = db.auto_create_user("rotation-owner").await.unwrap().id;
+        let machine_id = Uuid::new_v4();
+        let issued = db
+            .create_device_access_token(owner, "laptop", None, None)
+            .await
+            .unwrap();
+        let (manager, url) = start_config_server(db.clone()).await;
+        let client = WebClient::new(
+            runtime_udp_tunnel_dialer(url.clone()),
+            issued.token.clone(),
+            machine_id,
+            "laptop",
+            false,
+            Arc::new(native_instance_manager()),
+            None,
+        );
+        wait_until(|| async {
+            manager
+                .get_session_by_machine_id(owner, &machine_id)
+                .is_some()
+        })
+        .await;
+        let old_session = manager
+            .get_session_by_machine_id(owner, &machine_id)
+            .unwrap();
+        assert!(old_session.management_access_valid().await);
+        let rotated = db
+            .rotate_device_access_token(owner, &issued.info.id)
+            .await
+            .unwrap()
+            .unwrap();
+        // Management authorization expires at the DB commit, before asynchronous stop.
+        assert!(!old_session.management_access_valid().await);
+        manager
+            .disconnect_sessions_by_device_token(
+                owner,
+                &issued.info.id,
+                rotated.info.auth_generation,
+            )
+            .await;
+        if let Some(hash) = rotated.retired_token_hash.as_deref() {
+            manager.disconnect_sessions_by_device_token_hash(hash).await;
+        }
+        assert!(manager.list_sessions().await.is_empty());
+        drop(client);
+        let new_client = WebClient::new(
+            runtime_udp_tunnel_dialer(url),
+            rotated.token.clone(),
+            machine_id,
+            "laptop",
+            false,
+            Arc::new(native_instance_manager()),
+            None,
+        );
+        wait_until(|| async {
+            manager
+                .get_session_by_machine_id(owner, &machine_id)
+                .is_some()
+        })
+        .await;
+        let new_session = manager
+            .get_session_by_machine_id(owner, &machine_id)
+            .unwrap();
+        assert!(new_session.management_access_valid().await);
+        let revoked = db
+            .revoke_device_access_token(owner, &issued.info.id)
+            .await
+            .unwrap()
+            .unwrap();
+        manager
+            .disconnect_sessions_by_device_token(owner, &issued.info.id, revoked.auth_generation)
+            .await;
+        assert!(!new_session.management_access_valid().await);
+        assert!(!new_session.is_running());
+        assert!(manager.list_sessions().await.is_empty());
+        drop(new_client);
+    }
 
-        let auth = DeviceAuth::new(db.clone(), true);
-        let machine_id = req.machine_id.clone();
-        req.machine_id = "invalid".to_owned();
-        assert!(!auth.validate_token(&req).await.unwrap().valid);
-        assert!(db.get_user_id_by_token(&req.token).await.unwrap().is_none());
-        req.machine_id = machine_id;
-        assert!(auth.validate_token(&req).await.unwrap().valid);
-        let user_id = db.get_user_id_by_token(&req.token).await.unwrap().unwrap();
-        assert_eq!(db.list_devices(user_id).await.unwrap().len(), 1);
+    #[tokio::test]
+    async fn deleting_old_credentials_does_not_retire_a_freshly_enrolled_session() {
+        let db = Db::memory_db().await;
+        let owner = db.auto_create_user("reenrollment-owner").await.unwrap().id;
+        let machine_id = Uuid::new_v4();
+        let old = db
+            .create_device_access_token(owner, "old-device", None, None)
+            .await
+            .unwrap();
+        let (manager, url) = start_config_server(db.clone()).await;
+        let old_client = WebClient::new(
+            runtime_udp_tunnel_dialer(url.clone()),
+            old.token.clone(),
+            machine_id,
+            "device",
+            false,
+            Arc::new(native_instance_manager()),
+            None,
+        );
+        wait_until(|| async {
+            manager
+                .get_session_by_machine_id(owner, &machine_id)
+                .is_some()
+        })
+        .await;
+        let old_session = manager
+            .get_session_by_machine_id(owner, &machine_id)
+            .unwrap();
+        db.delete_device_with_optional_block((owner, machine_id), false)
+            .await
+            .unwrap();
+        let fresh = db
+            .create_device_access_token(owner, "fresh-device", Some(machine_id), None)
+            .await
+            .unwrap();
+        let new_client = WebClient::new(
+            runtime_udp_tunnel_dialer(url),
+            fresh.token.clone(),
+            machine_id,
+            "device",
+            false,
+            Arc::new(native_instance_manager()),
+            None,
+        );
+        wait_until(|| async {
+            if let Some(session) = manager.get_session_by_machine_id(owner, &machine_id) {
+                session
+                    .get_token()
+                    .await
+                    .is_some_and(|token| token.token == fresh.token)
+            } else {
+                false
+            }
+        })
+        .await;
+        let new_session = manager
+            .get_session_by_machine_id(owner, &machine_id)
+            .unwrap();
+        manager
+            .retire_revoked_device_sessions(owner, machine_id)
+            .await
+            .unwrap();
+        assert!(new_session.management_access_valid().await);
+        assert!(new_session.is_running());
+        assert!(!old_session.is_running());
         assert!(
-            DeviceAuth::new(db, false)
+            manager
+                .get_session_by_machine_id(owner, &machine_id)
+                .is_some()
+        );
+        drop(new_client);
+        drop(old_client);
+    }
+
+    #[tokio::test]
+    async fn central_auth_never_creates_users_from_unknown_tokens() {
+        let db = Db::memory_db().await;
+        let req = request("new-user", Uuid::new_v4());
+        assert!(
+            !DeviceAuth::new(db.clone(), false)
                 .validate_token(&req)
                 .await
                 .unwrap()
                 .valid
         );
+        assert!(
+            !DeviceAuth::new(db.clone(), true)
+                .validate_token(&req)
+                .await
+                .unwrap()
+                .valid
+        );
+        assert!(db.get_user_id("new-user").await.unwrap().is_none());
+        let owner = db.auto_create_user("owner").await.unwrap().id;
+        assert!(
+            !DeviceAuth::new(db.clone(), true)
+                .validate_token(&request("owner", Uuid::new_v4()))
+                .await
+                .unwrap()
+                .valid
+        );
+        let issued = db
+            .create_device_access_token(owner, "new-device", None, None)
+            .await
+            .unwrap();
+        let mut req = request(&issued.token, Uuid::new_v4());
+        let id = req.machine_id.clone();
+        req.machine_id = "invalid".into();
+        assert!(
+            !DeviceAuth::new(db.clone(), true)
+                .validate_token(&req)
+                .await
+                .unwrap()
+                .valid
+        );
+        assert_eq!(
+            db.get_device_access_token(owner, &issued.info.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "pending"
+        );
+        req.machine_id = id;
+        assert!(
+            DeviceAuth::new(db.clone(), false)
+                .validate_token(&req)
+                .await
+                .unwrap()
+                .valid
+        );
+        assert_eq!(db.list_devices(owner).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -301,7 +485,12 @@ mod tests {
         let machine_id = Uuid::new_v4();
         let device = (user_id, machine_id);
         let auth = DeviceAuth::new(db.clone(), false);
-        let mut req = request("owner", machine_id);
+        let token = db
+            .create_device_access_token(user_id, "device", None, None)
+            .await
+            .unwrap()
+            .token;
+        let mut req = request(&token, machine_id);
         let response = auth.validate_token(&req).await.unwrap();
         assert!(response.valid && response.pre_approved);
         let initial = db.get_device(device).await.unwrap().unwrap();
@@ -341,13 +530,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleting_without_a_block_allows_registration_but_blocking_rejects_new_auth() {
+    async fn deletion_revokes_old_tokens_and_blocking_rejects_fresh_enrollment() {
         let db = Db::memory_db().await;
         let user_id = db.auto_create_user("owner").await.unwrap().id;
         let machine_id = Uuid::new_v4();
         let device = (user_id, machine_id);
         let auth = DeviceAuth::new(db.clone(), false);
-        let mut req = request("owner", machine_id);
+        let token = db
+            .create_device_access_token(user_id, "device", None, None)
+            .await
+            .unwrap()
+            .token;
+        let mut req = request(&token, machine_id);
         assert!(auth.validate_token(&req).await.unwrap().valid);
         assert!(
             db.delete_device_with_optional_block(device, false)
@@ -355,6 +549,13 @@ mod tests {
                 .unwrap()
         );
         assert!(db.get_device(device).await.unwrap().is_none());
+        assert!(!auth.validate_token(&req).await.unwrap().valid);
+        let new_token = db
+            .create_device_access_token(user_id, "fresh-enrollment", None, None)
+            .await
+            .unwrap()
+            .token;
+        req.token = new_token;
         assert!(auth.validate_token(&req).await.unwrap().valid);
 
         assert!(
@@ -363,6 +564,12 @@ mod tests {
                 .unwrap()
         );
         req.hostname = "blocked-retry".to_owned();
+        let blocked_token = db
+            .create_device_access_token(user_id, "blocked-retry", None, None)
+            .await
+            .unwrap()
+            .token;
+        req.token = blocked_token;
         assert!(!auth.validate_token(&req).await.unwrap().valid);
         assert!(!auth.validate_token(&req).await.unwrap().valid);
         assert!(db.get_device(device).await.unwrap().is_none());
@@ -382,12 +589,22 @@ mod tests {
         let user_b = db.auto_create_user("tenant-b").await.unwrap().id;
         let machine_id = Uuid::new_v4();
         let auth = DeviceAuth::new(db.clone(), false);
-        let req_a = request("tenant-a", machine_id);
+        let token_a = db
+            .create_device_access_token(user_a, "device-a", None, None)
+            .await
+            .unwrap()
+            .token;
+        let req_a = request(&token_a, machine_id);
         assert!(auth.validate_token(&req_a).await.unwrap().valid);
         db.delete_device_with_optional_block((user_a, machine_id), true)
             .await
             .unwrap();
-        let mut req_b = request("tenant-b", machine_id);
+        let token_b = db
+            .create_device_access_token(user_b, "device-b", None, None)
+            .await
+            .unwrap()
+            .token;
+        let mut req_b = request(&token_b, machine_id);
         req_b.hostname = "tenant-b-host".to_owned();
         assert!(auth.validate_token(&req_b).await.unwrap().valid);
         assert!(!auth.validate_token(&req_a).await.unwrap().valid);

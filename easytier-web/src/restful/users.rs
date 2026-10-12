@@ -14,6 +14,7 @@ use crate::db::{self, entity};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct User {
     pub(crate) db_user: entity::users::Model,
+    #[serde(skip)]
     pub tokens: Vec<String>,
 }
 
@@ -100,7 +101,7 @@ impl Backend {
             .await?
         {
             return Ok(User {
-                tokens: vec![db_user.username.clone()],
+                tokens: vec![],
                 db_user,
             });
         }
@@ -109,7 +110,7 @@ impl Backend {
         let db_user = self.db.auto_create_user(username).await?;
         tracing::info!("Auto-provisioned OIDC user '{username}'");
         Ok(User {
-            tokens: vec![db_user.username.clone()],
+            tokens: vec![],
             db_user,
         })
     }
@@ -167,7 +168,7 @@ impl AuthnBackend for Backend {
                 .filter(|user| verify_password(creds.password, &user.password).is_ok())
                 .map(|user| User {
                     db_user: user.clone(),
-                    tokens: vec![user.username.clone()],
+                    tokens: vec![],
                 }))
         })
         .await?
@@ -180,12 +181,10 @@ impl AuthnBackend for Backend {
             .await?;
 
         if let Some(u) = &mut user {
-            let mut user = User {
+            let user = User {
                 db_user: u.clone(),
                 tokens: vec![],
             };
-            // username is a token
-            user.tokens.push(u.username.clone());
             Ok(Some(user))
         } else {
             Ok(None)

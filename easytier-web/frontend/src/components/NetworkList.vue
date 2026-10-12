@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { useVisiblePolling } from '../modules/polling';
+import { computed, onMounted, ref } from 'vue';
 import { Button, Column, DataTable, Dialog, InputSwitch, InputText, Message, Skeleton, Tag, useToast } from 'primevue';
 import { useRoute, useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
-import { UrlListInput, Utils } from 'easytier-frontend-lib';
+import { UrlListInput } from 'easytier-frontend-lib';
 import ApiClient, { type CentralNetworkSettings, type CentralNetworkSummary, type GatewayInfo } from '../modules/api';
 
 const { t } = useI18n()
@@ -66,33 +67,20 @@ const loadNetworks = async () => {
     try {
         networks.value = await api?.list_networks();
         loadError.value = false;
+        return true;
     } catch (e) {
         loadError.value = true;
         console.error(e);
+        return false;
     } finally {
         refreshing.value = false;
     }
 };
 
-const periodFunc = new Utils.PeriodicTask(async () => {
-    try {
-        await loadNetworks();
-    } catch (e) {
-        console.error(e);
-    }
-}, 2000);
-
+useVisiblePolling(loadNetworks, 2000);
 onMounted(async () => {
-    periodFunc.start();
-    try {
-        gatewayInfo.value = await api?.get_gateway_info();
-    } catch (e) {
-        gatewayInfo.value = { enabled: false, relay_data: false };
-    }
-});
-
-onUnmounted(() => {
-    periodFunc.stop();
+    try { gatewayInfo.value = await api?.get_gateway_info(); }
+    catch { gatewayInfo.value = { enabled: false, relay_data: false }; }
 });
 
 const openCreate = () => {
@@ -176,10 +164,10 @@ const openNetwork = (network: CentralNetworkSummary) => {
         <section class="console-panel">
             <div class="list-toolbar">
                 <div class="search-field"><i class="pi pi-search" aria-hidden="true"></i><InputText v-model="search" :placeholder="t('web.console.search_networks')" :aria-label="t('web.console.search_networks')" /></div>
-                <div class="flex items-center gap-3"><span v-if="networks" class="table-count">{{ t('web.console.items', { count: filteredNetworks.length }) }}</span><Button icon="pi pi-refresh" text severity="secondary" :aria-label="t('web.console.refresh')" :loading="refreshing" @click="loadNetworks" /></div>
+                <div class="flex items-center gap-3"><span v-if="networks" class="table-count">{{ t('web.console.items', { count: filteredNetworks.length }) }}</span><Button icon="pi pi-refresh" text severity="secondary" :aria-label="t('web.console.refresh')" :loading="refreshing" @click="api?.clear_snapshots(); loadNetworks()" /></div>
             </div>
             <div v-if="networks === undefined && !loadError" class="loading-rows"><Skeleton v-for="i in 4" :key="i" height="2rem" /></div>
-            <div v-else-if="networks === undefined" class="console-empty-state"><Button :label="t('web.console.retry')" severity="secondary" @click="loadNetworks" /></div>
+            <div v-else-if="networks === undefined" class="console-empty-state"><Button :label="t('web.console.retry')" severity="secondary" @click="api?.clear_snapshots(); loadNetworks()" /></div>
             <div v-else-if="networks.length === 0" class="console-empty-state"><i class="pi pi-globe" aria-hidden="true"></i><h2>{{ t('web.console.networks_empty') }}</h2><p>{{ t('web.console.networks_empty_hint') }}</p><Button :label="t('web.network_list.create')" icon="pi pi-plus" @click="openCreate" /></div>
             <div v-else-if="filteredNetworks.length === 0" class="console-empty-state"><h2>{{ t('web.console.no_results') }}</h2><Button :label="t('web.console.clear_search')" text @click="search = ''" /></div>
             <template v-else>

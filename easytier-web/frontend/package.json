@@ -8,7 +8,8 @@
     "build": "pnpm --dir ../frontend-lib build && vue-tsc -b && vite build",
     "preview": "vite preview",
     "test:browser": "pnpm build && node --test tests/dashboard.test.mjs",
-    "test:e2e": "pnpm build && cargo build -p easytier-web --features embed && node --test tests/central-e2e.test.mjs"
+    "test:e2e": "pnpm build && cargo build --locked -p easytier-web -p easytier --features easytier-web/embed --bins && pnpm test:e2e:run",
+    "test:e2e:run": "node --test --test-concurrency=1 tests/central-e2e.test.mjs tests/device-auth-e2e.test.mjs tests/central-native-e2e.test.mjs"
   },
   "dependencies": {
     "@modyfi/vite-plugin-yaml": "^1.1.0",

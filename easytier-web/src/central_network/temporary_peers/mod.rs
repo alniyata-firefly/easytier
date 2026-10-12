@@ -278,6 +278,9 @@ async fn collect_from_members(
                 };
                 let session =
                     client_manager.get_session_by_machine_id(intent.user_id, &device_id)?;
+                if !session.management_access_valid().await {
+                    return None;
+                }
                 let client = session.scoped_client::<
             easytier::proto::api::instance::PeerManageRpcClientFactory<BaseController>,
         >();
@@ -296,6 +299,9 @@ async fn collect_from_members(
                         },
                     )
                     .await;
+                if !session.management_access_valid().await {
+                    return None;
+                }
                 let routes = client
                     .list_route(
                         BaseController::default(),
@@ -304,6 +310,9 @@ async fn collect_from_members(
                         },
                     )
                     .await;
+                if !session.management_access_valid().await {
+                    return None;
+                }
                 Some((peers, routes))
             })
             .collect::<Vec<_>>(),

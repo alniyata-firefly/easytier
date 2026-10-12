@@ -14,13 +14,32 @@ struct DisplayPeerConnInfo<'a>(&'a proto::api::instance::PeerConnInfo);
 
 impl Display for DisplayPeerConnInfo<'_> {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut tunnel = self.0.tunnel.clone();
+        if let Some(tunnel) = tunnel.as_mut() {
+            for endpoint in [
+                &mut tunnel.local_addr,
+                &mut tunnel.remote_addr,
+                &mut tunnel.resolved_remote_addr,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                endpoint.url = safe_endpoint_text(&endpoint.url);
+            }
+        }
         formatter
             .debug_struct("PeerConnInfo")
             .field("my_peer_id", &self.0.my_peer_id)
             .field("dst_peer_id", &self.0.peer_id)
-            .field("tunnel_info", &self.0.tunnel)
+            .field("tunnel_info", &tunnel)
             .finish()
     }
+}
+
+fn safe_endpoint_text(value: &str) -> String {
+    url::Url::parse(value)
+        .map(|url| easytier_core::connectivity::manual::redacted_endpoint_url(&url).to_string())
+        .unwrap_or_else(|_| "<invalid endpoint>".to_owned())
 }
 
 macro_rules! event {
@@ -141,6 +160,7 @@ fn log_event(instance_id: Uuid, event: GlobalCtxEvent) {
             event!(error, %err, "[{}] tun device error", instance_id);
         }
         GlobalCtxEvent::Connecting(dst) => {
+            let dst = easytier_core::connectivity::manual::redacted_endpoint_url(&dst);
             event!(
                 info,
                 category: "CONNECTION",
@@ -150,6 +170,7 @@ fn log_event(instance_id: Uuid, event: GlobalCtxEvent) {
             );
         }
         GlobalCtxEvent::ConnectError(dst, ip_version, error) => {
+            let dst = safe_endpoint_text(&dst);
             event!(
                 info,
                 category: "CONNECTION",
@@ -256,6 +277,37 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::*;
+
+    #[test]
+    fn connection_events_redact_every_endpoint_without_mutating_the_connection() {
+        let secret = "device-management-token-should-never-be-logged";
+        let endpoint = proto::common::Url {
+            url: format!("wss://user:{secret}@vpn.example.test/config/{secret}?token={secret}"),
+        };
+        let connection = proto::api::instance::PeerConnInfo {
+            my_peer_id: 10,
+            peer_id: 20,
+            tunnel: Some(proto::common::TunnelInfo {
+                tunnel_type: "wss".to_string(),
+                local_addr: Some(endpoint.clone()),
+                remote_addr: Some(endpoint.clone()),
+                resolved_remote_addr: Some(endpoint.clone()),
+            }),
+            ..Default::default()
+        };
+        let rendered = DisplayPeerConnInfo(&connection).to_string();
+        assert!(!rendered.contains(secret));
+        assert!(rendered.contains("vpn.example.test"));
+        assert!(rendered.contains("20"));
+        assert_eq!(
+            connection.tunnel.unwrap().resolved_remote_addr,
+            Some(endpoint)
+        );
+        assert_eq!(
+            safe_endpoint_text("invalid URL with secret"),
+            "<invalid endpoint>"
+        );
+    }
 
     #[tokio::test]
     async fn event_loop_stops_when_the_instance_closes() {

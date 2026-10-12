@@ -89,7 +89,18 @@ async fn request_heartbeat_validation(
     }))
 }
 
-async fn resolve_user_id(storage: &Storage, token: &str) -> anyhow::Result<i32> {
+async fn resolve_user_id(input: &WebhookValidationInput) -> anyhow::Result<i32> {
+    let storage = &input.storage;
+    let token = &input.req.user_token;
+    if input.webhook_config.uses_local_device_tokens() {
+        return storage
+            .db()
+            .resolve_device_access_token(token, input.machine_id)
+            .await?
+            .map(|identity| identity.user_id)
+            .ok_or_else(|| anyhow::anyhow!("device credential is no longer valid"));
+    }
+    // External controllers retain their own explicit identity namespace and validation.
     let user_id = match storage
         .db()
         .get_user_id_by_token(token)
@@ -110,13 +121,18 @@ async fn persisted_config_revision_for_token(
     storage: &Storage,
     token: &str,
     machine_id: uuid::Uuid,
+    local_device_tokens: bool,
 ) -> anyhow::Result<Option<String>> {
-    let Some(user_id) = storage
-        .db()
-        .get_user_id_by_token(token)
-        .await
-        .map_err(|e| anyhow::anyhow!("DB error: {:?}", e))?
-    else {
+    let user_id = if local_device_tokens {
+        storage
+            .db()
+            .resolve_device_access_token(token, machine_id)
+            .await?
+            .map(|identity| identity.user_id)
+    } else {
+        storage.db().get_user_id_by_token(token).await?
+    };
+    let Some(user_id) = user_id else {
         return Ok(None);
     };
     storage
@@ -246,6 +262,7 @@ pub(super) async fn run_round(
         &input.storage,
         &input.req.user_token,
         input.machine_id,
+        input.webhook_config.uses_local_device_tokens(),
     )
     .await?;
     let validation =
@@ -264,7 +281,7 @@ pub(super) async fn run_round(
         return Ok(());
     };
 
-    let user_id = resolve_user_id(&input.storage, &input.req.user_token).await?;
+    let user_id = resolve_user_id(&input).await?;
     apply_success(
         &session_data,
         input,
@@ -392,6 +409,33 @@ pub(super) async fn apply_success(
     user_id: i32,
     validation_change_epoch: u64,
 ) {
+    // Hold the shared fence through publication. Credential mutation takes the
+    // write fence, so an in-flight old validation cannot resurrect a revoked session.
+    let db = input.storage.db().clone();
+    let _auth_guard = if input.webhook_config.uses_local_device_tokens() {
+        Some(db.device_auth_gate.read().await)
+    } else {
+        None
+    };
+    let identity = if input.webhook_config.uses_local_device_tokens() {
+        match db
+            .resolve_device_access_token(&input.req.user_token, input.machine_id)
+            .await
+        {
+            Ok(Some(identity))
+                if identity.user_id == user_id
+                    && identity.auth_generation == validation.binding_version =>
+            {
+                Some(identity)
+            }
+            _ => {
+                apply_rejected(session_data, &input, validation_change_epoch).await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let WebhookHeartbeatValidation {
         config_revision: _,
         binding_version,
@@ -460,6 +504,7 @@ pub(super) async fn apply_success(
         });
         let storage_token = storage_token.clone();
         data.auth_state = SessionAuthState::Authorized;
+        data.device_token_identity = identity;
         data.binding_version = Some(binding_version);
         if is_new_storage_token {
             tracing::info!(
@@ -562,6 +607,80 @@ async fn wait_webhook_connection_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn revoked_credential_cannot_be_restored_by_inflight_validation_success() {
+        let db = crate::db::Db::memory_db().await;
+        let owner = db.auto_create_user("revocation-owner").await.unwrap().id;
+        let machine_id = uuid::Uuid::new_v4();
+        let issued = db
+            .create_device_access_token(owner, "phone", None, None)
+            .await
+            .unwrap();
+        db.authenticate_device_access_token(
+            &issued.token,
+            crate::db::DeviceHeartbeatRecord {
+                user_id: owner,
+                machine_id,
+                hostname: "phone".into(),
+                easytier_version: "2.7".into(),
+                device_os: "{}".into(),
+                client_url: String::new(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let storage = Storage::new(db.clone());
+        let webhook = Arc::new(
+            crate::webhook::WebhookConfig::new(None, None, None, None, None).with_handler(
+                Arc::new(crate::central_network::device_auth::DeviceAuth::new(
+                    db.clone(),
+                    false,
+                )),
+            ),
+        );
+        let req = HeartbeatRequest {
+            user_token: issued.token.clone(),
+            machine_id: Some(machine_id.into()),
+            ..Default::default()
+        };
+        let mut data = SessionData::new(
+            storage.weak_ref(),
+            "udp://127.0.0.1:10000".parse().unwrap(),
+            None,
+            Arc::new(crate::FeatureFlags::default()),
+            webhook.clone(),
+        );
+        data.req = Some(req.clone());
+        let session = Arc::new(RwLock::new(data));
+        db.revoke_device_access_token(owner, &issued.info.id)
+            .await
+            .unwrap();
+        apply_success(
+            &Arc::downgrade(&session),
+            WebhookValidationInput {
+                storage: storage.clone(),
+                webhook_config: webhook,
+                client_url: "udp://127.0.0.1:10000".parse().unwrap(),
+                applied_config_revision: None,
+                applied_config_revision_known: false,
+                failed_instance_ids: Vec::new(),
+                req,
+                machine_id,
+            },
+            WebhookHeartbeatValidation {
+                config_revision: String::new(),
+                binding_version: 1,
+            },
+            owner,
+            0,
+        )
+        .await;
+        assert_eq!(session.read().await.auth_state, SessionAuthState::Invalid);
+        assert!(session.read().await.storage_token.is_none());
+        assert!(storage.list_clients().is_empty());
+    }
 
     async fn validation_session(machine_id: uuid::Uuid) -> Arc<RwLock<SessionData>> {
         let storage = Storage::new(crate::db::Db::memory_db().await);

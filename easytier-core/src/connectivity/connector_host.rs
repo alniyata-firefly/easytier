@@ -78,6 +78,7 @@ impl HostConnectorEnvironmentSnapshot {
                 .map(Into::into)
                 .collect(),
             listeners: Default::default(),
+            interface_networks: Default::default(),
         }
     }
 

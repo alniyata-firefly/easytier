@@ -5,8 +5,11 @@ import { Button, Column, ConfirmDialog, DataTable, Dialog, Drawer, InputSwitch, 
 import { useRoute, useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { Config, NetworkTypes, UrlListInput, Utils } from 'easytier-frontend-lib';
+import NetworkTopology from './NetworkTopology.vue';
+import { useVisiblePolling } from '../modules/polling';
+import { RuntimeDisplay } from 'easytier-frontend-lib';
 import AclPolicyTab from './AclPolicyTab.vue';
-import ApiClient, { type CentralNetworkDetail, type CentralNetworkMember, type NetworkCredential, type NodeAclRuleStat, type NodePeerInfo, type NodeRouteInfo, type TemporaryPeer } from '../modules/api';
+import ApiClient, { type CentralNetworkDetail, type CentralNetworkMember, type NetworkCredential, type NodeAclRuleStat, type NodePeerInfo, type NodeRouteInfo, type TemporaryPeer, type MetricSnapshot, type NodeRuntimeInfo, type DeploymentStatus } from '../modules/api';
 
 const { t } = useI18n()
 const route = useRoute();
@@ -25,20 +28,37 @@ const networkId = computed(() => route.params.networkId as string);
 const network = ref<CentralNetworkDetail | undefined>(undefined);
 const members = ref<CentralNetworkMember[] | undefined>(undefined);
 const temporaryPeers = ref<TemporaryPeer[]>([]);
+const externalTemporaryPeers = computed(() => {
+    const managed = new Set((members.value ?? []).flatMap(member => member.credential_id ? [member.credential_id] : []));
+    return temporaryPeers.value.filter(peer => !peer.credential_id || !managed.has(peer.credential_id));
+});
 const loadError = ref<string | undefined>(undefined);
 
 const activeTab = ref('members');
 
+let allRequest = 0;
+let allLoading = false;
 const loadAll = async () => {
+    if (allLoading || document.hidden) return;
+    allLoading = true;
+    const request = ++allRequest, network = networkId.value;
     try {
-        network.value = await api?.get_network(networkId.value);
+        await loadAllCurrent(request, network);
+    } finally { allLoading = false; }
+};
+const loadAllCurrent = async (request: number, id: string) => {
+    try {
+        const value = await api?.get_network(id);
+        if (request !== allRequest || id !== networkId.value) return;
+        network.value = value;
         loadError.value = undefined;
     } catch (e: any) {
         loadError.value = e?.response?.data?.message ?? String(e);
         return;
     }
     try {
-        const view = await api?.list_network_members(networkId.value);
+        const view = await api?.list_network_members(id);
+        if (request !== allRequest || id !== networkId.value) return;
         members.value = view?.members;
         temporaryPeers.value = view?.temporary_peers ?? [];
     } catch (e) {
@@ -50,9 +70,7 @@ const loadAll = async () => {
     }
 };
 
-const periodFunc = new Utils.PeriodicTask(async () => {
-    await loadAll();
-}, 2000);
+useVisiblePolling(loadAll, 2000);
 
 const loadGatewayInfo = async () => {
     if (gatewayInfo.value !== undefined) {
@@ -69,12 +87,13 @@ onMounted(async () => {
     // Load both in parallel; the settings form must not read a Gateway
     // network before the gateway info is available.
     await Promise.all([loadAll(), loadGatewayInfo()]);
-    periodFunc.start();
+
 });
 
 onUnmounted(() => {
-    periodFunc.stop();
-    window.clearInterval(nodeDetailTimer);
+    allRequest++;
+    nodeDetailRequest++;
+    window.clearTimeout(nodeDetailTimer);
     configRequest++;
 });
 
@@ -107,12 +126,16 @@ const openAddMember = async () => {
         candidateDevices.value = [];
     }
     selectedDevices.value = [];
-    addTemporary.value = false;
+    addTemporary.value = network.value?.secure_mode === true;
     addTtlHours.value = 7 * 24;
     addMemberVisible.value = true;
 };
 
 const addTemporary = ref(false);
+const memberRoleOptions = computed(() => [
+    { label: t('web.adaptation.member_role_device'), value: true },
+    { label: t('web.adaptation.member_role_trusted'), value: false },
+]);
 const addTtlHours = ref(7 * 24);
 const addTtlOptions = [
     { label: t('web.network_detail.ttl_24h'), value: 24 },
@@ -166,29 +189,10 @@ const editProxyCidrs = ref<string[]>([]);
 const proxyCidrInput = ref('');
 const savingMember = ref(false);
 
-// Normalize user input into a network CIDR: a bare host address expands to
-// its /24 network, and an explicit prefix gets its host bits cleared.
+// CIDR input must include its prefix; no network mask is guessed.
 const toNetworkCidr = (input: string): string | null => {
-    const trimmed = input.trim();
-    if (!trimmed) return null;
-    if (trimmed.includes('/')) {
-        const [addr, prefixStr] = trimmed.split('/');
-        const prefix = Number(prefixStr);
-        const ip = addr.split('.').map(Number);
-        if (ip.length !== 4 || ip.some(o => Number.isNaN(o) || o < 0 || o > 255)
-            || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) {
-            return null;
-        }
-        const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
-        const ipNum = ((ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]) >>> 0;
-        const network = (ipNum & mask) >>> 0;
-        return [24, 16, 8, 0].map(shift => (network >> shift) & 0xff).join('.') + '/' + prefix;
-    }
-    const ip = trimmed.split('.').map(Number);
-    if (ip.length !== 4 || ip.some(o => Number.isInteger(o) && o >= 0 && o <= 255 ? false : true)) {
-        return null;
-    }
-    return `${ip[0]}.${ip[1]}.${ip[2]}.0/24`;
+    if (input.includes(':')) return null; // Core central proxy intent is IPv4-only.
+    return RuntimeDisplay.networkCidr(input) ?? null;
 };
 
 // The Enter used to confirm an IME composition must not add the entry.
@@ -221,38 +225,47 @@ const openEditMember = (member: CentralNetworkMember) => {
     editProxyCidrs.value = [...(member.proxy_cidrs ?? [])];
     proxyCidrInput.value = '';
     candidateCidrs.value = undefined;
+    interfaceHints.value = [];
     editMemberVisible.value = true;
     loadCandidateCidrs(member);
     loadMemberConfigForm(member);
 };
 
-// Suggest subnets detected on the device: each interface IPv4 expands to
-// its /24 network; loopback, link-local and the member's own virtual
-// subnet are filtered out.
+// Suggest only RFC1918 interface networks with an actual reported mask.
 const candidateCidrs = ref<string[] | undefined>(undefined);
+const interfaceHints = ref<string[]>([]);
+let candidateRequest = 0;
 const loadCandidateCidrs = async (member: CentralNetworkMember) => {
-    if (!member.online) {
-        candidateCidrs.value = [];
-        return;
-    }
+    const request = ++candidateRequest;
+    if (!member.online) { candidateCidrs.value = []; return; }
     try {
-        const addrs = await api?.get_node_interface_ips(member.device_id, networkId.value);
-        const virtualPrefix = (member.runtime_virtual_ipv4 ?? member.virtual_ipv4 ?? member.allocated_ipv4 ?? '')
-            .split('/')[0].split('.').slice(0, 3).join('.');
-        const cidrs = new Set<string>();
-        for (const addr of addrs ?? []) {
-            const ip = [24, 16, 8, 0].map(shift => (addr >> shift) & 0xff).join('.');
-            const first = Number(ip.split('.')[0]);
-            if (first === 127 || first === 169 || first === 0 || first === 224) continue;
-            const network = ip.split('.').slice(0, 3).join('.') + '.0/24';
-            if (virtualPrefix && network.startsWith(virtualPrefix + '.')) continue;
-            cidrs.add(network);
+        const info = await api?.get_node_info(member.device_id, networkId.value);
+        if (request !== candidateRequest || editingMember.value?.device_id !== member.device_id || !editMemberVisible.value) return;
+        const interfaces = info?.ip_list?.interface_networks ?? [];
+        const virtualIp = (member.runtime_virtual_ipv4 ?? member.virtual_ipv4 ?? member.allocated_ipv4 ?? '').split('/')[0];
+        const suggestions = new Set<string>();
+        interfaceHints.value = [];
+        for (const entry of interfaces) {
+            const address = entry.address?.ipv4 ? Utils.ipv4ToString(entry.address.ipv4)
+                : entry.address?.ipv6 ? Utils.ipv6ToString(entry.address.ipv6) : '';
+            if (!address || !RuntimeDisplay.privateInterfaceAddress(address) || address === virtualIp) continue;
+            if (!entry.address?.ipv4) {
+                interfaceHints.value.push(`${entry.name}: ${address}/${entry.prefix_length ?? '?'} · ${t('web.adaptation.ipv6_proxy_unavailable')}`);
+                continue;
+            }
+            if (entry.prefix_length != null && !RuntimeDisplay.privateIpv4Subnet(address, entry.prefix_length)) continue;
+            const cidr = entry.prefix_length == null ? undefined : RuntimeDisplay.networkCidr(`${address}/${entry.prefix_length}`);
+            if (cidr) suggestions.add(cidr);
+            else interfaceHints.value.push(`${entry.name}: ${address} · ${t('web.adaptation.mask_unavailable')}`);
         }
-        candidateCidrs.value = [...cidrs];
-    } catch (e) {
-        console.error(e);
-        candidateCidrs.value = [];
-    }
+        if (!interfaces.length) {
+            for (const entry of info?.ip_list?.interface_ipv4s ?? []) {
+                const address = Utils.ipv4ToString(entry);
+                if (address !== virtualIp && RuntimeDisplay.privateInterfaceAddress(address)) interfaceHints.value.push(`${address} · ${t('web.adaptation.mask_unavailable')}`);
+            }
+        }
+        candidateCidrs.value = [...suggestions];
+    } catch { if (request === candidateRequest) candidateCidrs.value = []; }
 };
 
 const toggleCandidateCidr = (cidr: string) => {
@@ -389,7 +402,7 @@ const configBaseline = ref<{ network_name: string; network_secret: string }>({ n
 let configRequest = 0;
 
 watch(editMemberVisible, (visible) => {
-    if (!visible) configRequest++;
+    if (!visible) { configRequest++; candidateRequest++; }
 }, { flush: 'sync' });
 
 const loadMemberConfigForm = async (member: CentralNetworkMember) => {
@@ -467,7 +480,9 @@ const loggerLevelOptions = computed(() => [
 const loadNodeGeneral = async () => {
     if (!nodeDetailMember.value) return;
     try {
-        nodeLoggerLevel.value = await api?.get_node_logger_level(nodeDetailMember.value.device_id);
+        const machineId = nodeDetailMember.value.device_id, request = nodeSelectionGeneration;
+        const level = await api?.get_node_logger_level(machineId);
+        if (request === nodeSelectionGeneration && machineId === nodeDetailDeviceId.value && nodeDetailVisible.value) nodeLoggerLevel.value = level;
     } catch (e) {
         console.error(e);
     }
@@ -475,9 +490,11 @@ const loadNodeGeneral = async () => {
 
 const applyNodeLoggerLevel = async (level: number) => {
     if (!nodeDetailMember.value) return;
+    const machineId = nodeDetailMember.value.device_id, request = nodeSelectionGeneration;
     nodeLoggerSaving.value = true;
     try {
-        await api?.set_node_logger_level(nodeDetailMember.value.device_id, level);
+        await api?.set_node_logger_level(machineId, level);
+        if (request !== nodeSelectionGeneration || machineId !== nodeDetailDeviceId.value) return;
         nodeLoggerLevel.value = level;
         toast.add({ severity: 'success', summary: t('web.network_detail.log_level'), detail: t('web.device_management.config_saved'), life: 2000 });
     } catch (e: any) {
@@ -489,10 +506,13 @@ const applyNodeLoggerLevel = async (level: number) => {
 
 const exportNodeConfig = async () => {
     if (!nodeDetailMember.value) return;
+    const machineId = nodeDetailMember.value.device_id, request = nodeSelectionGeneration;
     nodeTomlConfig.value = undefined;
     nodeConfigVisible.value = true;
     try {
-        nodeTomlConfig.value = await api?.get_node_toml_config(nodeDetailMember.value.device_id, networkId.value);
+        const config = await api?.get_node_toml_config(machineId, networkId.value);
+        if (request !== nodeSelectionGeneration || machineId !== nodeDetailDeviceId.value) return;
+        nodeTomlConfig.value = config;
     } catch (e: any) {
         nodeTomlConfig.value = '';
         toast.add({ severity: 'error', summary: t('web.network_detail.export_config'), detail: e?.response?.data?.message ?? String(e), life: 5000 });
@@ -520,7 +540,27 @@ const downloadNodeConfig = () => {
     URL.revokeObjectURL(url);
 };
 
-const nodeDetailMember = ref<CentralNetworkMember | null>(null);
+const nodeDetailDeviceId = ref<string | null>(null);
+const nodeDetailMember = computed(() => members.value?.find(member => member.device_id === nodeDetailDeviceId.value) ?? null);
+let nodeDetailRequest = 0;
+let nodeSelectionGeneration = 0;
+const nodeInfo = ref<NodeRuntimeInfo>();
+const nodeStats = ref<MetricSnapshot[]>();
+const nodeStatsError = ref('');
+const nodeStatsTime = ref('');
+const nodeStatRates = ref(new Map<string, number | undefined>());
+const statRateSamples = new Map<string, InstanceType<typeof RuntimeDisplay.CounterRate>>();
+const metricKey = (metric: MetricSnapshot) => `${metric.name}:${JSON.stringify(Object.entries(metric.labels ?? {}).sort())}`;
+const statsRows = computed(() => (nodeStats.value ?? []).map(metric => ({
+    ...metric, key: metricKey(metric), labelsText: Object.entries(metric.labels ?? {}).map(([name, value]) => `${name}=${value}`).join(' · '),
+    display: `${RuntimeDisplay.formatQuantity(metric.value, metric.name.includes('bytes'))}${metric.name.endsWith('_ms') ? ' ms' : ''}`,
+    rate: nodeStatRates.value.get(metricKey(metric)),
+})));
+const nodeNat = computed(() => {
+    const nat = nodeInfo.value?.stun_info?.udp_nat_type;
+    return nat == null ? '—' : ['Unknown', 'Open Internet', 'No PAT', 'Full Cone', 'Restricted', 'Port Restricted', 'Symmetric', 'Symmetric UDP Firewall', 'Symmetric Easy Inc', 'Symmetric Easy Dec'][nat] ?? String(nat);
+});
+const deploymentLabel = (deployment?: DeploymentStatus) => t(`web.adaptation.deployment_${deployment?.state ?? 'unknown'}`);
 const nodeRoutes = ref<NodeRouteInfo[] | undefined>(undefined);
 const nodePeers = ref<NodePeerInfo[] | undefined>(undefined);
 const nodeAclStats = ref<NodeAclRuleStat[] | undefined>(undefined);
@@ -534,46 +574,71 @@ const ipv4ToString = (addr?: { address?: { addr?: number } } | null) => {
 };
 
 const loadNodeDetail = async () => {
-    if (!nodeDetailMember.value) return;
-    const machine_id = nodeDetailMember.value.device_id;
-    const inst_id = networkId.value;
-    nodeDetailError.value = undefined;
+    window.clearTimeout(nodeDetailTimer);
+    if (!nodeDetailMember.value || !nodeDetailVisible.value || document.hidden) return;
+    const machineId = nodeDetailMember.value.device_id, instId = networkId.value;
+    const request = ++nodeDetailRequest;
     const results = await Promise.allSettled([
-        api?.get_node_routes(machine_id, inst_id),
-        api?.get_node_peers(machine_id, inst_id),
-        api?.get_node_acl_stats(machine_id, inst_id),
+        api?.get_node_routes(machineId, instId), api?.get_node_peers(machineId, instId),
+        api?.get_node_acl_stats(machineId, instId), api?.get_node_info(machineId, instId),
+        api?.get_node_stats(machineId, instId),
     ]);
-    if (results[0].status === 'fulfilled') nodeRoutes.value = results[0].value ?? [];
-    if (results[1].status === 'fulfilled') nodePeers.value = results[1].value ?? [];
-    if (results[2].status === 'fulfilled') nodeAclStats.value = results[2].value ?? [];
-    nodeDetailError.value = results.find(r => r.status === 'rejected')
-        ? String((results.find(r => r.status === 'rejected') as PromiseRejectedResult)?.reason?.response?.data?.message
-            ?? (results.find(r => r.status === 'rejected') as PromiseRejectedResult)?.reason)
-        : undefined;
+    if (request !== nodeDetailRequest || machineId !== nodeDetailDeviceId.value || instId !== networkId.value || !nodeDetailVisible.value) return;
+    nodeRoutes.value = results[0].status === 'fulfilled' ? results[0].value ?? [] : undefined;
+    nodePeers.value = results[1].status === 'fulfilled' ? results[1].value ?? [] : undefined;
+    nodeAclStats.value = results[2].status === 'fulfilled' ? results[2].value ?? [] : undefined;
+    nodeInfo.value = results[3].status === 'fulfilled' ? results[3].value : undefined;
+    nodeStats.value = results[4].status === 'fulfilled' ? results[4].value ?? [] : undefined;
+    nodeStatsError.value = results[4].status === 'rejected' ? String(results[4].reason?.response?.data?.message ?? results[4].reason) : '';
+    if (nodeStats.value) {
+        const now = performance.now(), next = new Map<string, number | undefined>();
+        for (const metric of nodeStats.value) {
+            const key = metricKey(metric), sample = statRateSamples.get(key) ?? new RuntimeDisplay.CounterRate();
+            statRateSamples.set(key, sample);
+            next.set(key, sample.sample(metric.value, now, `${machineId}:${instId}`));
+        }
+        for (const key of statRateSamples.keys()) if (!next.has(key)) statRateSamples.delete(key);
+        nodeStatRates.value = next;
+        nodeStatsTime.value = new Date().toLocaleTimeString();
+    } else { statRateSamples.clear(); nodeStatRates.value.clear(); }
+    const failed = results.slice(0, 4).find(result => result.status === 'rejected') as PromiseRejectedResult | undefined;
+    nodeDetailError.value = failed ? String(failed.reason?.response?.data?.message ?? failed.reason) : undefined;
+    nodeDetailTimer = window.setTimeout(loadNodeDetail, 5000);
 };
-
 let nodeDetailTimer: number | undefined;
 const openNodeDetail = (member: CentralNetworkMember) => {
-    nodeDetailMember.value = member;
-    nodeRoutes.value = undefined;
-    nodePeers.value = undefined;
-    nodeAclStats.value = undefined;
-    nodeDetailVisible.value = true;
-    nodeLoggerLevel.value = undefined;
-    loadNodeDetail();
-    loadNodeGeneral();
-    window.clearInterval(nodeDetailTimer);
-    nodeDetailTimer = window.setInterval(loadNodeDetail, 5_000);
+    nodeSelectionGeneration++; nodeDetailRequest++; nodeDetailDeviceId.value = member.device_id;
+    nodeRoutes.value = undefined; nodePeers.value = undefined; nodeAclStats.value = undefined;
+    nodeInfo.value = undefined; nodeStats.value = undefined; nodeStatsTime.value = ''; nodeStatsError.value = '';
+    statRateSamples.clear(); nodeStatRates.value.clear();
+    nodeDetailVisible.value = true; nodeLoggerLevel.value = undefined;
+    void loadNodeDetail(); void loadNodeGeneral();
 };
 const closeNodeDetail = () => {
-    window.clearInterval(nodeDetailTimer);
-    nodeDetailTimer = undefined;
-    nodeDetailVisible.value = false;
+    nodeSelectionGeneration++; nodeDetailRequest++; window.clearTimeout(nodeDetailTimer); nodeDetailTimer = undefined;
+    nodeDetailVisible.value = false; nodeDetailDeviceId.value = null; nodeConfigVisible.value = false; nodeTomlConfig.value = undefined;
 };
-
-const routeCostLabel = (cost: number) => cost === 1 ? 'p2p' : `relay(${cost})`;
-const latencyLabel = (latencyMs: number | undefined) =>
-    latencyMs == null ? '—' : `${Math.round(latencyMs)} ms`;
+watch(nodeDetailMember, member => { if (nodeDetailVisible.value && !member) closeNodeDetail(); });
+const resumeNodeDetail = () => {
+    if (document.hidden) { window.clearTimeout(nodeDetailTimer); nodeDetailRequest++; }
+    else if (nodeDetailVisible.value) void loadNodeDetail();
+};
+onMounted(() => document.addEventListener('visibilitychange', resumeNodeDetail));
+onUnmounted(() => document.removeEventListener('visibilitychange', resumeNodeDetail));
+const routeCostLabel = (cost: number | undefined) => cost == null ? '—' : String(cost);
+const latencyLabel = (latency: number | string | undefined) => {
+    const value = Number(latency);
+    return latency == null || !Number.isFinite(value) ? '—' : `${Math.round(value * 100) / 100} ms`;
+};
+const downloadMetrics = async () => {
+    if (!nodeDetailMember.value || !api) return;
+    const machineId = nodeDetailMember.value.device_id;
+    try {
+        const text = await api.get_node_http_metrics(machineId, networkId.value);
+        const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+        const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${machineId}.prom`; anchor.click(); URL.revokeObjectURL(url);
+    } catch (error: any) { toast.add({ severity: 'error', summary: t('web.adaptation.metrics'), detail: error?.response?.data?.message ?? String(error), life: 5000 }); }
+};
 
 // One row per known peer: route facts (hostname / IP / hop cost) merged
 // with its direct connections' protocols and best latency. Peers seen only
@@ -596,10 +661,10 @@ const nodePeerRows = computed(() => {
         });
     });
     connsByPeer.forEach((peer, peer_id) => {
-        const conns = peer.conns ?? [];
-        const protocols = [...new Set(conns.map(conn => conn.tunnel?.tunnel_type).filter((v): v is string => !!v))];
+        const conns = (peer.conns ?? []).filter(conn => conn.is_closed !== true);
+        const protocols = [...new Set(conns.map(conn => conn.tunnel ? `${conn.tunnel.tunnel_type ?? '?'} ${RuntimeDisplay.endpointFamily(conn.tunnel.remote_addr?.url)}` : undefined).filter((v): v is string => !!v))];
         const bestLatency = conns
-            .map(conn => conn.stats?.latency_us ? conn.stats.latency_us / 1000 : undefined)
+            .map(conn => conn.stats?.latency_us != null ? Number(conn.stats.latency_us) / 1000 : undefined)
             .filter((v): v is number => v != null)
             .sort((a, b) => a - b)[0];
         const row = rows.get(peer_id) ?? {
@@ -673,11 +738,11 @@ const ttlOptions = [
 
 const generateVisible = ref(false);
 const generating = ref(false);
-const generateForm = ref({ ttl_hours: 24, reusable: true });
+const generateForm = ref({ ttl_hours: 24, reusable: true, acl_groups: '', allow_relay: false, allowed_proxy_cidrs: '' });
 const generatedCredential = ref<NetworkCredential | null>(null);
 
 const openGenerateCredential = () => {
-    generateForm.value = { ttl_hours: 24, reusable: true };
+    generateForm.value = { ttl_hours: 24, reusable: true, acl_groups: '', allow_relay: false, allowed_proxy_cidrs: '' };
     generatedCredential.value = null;
     generateVisible.value = true;
 };
@@ -688,7 +753,11 @@ const generateCredential = async () => {
         const created = await api?.generate_credential(
             networkId.value,
             generateForm.value.ttl_hours * 3600,
-            generateForm.value.reusable,
+            generateForm.value.reusable, undefined, {
+                acl_groups: generateForm.value.acl_groups.split(/[\s,]+/).filter(Boolean),
+                allow_relay: generateForm.value.allow_relay,
+                allowed_proxy_cidrs: generateForm.value.allowed_proxy_cidrs.split(/[\s,]+/).filter(Boolean),
+            },
         );
         if (created) {
             generatedCredential.value = created;
@@ -717,6 +786,33 @@ const revokeCredential = (credential: NetworkCredential) => {
             }
         },
     });
+};
+
+const editCredential = ref<NetworkCredential | null>(null);
+const credentialSaving = ref(false);
+const credentialEditForm = ref({ ttl_hours: 0, acl_groups: '', allow_relay: false, allowed_proxy_cidrs: '', reusable: true, rotate_secret: false });
+const openEditCredential = (credential: NetworkCredential) => {
+    credentialEditForm.value = { ttl_hours: 0, acl_groups: (credential.acl_groups ?? []).join(', '),
+        allow_relay: credential.allow_relay ?? false, allowed_proxy_cidrs: (credential.allowed_proxy_cidrs ?? []).join(', '),
+        reusable: credential.reusable, rotate_secret: false };
+    editCredential.value = credential;
+};
+const saveCredential = async () => {
+    if (!editCredential.value) return;
+    credentialSaving.value = true;
+    try {
+        await api?.update_credential(networkId.value, editCredential.value.credential_id, {
+            ttl_seconds: credentialEditForm.value.ttl_hours > 0 ? credentialEditForm.value.ttl_hours * 3600 : undefined,
+            acl_groups: credentialEditForm.value.acl_groups.split(/[\s,]+/).filter(Boolean),
+            allow_relay: credentialEditForm.value.allow_relay,
+            allowed_proxy_cidrs: credentialEditForm.value.allowed_proxy_cidrs.split(/[\s,]+/).filter(Boolean),
+            reusable: editCredential.value.device_id ? false : credentialEditForm.value.reusable,
+            rotate_secret: credentialEditForm.value.rotate_secret,
+        });
+        editCredential.value = null;
+        await loadCredentials(); await loadAll();
+    } catch (error: any) { toast.add({ severity: 'error', summary: t('web.adaptation.credential_permissions'), detail: error?.response?.data?.message ?? String(error), life: 5000 }); }
+    finally { credentialSaving.value = false; }
 };
 
 // --- credential secret reveal & join command viewer ---
@@ -752,10 +848,10 @@ const credentialJoinCommand = (secret: string) => {
     const peer = credentialJoinPeer();
     return [
         'easytier-core',
-        `--network-name ${network.value.network_name}`,
+        `--network-name ${RuntimeDisplay.shellQuote(network.value.network_name)}`,
         '--secure-mode',
-        `--credential ${secret}`,
-        peer ? `-p ${peer}` : '',
+        `--credential ${RuntimeDisplay.shellQuote(secret)}`,
+        peer ? `-p ${RuntimeDisplay.shellQuote(peer)}` : '',
     ].filter(Boolean).join(' ');
 };
 
@@ -766,14 +862,14 @@ const credentialJoinToml = (secret: string) => {
     const peer = credentialJoinPeer();
     return [
         '[network_identity]',
-        `network_name = "${network.value.network_name}"`,
+        `network_name = ${JSON.stringify(network.value.network_name)}`,
         '',
         '[[peer]]',
-        `uri = "${peer}"`,
+        `uri = ${JSON.stringify(peer)}`,
         '',
         '[secure_mode]',
         'enabled = true',
-        `local_private_key = "${secret}"`,
+        `local_private_key = ${JSON.stringify(secret)}`,
     ].join('\n');
 };
 
@@ -864,6 +960,15 @@ const switchTab = async (tab: string) => {
           </div>
         </header>
 
+        <div v-if="network?.deployment" class="flex items-center gap-3 flex-wrap text-sm mb-3">
+            <span>{{ t('web.adaptation.deployment') }}</span><Tag :value="deploymentLabel(network.deployment)" :severity="network.deployment.state === 'failed' ? 'danger' : network.deployment.state === 'applied' ? 'success' : 'secondary'" />
+            <template v-if="network.deployment.gateway">
+                <span>Gateway</span><Tag :value="deploymentLabel(network.deployment.gateway)" :severity="network.deployment.gateway.state === 'failed' ? 'danger' : 'secondary'" />
+                <Tag :value="network.deployment.gateway.running ? t('web.network_detail.running') : t('web.network_detail.stopped')" :severity="network.deployment.gateway.running ? 'success' : 'secondary'" />
+                <span v-if="network.deployment.gateway.last_error" class="text-red-500">{{ network.deployment.gateway.last_error }}</span>
+            </template>
+        </div>
+
         <div v-if="loadError !== undefined">
             <Message severity="warn" :closable="false">{{ t('web.console.load_failed') }} <Button :label="t('web.console.retry')" text size="small" @click="loadAll" /></Message>
         </div>
@@ -875,6 +980,7 @@ const switchTab = async (tab: string) => {
         <Tabs v-if="network !== undefined" :value="activeTab" @update:value="switchTab(String($event))" lazy class="console-panel network-tabs">
             <TabList>
                 <Tab value="members">{{ t('web.network_detail.tab_members') }}</Tab>
+                <Tab value="topology">{{ t('web.adaptation.topology') }}</Tab>
                 <Tab value="acl">{{ t('web.acl.tab') }}</Tab>
                 <Tab v-if="network.secure_mode" value="credentials">{{ t('web.network_detail.tab_credentials') }}</Tab>
                 <Tab value="settings">{{ t('web.network_detail.tab_settings') }}</Tab>
@@ -915,7 +1021,7 @@ const switchTab = async (tab: string) => {
                         <Column :header="t('web.network_detail.static_ip')">
                             <template #body="{ data }">
                                 <span v-if="data.runtime_virtual_ipv4" class="mono-value">{{ data.runtime_virtual_ipv4 }}</span>
-                                <span v-else-if="data.virtual_ipv4 || data.allocated_ipv4" class="mono-value muted">{{ data.virtual_ipv4 ?? data.allocated_ipv4 }}/{{ network?.virtual_cidr?.split('/')[1] ?? 24 }}</span>
+                                <span v-else-if="data.virtual_ipv4 || data.allocated_ipv4" class="mono-value muted">{{ data.virtual_ipv4 ?? data.allocated_ipv4 }}/{{ network?.virtual_cidr?.split('/')[1] ?? '?' }}</span>
                                 <span v-else class="muted">{{ t('virtual_ipv4_dhcp') }}</span>
                             </template>
                         </Column>
@@ -930,6 +1036,11 @@ const switchTab = async (tab: string) => {
                                 <span v-else class="muted">—</span>
                             </template>
                         </Column>
+                        <Column :header="t('web.adaptation.deployment')"><template #body="{ data }">
+                            <Tag :value="deploymentLabel(data.deployment)" :severity="data.deployment?.state === 'failed' ? 'danger' : data.deployment?.state === 'applied' ? 'success' : 'secondary'" />
+                            <div class="text-xs mono-value muted" v-if="data.deployment?.desired_revision">{{ data.deployment.applied_revision || '—' }} → {{ data.deployment.desired_revision }}</div>
+                            <div class="text-xs text-red-500" v-if="data.deployment?.last_error">{{ data.deployment.last_error }}</div>
+                        </template></Column>
                         <Column :header="t('web.network_detail.member_error')">
                             <template #body="{ data }">
                                 <span v-if="data.error_msg" class="text-red-500 truncate" :title="data.error_msg">{{ data.error_msg }}</span>
@@ -970,10 +1081,11 @@ const switchTab = async (tab: string) => {
                                     <span v-if="member.temporary && member.credential_expiry_unix"
                                         class="text-xs muted">{{ t('web.network_detail.expires_at') }}
                                         {{ new Date(member.credential_expiry_unix * 1000).toLocaleDateString() }}</span>
+                                    <Tag :value="deploymentLabel(member.deployment)" :severity="member.deployment?.state === 'failed' ? 'danger' : 'secondary'" />
                                     <Tag v-if="member.running === true" :value="t('web.network_detail.running')" severity="success" />
                                     <Tag v-else-if="member.running === false" :value="t('web.network_detail.stopped')" severity="warn" />
                                     <span v-if="member.runtime_virtual_ipv4" class="font-mono">{{ member.runtime_virtual_ipv4 }}</span>
-                                    <span v-else-if="member.virtual_ipv4 || member.allocated_ipv4" class="font-mono muted">{{ member.virtual_ipv4 ?? member.allocated_ipv4 }}/{{ network?.virtual_cidr?.split('/')[1] ?? 24 }}</span>
+                                    <span v-else-if="member.virtual_ipv4 || member.allocated_ipv4" class="font-mono muted">{{ member.virtual_ipv4 ?? member.allocated_ipv4 }}/{{ network?.virtual_cidr?.split('/')[1] ?? '?' }}</span>
                                     <span v-else class="text-500">{{ t('virtual_ipv4_dhcp') }}</span>
                                     <span v-if="member.version" class="text-xs muted">v{{ member.version.split('-')[0] }}</span>
                                 </div>
@@ -997,13 +1109,13 @@ const switchTab = async (tab: string) => {
                         </div>
                     </div>
                 </template>
-                <div v-if="temporaryPeers.length > 0" class="flex flex-col gap-2">
+                <div v-if="externalTemporaryPeers.length > 0" class="flex flex-col gap-2">
                     <div class="text-sm font-semibold flex items-center gap-2">
                         <i class="pi pi-clock text-xs"></i>
                         {{ t('web.network_detail.temporary_devices') }}
                         <span class="text-xs font-normal muted">{{ t('web.network_detail.temporary_devices_hint') }}</span>
                     </div>
-                    <DataTable :value="temporaryPeers" size="small" class="console-table desktop-list" scrollable>
+                    <DataTable :value="externalTemporaryPeers" size="small" class="console-table desktop-list" scrollable>
                         <Column :header="t('web.device.hostname')">
                             <template #body="{ data }">
                                 <div class="entity-link">
@@ -1039,7 +1151,7 @@ const switchTab = async (tab: string) => {
                         </Column>
                     </DataTable>
                     <div class="mobile-list">
-                        <div v-for="peer in temporaryPeers" :key="peer.peer_id" class="member-card">
+                        <div v-for="peer in externalTemporaryPeers" :key="peer.peer_id" class="member-card">
                             <div class="member-title-row">
                                 <span class="status-dot online"
                                     v-tooltip.top="t('web.device.online')"></span>
@@ -1072,6 +1184,7 @@ const switchTab = async (tab: string) => {
             </TabPanel>
 
             <!-- credentials -->
+            <TabPanel value="topology"><NetworkTopology v-if="activeTab === 'topology' && api" :api="api" :network-id="networkId" :members="members ?? []" :temporary-peers="externalTemporaryPeers" :gateway="network.networking_method === 'Gateway' ? network.deployment?.gateway : undefined" /></TabPanel>
             <TabPanel value="acl" class="flex flex-col gap-3">
                 <p class="text-sm muted">{{ t('web.acl.trust_hint') }}</p>
                 <AclPolicyTab v-if="api" :api="api" :network-id="networkId" :members="members" />
@@ -1111,6 +1224,11 @@ const switchTab = async (tab: string) => {
                             </span>
                         </div>
                     </template></Column>
+                    <Column :header="t('web.adaptation.credential_permissions')"><template #body="{ data }">
+                        <div class="text-xs mono-value">{{ data.device_id || '—' }}</div>
+                        <div>{{ (data.acl_groups ?? []).join(', ') || '—' }}</div>
+                        <div class="text-xs muted">{{ (data.allowed_proxy_cidrs ?? []).join(', ') || '—' }} · {{ t('web.adaptation.allow_relay') }}: {{ data.allow_relay ? '✓' : '—' }}</div>
+                    </template></Column>
                     <Column :header="t('web.network_detail.credential_status')"><template #body="{ data }">
                         <Tag :value="data.expiry_unix > Date.now() / 1000 ? t('web.network_detail.credential_active') : t('web.network_detail.credential_expired')"
                             :severity="data.expiry_unix > Date.now() / 1000 ? 'success' : 'danger'" />
@@ -1124,6 +1242,7 @@ const switchTab = async (tab: string) => {
                                 @click="showJoinCommand(data)" />
                             <Button :label="t('web.network_detail.revoke_credential')" text size="small" severity="danger"
                                 @click="revokeCredential(data)" />
+                            <Button icon="pi pi-pencil" text rounded severity="secondary" :aria-label="t('web.adaptation.credential_permissions')" @click="openEditCredential(data)" />
                         </div>
                     </template></Column>
                 </DataTable>
@@ -1211,14 +1330,12 @@ const switchTab = async (tab: string) => {
                 <Column field="easytier_version" :header="t('web.device.version')" />
             </DataTable>
             <div class="flex flex-col gap-2 mt-2">
-                <div class="flex items-center gap-2">
-                    <InputSwitch inputId="add-temporary" v-model="addTemporary" :disabled="!network?.secure_mode" />
-                    <label for="add-temporary" class="text-sm"
-                        :class="{ 'text-500': !network?.secure_mode }">{{ t('web.network_detail.add_temporary_member') }}</label>
-                    <span class="pi pi-question-circle text-sm" v-tooltip.top="network?.secure_mode
-                        ? t('web.network_detail.add_temporary_hint')
-                        : t('web.network_detail.add_temporary_needs_secure')"></span>
-                </div>
+                <label class="text-sm" for="add-member-role">{{ t('web.adaptation.member_role') }}</label>
+                <SelectButton inputId="add-member-role" v-model="addTemporary" :options="memberRoleOptions"
+                    optionLabel="label" optionValue="value" :allow-empty="false" :disabled="!network?.secure_mode" />
+                <p class="text-xs muted m-0">{{ network?.secure_mode
+                    ? (addTemporary ? t('web.network_detail.add_temporary_hint') : t('web.adaptation.member_role_trusted_hint'))
+                    : t('web.network_detail.add_temporary_needs_secure') }}</p>
                 <div v-if="addTemporary" class="flex items-center gap-2">
                     <label for="add-ttl" class="text-sm">{{ t('web.network_detail.credential_ttl') }}</label>
                     <SelectButton v-model="addTtlHours" :options="addTtlOptions"
@@ -1262,6 +1379,7 @@ const switchTab = async (tab: string) => {
                                 </div>
 
                                 <!-- 设备检测到的网段：点击即添加/移除 -->
+                                <div v-for="hint in interfaceHints" :key="hint" class="text-xs muted">{{ hint }}</div>
                                 <div v-if="candidateCidrs === undefined" class="text-xs muted">{{ t('web.console.loading') }}</div>
                                 <div v-else-if="candidateCidrs.length > 0" class="flex flex-wrap gap-2">
                                     <Button v-for="cidr in candidateCidrs" :key="cidr"
@@ -1315,6 +1433,20 @@ const switchTab = async (tab: string) => {
             </template>
         </Dialog>
 
+        <Dialog :visible="editCredential !== null" @update:visible="editCredential = null" modal :header="t('web.adaptation.credential_permissions')" :style="{ width: '34rem' }">
+            <div class="flex flex-col gap-3">
+                <p v-if="editCredential?.device_id" class="mono-value text-xs">{{ t('web.adaptation.device_id') }}: {{ editCredential.device_id }}</p>
+                <label class="flex flex-col gap-1">{{ t('web.adaptation.renew_credential') }}<Select v-model="credentialEditForm.ttl_hours" :options="[{ label: t('web.adaptation.keep_expiry'), value: 0 }, ...ttlOptions]" optionLabel="label" optionValue="value" /></label>
+                <label class="flex flex-col gap-1">{{ t('web.adaptation.acl_groups') }}<InputText v-model="credentialEditForm.acl_groups" /></label>
+                <label class="flex flex-col gap-1">{{ t('web.adaptation.allowed_proxy_cidrs') }}<InputText v-model="credentialEditForm.allowed_proxy_cidrs" /></label>
+                <label class="flex items-center gap-2"><InputSwitch v-model="credentialEditForm.allow_relay" />{{ t('web.adaptation.allow_relay') }}</label>
+                <label v-if="!editCredential?.device_id" class="flex items-center gap-2"><InputSwitch v-model="credentialEditForm.reusable" />{{ t('web.network_detail.credential_reusable') }}</label>
+                <label class="flex items-center gap-2"><InputSwitch v-model="credentialEditForm.rotate_secret" />{{ t('web.adaptation.rotate_credential') }}</label>
+                <Message v-if="credentialEditForm.rotate_secret" severity="warn" :closable="false">{{ t('web.adaptation.rotate_credential_impact') }}</Message>
+            </div>
+            <template #footer><Button :label="t('web.common.cancel')" severity="secondary" @click="editCredential = null" /><Button :label="t('web.common.save')" :loading="credentialSaving" @click="saveCredential" /></template>
+        </Dialog>
+
         <!-- generate credential dialog -->
         <Dialog v-model:visible="generateVisible" modal class="console-dialog"
             :header="t('web.network_detail.generate_credential')" :style="{ width: '34rem' }">
@@ -1329,6 +1461,9 @@ const switchTab = async (tab: string) => {
                     <label for="cred-reusable" class="text-sm">{{ t('web.network_detail.credential_reusable') }}</label>
                 </div>
                 <div class="text-xs text-500">{{ t('web.network_detail.credential_reusable_hint') }}</div>
+                <label class="flex flex-col gap-1">{{ t('web.adaptation.acl_groups') }}<InputText v-model="generateForm.acl_groups" /></label>
+                <label class="flex flex-col gap-1">{{ t('web.adaptation.allowed_proxy_cidrs') }}<InputText v-model="generateForm.allowed_proxy_cidrs" /></label>
+                <label class="flex items-center gap-2"><InputSwitch v-model="generateForm.allow_relay" />{{ t('web.adaptation.allow_relay') }}</label>
             </div>
             <div v-else class="flex flex-col gap-3">
                 <div class="text-sm">{{ t('web.network_detail.credential_secret_hint') }}</div>
@@ -1389,6 +1524,8 @@ const switchTab = async (tab: string) => {
             </template>
             <div class="node-drawer-main">
             <Message v-if="nodeDetailError" severity="warn" :closable="false">{{ nodeDetailError }}</Message>
+            <p class="text-xs muted mono-value">{{ t('web.adaptation.device_id') }}: {{ nodeDetailDeviceId }} · UDP NAT: {{ nodeNat }}</p>
+            <p v-if="nodeInfo?.public_ipv6_addr" class="mono-value text-xs">Public IPv6 lease: {{ Utils.ipv6ToString(nodeInfo.public_ipv6_addr.address) }}/{{ nodeInfo.public_ipv6_addr.network_length ?? '?' }}</p>
             <section class="node-drawer-summary" :aria-label="t('web.network_detail.node_overview')">
                 <div class="node-drawer-metric node-drawer-metric-state">
                     <strong>{{ nodeDetailMember?.running === true ? t('web.network_detail.running') : nodeDetailMember?.running === false ? t('web.network_detail.stopped') : '—' }}</strong>
@@ -1410,6 +1547,7 @@ const switchTab = async (tab: string) => {
             <Tabs value="overview" class="node-drawer-tabs">
                 <TabList>
                     <Tab value="overview">{{ t('web.network_detail.node_overview') }}</Tab>
+                    <Tab value="metrics">{{ t('web.adaptation.metrics') }}</Tab>
                     <Tab value="general">{{ t('web.network_detail.node_actions') }}</Tab>
                 </TabList>
                 <TabPanels>
@@ -1438,7 +1576,7 @@ const switchTab = async (tab: string) => {
                                 </template>
                             </Column>
                             <Column :header="t('web.network_detail.route_cost')"><template #body="{ data }">
-                                {{ routeCostLabel(data.cost) }}
+                                {{ data.protocols?.length ? t('web.adaptation.direct_observed') : t('web.adaptation.route_only') }} · {{ routeCostLabel(data.cost) }}
                             </template></Column>
                             <Column :header="t('web.network_detail.conn_type')"><template #body="{ data }">
                                 <span class="font-mono text-xs">{{ data.protocols.join(' / ') || '—' }}</span>
@@ -1468,7 +1606,7 @@ const switchTab = async (tab: string) => {
                             :paginator="(nodeRoutes?.length ?? 0) > 15" :rows="15" tableStyle="min-width: 40rem">
                             <Column field="hostname" :header="t('web.device.hostname')" />
                             <Column :header="t('virtual_ipv4')"><template #body="{ data }">
-                                <span class="font-mono">{{ ipv4ToString(data.ipv4_addr) }}/{{ data.ipv4_addr?.network_length ?? 24 }}</span>
+                                <span class="font-mono">{{ ipv4ToString(data.ipv4_addr) }}/{{ data.ipv4_addr?.network_length ?? '?' }}</span>
                             </template></Column>
                             <Column :header="t('web.network_detail.route_cost')"><template #body="{ data }">
                                 {{ routeCostLabel(data.cost) }}
@@ -1476,6 +1614,8 @@ const switchTab = async (tab: string) => {
                             <Column :header="t('web.network_detail.path_latency')"><template #body="{ data }">
                                 {{ latencyLabel(data.path_latency) }}
                             </template></Column>
+                            <Column :header="'IPv6'"><template #body="{ data }">{{ data.ipv6_addr ? `${Utils.ipv6ToString(data.ipv6_addr.address)}/${data.ipv6_addr.network_length ?? '?'}` : '—' }}</template></Column>
+                            <Column field="next_hop_peer_id" :header="t('web.adaptation.next_hop')" />
                             <Column field="proxy_cidrs" :header="t('proxy_cidrs')"><template #body="{ data }">
                                 <span class="font-mono text-xs">{{ (data.proxy_cidrs ?? []).join(', ') || '—' }}</span>
                             </template></Column>
@@ -1496,13 +1636,13 @@ const switchTab = async (tab: string) => {
                                 <span class="font-mono text-xs">{{ data.conn.tunnel?.remote_addr?.url ?? '—' }}</span>
                             </template></Column>
                             <Column :header="t('web.network_detail.path_latency')"><template #body="{ data }">
-                                {{ data.conn.stats ? latencyLabel(data.conn.stats.latency_us ? data.conn.stats.latency_us / 1000 : undefined) : '—' }}
+                                {{ data.conn.stats ? latencyLabel(data.conn.stats.latency_us != null ? Number(data.conn.stats.latency_us) / 1000 : undefined) : '—' }}
                             </template></Column>
                             <Column :header="t('web.network_detail.loss_rate')"><template #body="{ data }">
                                 {{ data.conn.loss_rate != null ? (data.conn.loss_rate * 100).toFixed(1) + '%' : '—' }}
                             </template></Column>
                             <Column :header="t('web.network_detail.traffic')"><template #body="{ data }">
-                                <span class="font-mono text-xs">↓{{ ((data.conn.stats?.rx_bytes ?? 0) / 1024).toFixed(0) }}K ↑{{ ((data.conn.stats?.tx_bytes ?? 0) / 1024).toFixed(0) }}K</span>
+                                <span class="font-mono text-xs">↓{{ RuntimeDisplay.formatQuantity(data.conn.stats?.rx_bytes, true) }} ↑{{ RuntimeDisplay.formatQuantity(data.conn.stats?.tx_bytes, true) }}</span>
                             </template></Column>
                         </DataTable>
                         </details>
@@ -1513,13 +1653,25 @@ const switchTab = async (tab: string) => {
                                 {{ data.rule?.name || '—' }}
                             </template></Column>
                             <Column :header="t('web.network_detail.acl_packets')"><template #body="{ data }">
-                                {{ data.stat?.packet_count ?? 0 }}
+                                {{ RuntimeDisplay.formatQuantity(data.stat?.packet_count) }}
                             </template></Column>
                             <Column :header="t('web.network_detail.acl_bytes')"><template #body="{ data }">
-                                {{ data.stat?.byte_count ?? 0 }}
+                                {{ RuntimeDisplay.formatQuantity(data.stat?.byte_count, true) }}
                             </template></Column>
                         </DataTable>
                         </details>
+                    </TabPanel>
+                    <TabPanel value="metrics" class="node-drawer-panel">
+                        <div class="flex justify-between items-center mb-3"><span class="text-xs muted">{{ nodeStatsTime || '—' }}</span>
+                            <Button :label="t('web.adaptation.export_prometheus')" icon="pi pi-download" severity="secondary" outlined :disabled="!!nodeStatsError || !nodeStats" @click="downloadMetrics" /></div>
+                        <Message v-if="nodeStatsError" severity="warn" :closable="false">{{ t('web.adaptation.stats_unavailable') }}: {{ nodeStatsError }}</Message>
+                        <DataTable v-else :value="statsRows" size="small" class="console-table" :paginator="statsRows.length > 20" :rows="20" :loading="nodeStats === undefined">
+                            <Column field="name" :header="t('web.adaptation.metric_name')" />
+                            <Column field="labelsText" :header="t('web.adaptation.metric_labels')"><template #body="{ data }"><span class="mono-value text-xs">{{ data.labelsText || '—' }}</span></template></Column>
+                            <Column field="display" :header="t('web.adaptation.metric_value')"><template #body="{ data }"><span :title="String(data.value ?? '—')">{{ data.display }}</span></template></Column>
+                            <Column :header="t('web.adaptation.metric_rate')"><template #body="{ data }">{{ data.rate == null ? '—' : data.name.includes('bytes') ? `${RuntimeDisplay.formatQuantity(Math.round(data.rate), true)}/s` : `${Math.round(data.rate * 100) / 100}${data.name.endsWith('_ms') ? ' ms' : ''}/s` }}</template></Column>
+                            <template #empty>{{ t('web.adaptation.stats_empty') }}</template>
+                        </DataTable>
                     </TabPanel>
                     <TabPanel value="general" class="node-drawer-panel node-drawer-actions">
                         <div class="node-drawer-action">

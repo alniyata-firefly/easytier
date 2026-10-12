@@ -185,11 +185,19 @@ async fn pruning_remembers_disconnected_takeovers_and_isolates_identities() {
         );
     }
     newest.stop().await;
-    assert!(storage.remove_session_client(&newest_token, 4));
+    assert!(!newest.is_running());
     assert!(
         storage
             .get_client_url_by_machine_id(1, &machine_id)
             .is_none()
+    );
+    // stop() now retires its authorization synchronously. A delayed cleanup
+    // must be idempotent, while the takeover epoch still retires the old session.
+    assert!(!storage.remove_session_client(&newest_token, 4));
+    assert!(
+        storage
+            .get_client_url_by_machine_id(2, &machine_id)
+            .is_some()
     );
     ClientManager::prune_sessions(&sessions).await;
     assert_eq!(sessions.len(), 2);

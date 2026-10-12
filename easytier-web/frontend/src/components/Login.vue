@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { Card, InputText, Password, Button } from 'primevue';
 import { useRouter } from 'vue-router';
 import { useToast } from 'primevue/usetoast';
@@ -10,7 +10,7 @@ import ApiClient, { Credential, RegisterData } from '../modules/api';
 
 const { t } = useI18n()
 
-defineProps<{
+const props = defineProps<{
     isRegistering: boolean;
 }>();
 
@@ -49,6 +49,10 @@ const onRegister = async () => {
 };
 
 const oidcEnabled = ref(false);
+const registrationEnabled = ref(false);
+watch(() => props.isRegistering, () => {
+    if (props.isRegistering && !registrationEnabled.value) router.replace({ name: 'login' });
+});
 
 const checkOidcConfig = async () => {
     oidcEnabled.value = (await api.value.getOidcConfig()).enabled;
@@ -59,7 +63,8 @@ const onSsoLogin = () => {
 };
 
 onMounted(async () => {
-    await checkOidcConfig();
+    await Promise.allSettled([checkOidcConfig(), api.value.get_auth_config().then(info => { registrationEnabled.value = info.registration_enabled; })]);
+    if (props.isRegistering && !registrationEnabled.value) router.replace({ name: 'login' });
 });
 
 </script>
@@ -86,7 +91,7 @@ onMounted(async () => {
                         <Button :label="t('web.login.login')" type="submit" class="w-full" />
                     </div>
                     <div class="flex items-center justify-between">
-                        <Button :label="t('web.login.register')" type="button" class="w-full"
+                        <Button v-if="registrationEnabled" :label="t('web.login.register')" type="button" class="w-full"
                             @click="$router.replace({ name: 'register' })" severity="secondary" />
                     </div>
                     <div v-if="oidcEnabled" class="flex items-center justify-between">
@@ -95,7 +100,7 @@ onMounted(async () => {
                     </div>
                 </form>
 
-                <form v-else @submit.prevent="onRegister" class="space-y-4">
+                <form v-else-if="registrationEnabled" @submit.prevent="onRegister" class="space-y-4">
                     <div class="p-field">
                         <label for="register-username" class="block text-sm font-medium">{{ t('web.login.username')
                         }}</label>

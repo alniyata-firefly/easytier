@@ -311,6 +311,106 @@ impl ClientManager {
         true
     }
 
+    /// Retire every connection authenticated by an older credential generation,
+    /// including connections superseded in the machine lookup index.
+    pub(crate) async fn disconnect_sessions_by_device_token(
+        &self,
+        owner: UserIdInDb,
+        token_id: &str,
+        generation: u64,
+    ) {
+        let hash = self
+            .storage
+            .db()
+            .device_access_token_hash(owner, token_id)
+            .await
+            .ok()
+            .flatten();
+        let inactive = self
+            .storage
+            .db()
+            .get_device_access_token(owner, token_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|info| matches!(info.status.as_str(), "revoked" | "expired"));
+        let snapshot = self
+            .client_sessions
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        for (url, session) in snapshot {
+            if session
+                .belongs_to_device_token(token_id, owner, generation)
+                .await
+                || (inactive
+                    && hash.as_deref().is_some()
+                    && session
+                        .has_device_token_hash(hash.as_deref().unwrap())
+                        .await)
+            {
+                session.stop().await;
+                self.client_sessions
+                    .remove_if(&url, |_, current| Arc::ptr_eq(current, &session));
+            }
+        }
+    }
+
+    pub(crate) async fn disconnect_sessions_by_device_token_hash(&self, hash: &str) {
+        let snapshot = self
+            .client_sessions
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        for (url, session) in snapshot {
+            if session.has_device_token_hash(hash).await {
+                session.stop().await;
+                self.client_sessions
+                    .remove_if(&url, |_, current| Arc::ptr_eq(current, &session));
+            }
+        }
+    }
+
+    pub(crate) async fn revoke_device_access(
+        &self,
+        user_id: UserIdInDb,
+        machine_id: uuid::Uuid,
+    ) -> Result<(), sea_orm::DbErr> {
+        let tokens = self
+            .storage
+            .db()
+            .revoke_all_device_access_tokens(user_id, machine_id)
+            .await?;
+        for token in tokens {
+            self.disconnect_sessions_by_device_token(user_id, &token.id, token.auth_generation)
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Deletion already invalidates tokens inside its DB transaction. Retire
+    /// only those immutable revoked records; fresh enrollment remains allowed.
+    pub(crate) async fn retire_revoked_device_sessions(
+        &self,
+        user_id: UserIdInDb,
+        machine_id: uuid::Uuid,
+    ) -> Result<(), sea_orm::DbErr> {
+        if !self.webhook_config.uses_local_device_tokens() {
+            self.disconnect_session_by_machine_id(user_id, &machine_id)
+                .await;
+            return Ok(());
+        }
+        let device_id = machine_id.to_string();
+        let tokens = self.storage.db().list_device_access_tokens(user_id).await?;
+        for token in tokens.into_iter().filter(|token| {
+            token.machine_id.as_deref() == Some(device_id.as_str()) && token.revoked_at.is_some()
+        }) {
+            self.disconnect_sessions_by_device_token(user_id, &token.id, token.auth_generation)
+                .await;
+        }
+        Ok(())
+    }
+
     pub async fn list_machine_by_user_id(&self, user_id: UserIdInDb) -> Vec<url::Url> {
         self.storage.list_user_clients(user_id)
     }

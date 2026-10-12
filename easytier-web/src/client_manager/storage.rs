@@ -10,12 +10,23 @@ use super::session::{
 };
 
 // use this to maintain Storage
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct StorageToken {
+    #[serde(skip)]
     pub token: String,
     pub client_url: url::Url,
     pub machine_id: uuid::Uuid,
     pub user_id: UserIdInDb,
+}
+
+impl std::fmt::Debug for StorageToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorageToken")
+            .field("machine_id", &self.machine_id)
+            .field("user_id", &self.user_id)
+            .field("client_url", &self.client_url)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]

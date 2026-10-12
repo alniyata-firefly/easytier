@@ -113,6 +113,7 @@ pub(super) struct ManagedRuntimeState {
     pub(super) pending_managed_config_reconcile: Option<ManagedConfigReconcileHint>,
     pub(super) runtime_config_epoch: u64,
     pub(super) runtime_config_cache_epoch: u64,
+    pub(super) last_reconciliation_error: Option<String>,
 }
 
 pub(super) type SharedManagedRuntimeState = Arc<Mutex<ManagedRuntimeState>>;
@@ -123,7 +124,6 @@ impl SessionAuthState {
     }
 }
 
-#[derive(Debug)]
 pub struct SessionData {
     storage: WeakRefStorage,
     feature_flags: Arc<FeatureFlags>,
@@ -145,6 +145,19 @@ pub struct SessionData {
     webhook_validation_change_epoch: u64,
     webhook_validation_notify: Arc<Notify>,
     session_epoch: u64,
+    device_token_identity: Option<crate::db::DeviceTokenIdentity>,
+}
+
+impl Debug for SessionData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionData")
+            .field("client_url", &self.client_url)
+            .field("auth_state", &self.auth_state)
+            .field("storage_token", &self.storage_token)
+            .field("device_token_identity", &self.device_token_identity)
+            .field("session_epoch", &self.session_epoch)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SessionData {
@@ -177,6 +190,7 @@ impl SessionData {
             webhook_validation_change_epoch: 0,
             webhook_validation_notify: Arc::new(Notify::new()),
             session_epoch: 0,
+            device_token_identity: None,
         }
     }
 
@@ -500,11 +514,20 @@ fn should_notify_webhook_validation(heartbeat_count: u32) -> bool {
     heartbeat_count % WEBHOOK_VALIDATION_HEARTBEAT_INTERVAL == 1
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct HeartbeatIdentity {
     token: String,
     machine_id: uuid::Uuid,
     runtime_id: Option<uuid::Uuid>,
+}
+
+impl Debug for HeartbeatIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeartbeatIdentity")
+            .field("machine_id", &self.machine_id)
+            .field("runtime_id", &self.runtime_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl HeartbeatIdentity {
@@ -558,7 +581,59 @@ impl SessionRpcService {
             return false;
         };
         let data = session_data.read().await;
-        Self::runtime_heartbeat_is_current_locked(&data, req)
+        if !Self::runtime_heartbeat_is_current_locked(&data, req) {
+            return false;
+        }
+        if let Some(identity) = data.device_token_identity.as_ref() {
+            let Some(storage) = data.storage.upgrade() else {
+                return false;
+            };
+            return storage
+                .db
+                .resolve_device_access_token(&req.user_token, identity.machine_id)
+                .await
+                .ok()
+                .flatten()
+                .as_ref()
+                == Some(identity);
+        }
+        true
+    }
+
+    /// Fences final runtime state publication against credential rotation/revocation.
+    /// Callers retain this guard until after updating the session's runtime state.
+    async fn runtime_authentication_guard(
+        session_data: &std::sync::Weak<RwLock<SessionData>>,
+        req: &HeartbeatRequest,
+    ) -> Option<tokio::sync::OwnedRwLockReadGuard<()>> {
+        let session = session_data.upgrade()?;
+        let (db, identity, local) = {
+            let data = session.read().await;
+            if !Self::runtime_heartbeat_is_current_locked(&data, req) {
+                return None;
+            }
+            let storage = data.storage.upgrade()?;
+            (
+                storage.db.clone(),
+                data.device_token_identity.clone(),
+                data.webhook_config.uses_local_device_tokens(),
+            )
+        };
+        let guard = db.device_auth_gate.clone().read_owned().await;
+        if local {
+            let identity = identity?;
+            if db
+                .resolve_device_access_token(&req.user_token, identity.machine_id)
+                .await
+                .ok()
+                .flatten()
+                .as_ref()
+                != Some(&identity)
+            {
+                return None;
+            }
+        }
+        Some(guard)
     }
 
     fn runtime_heartbeat_is_current_locked(data: &SessionData, req: &HeartbeatRequest) -> bool {
@@ -716,6 +791,28 @@ impl SessionRpcService {
         req: HeartbeatRequest,
         machine_id: uuid::Uuid,
     ) -> rpc_types::error::Result<HeartbeatResponse> {
+        let db = storage.db();
+        let _guard = db.device_auth_gate.read().await;
+        {
+            let mut data = self.data.write().await;
+            if let Some(identity) = data.device_token_identity.as_ref() {
+                let valid = db
+                    .resolve_device_access_token(&req.user_token, machine_id)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("device authentication lookup failed"))?
+                    .as_ref()
+                    == Some(identity);
+                if !valid {
+                    data.auth_state = SessionAuthState::Invalid;
+                    data.webhook_validation_change_epoch =
+                        data.webhook_validation_change_epoch.wrapping_add(1);
+                    if let Some(token) = data.storage_token.as_ref() {
+                        storage.remove_session_client(token, data.session_epoch);
+                    }
+                    return Err(anyhow::anyhow!("device credential is no longer valid").into());
+                }
+            }
+        }
         let (notify, runtime_notify) = {
             let mut data = self.data.write().await;
             Self::ensure_session_identity_locked(&mut data, &req, machine_id)
@@ -1005,6 +1102,28 @@ impl Session {
     }
 
     pub async fn stop(&self) {
+        let disconnect = {
+            let mut data = self.data.write().await;
+            data.auth_state = SessionAuthState::Invalid;
+            data.webhook_validation_change_epoch =
+                data.webhook_validation_change_epoch.wrapping_add(1);
+            if let (Ok(storage), Some(token)) = (
+                Storage::try_from(data.storage.clone()),
+                data.storage_token.as_ref(),
+            ) {
+                storage.remove_session_client(token, data.session_epoch);
+            }
+            data.webhook_validation_notify.notify_waiters();
+            let token = data.storage_token.clone();
+            data.webhook_connected_binding_version
+                .take()
+                .and_then(|version| {
+                    token.map(|token| (data.webhook_config.clone(), token, version))
+                })
+        };
+        if let Some((webhook, token, version)) = disconnect {
+            notify_webhook_node_disconnected(webhook, token, version);
+        }
         if let Some(task) = &self.webhook_validation_task {
             task.abort();
         }
@@ -1092,6 +1211,59 @@ impl Session {
 
     pub async fn get_heartbeat_req(&self) -> Option<HeartbeatRequest> {
         self.data.read().await.req()
+    }
+
+    pub(crate) async fn reconciliation_error(&self) -> Option<String> {
+        let data = self.data.read().await;
+        let error = data.managed_runtime().last_reconciliation_error.clone();
+        error
+    }
+
+    pub(crate) async fn belongs_to_device_token(
+        &self,
+        token_id: &str,
+        owner: i32,
+        current_generation: u64,
+    ) -> bool {
+        let data = self.data.read().await;
+        data.device_token_identity.as_ref().is_some_and(|identity| {
+            identity.token_id == token_id
+                && identity.user_id == owner
+                && identity.auth_generation < current_generation
+        })
+    }
+
+    pub(crate) async fn has_device_token_hash(&self, hash: &str) -> bool {
+        let data = self.data.read().await;
+        data.webhook_config.uses_local_device_tokens()
+            && data
+                .req
+                .as_ref()
+                .is_some_and(|req| crate::db::device_access_token_hash(&req.user_token) == hash)
+    }
+
+    pub(crate) async fn management_access_valid(&self) -> bool {
+        let data = self.data.read().await;
+        if !data.auth_state.is_authorized() {
+            return false;
+        }
+        if let Some(identity) = data.device_token_identity.as_ref() {
+            let Some(storage) = data.storage.upgrade() else {
+                return false;
+            };
+            let Some(token) = data.storage_token.as_ref() else {
+                return false;
+            };
+            return storage
+                .db
+                .resolve_device_access_token(&token.token, identity.machine_id)
+                .await
+                .ok()
+                .flatten()
+                .as_ref()
+                == Some(identity);
+        }
+        !data.webhook_config.uses_local_device_tokens()
     }
 
     pub(crate) async fn applied_config_revision(&self) -> Option<String> {

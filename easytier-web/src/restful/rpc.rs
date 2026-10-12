@@ -3,8 +3,9 @@ use std::sync::Arc;
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
-    http::StatusCode,
-    routing::post,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{get, post},
 };
 use axum_login::AuthUser as _;
 use easytier::proto::{
@@ -49,6 +50,12 @@ async fn handle_proxy_rpc_by_session(
     session: &crate::client_manager::session::Session,
     req: ProxyRpcRequest,
 ) -> Result<Json<serde_json::Value>, HttpHandleError> {
+    if !session.management_access_valid().await {
+        return Err((
+            StatusCode::FORBIDDEN,
+            other_error("device management access is no longer authorized").into(),
+        ));
+    }
     let ProxyRpcRequest {
         service_name,
         method_name,
@@ -367,6 +374,12 @@ pub async fn handle_proxy_rpc(
             StatusCode::NOT_FOUND,
             other_error("Session not found").into(),
         ))?;
+    if !session.management_access_valid().await {
+        return Err((
+            StatusCode::FORBIDDEN,
+            other_error("device management access is no longer authorized").into(),
+        ));
+    }
     if _mutation.is_some() {
         let central = network_service
             .db
@@ -384,10 +397,79 @@ pub async fn handle_proxy_rpc(
 }
 
 pub fn router() -> Router<super::AppStateInner> {
-    Router::new().route(
-        "/api/v1/machines/{machine-id}/proxy-rpc",
-        post(handle_proxy_rpc),
+    Router::new()
+        .route(
+            "/api/v1/machines/{machine-id}/proxy-rpc",
+            post(handle_proxy_rpc),
+        )
+        .route(
+            "/api/v1/machines/{machine-id}/networks/{instance-id}/metrics",
+            get(handle_prometheus_stats),
+        )
+}
+
+async fn prometheus_stats_for_session(
+    session: &crate::client_manager::session::Session,
+    instance_id: uuid::Uuid,
+) -> Result<Response, HttpHandleError> {
+    let Json(value) = handle_proxy_rpc_by_session(
+        session,
+        ProxyRpcRequest {
+            service_name: "api.instance.StatsRpcService".to_owned(),
+            method_name: "get_prometheus_stats".to_owned(),
+            payload: serde_json::json!({
+                "instance": {"id": easytier::proto::common::Uuid::from(instance_id)},
+            }),
+            scope: None,
+        },
     )
+    .await?;
+    let text = match value.get("prometheus_text") {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        None if value.is_object() => String::new(),
+        _ => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                other_error("invalid metrics response from device").into(),
+            ));
+        }
+    };
+    Ok((
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        text,
+    )
+        .into_response())
+}
+
+async fn handle_prometheus_stats(
+    auth_session: super::users::AuthSession,
+    State(client_mgr): AppState,
+    Path((machine_id, instance_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<Response, HttpHandleError> {
+    let user_id = super::authed_user_id(&auth_session)?;
+    let session = client_mgr
+        .get_session_by_machine_id(user_id, &machine_id)
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            other_error("Session not found").into(),
+        ))?;
+    prometheus_stats_for_session(session.as_ref(), instance_id).await
+}
+
+async fn handle_prometheus_stats_internal(
+    State(client_mgr): AppState,
+    Path((user_id, machine_id, instance_id)): Path<(UserIdInDb, uuid::Uuid, uuid::Uuid)>,
+) -> Result<Response, HttpHandleError> {
+    let session = client_mgr
+        .get_session_by_machine_id(user_id, &machine_id)
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            other_error("Session not found").into(),
+        ))?;
+    prometheus_stats_for_session(session.as_ref(), instance_id).await
 }
 
 /// Internal proxy-rpc handler: no AuthSession, resolves the active session by machine_id.
@@ -406,10 +488,15 @@ pub async fn handle_proxy_rpc_internal(
 }
 
 pub fn router_internal() -> Router<super::AppStateInner> {
-    Router::new().route(
-        "/api/internal/users/{user-id}/machines/{machine-id}/proxy-rpc",
-        post(handle_proxy_rpc_internal),
-    )
+    Router::new()
+        .route(
+            "/api/internal/users/{user-id}/machines/{machine-id}/proxy-rpc",
+            post(handle_proxy_rpc_internal),
+        )
+        .route(
+            "/api/internal/users/{user-id}/machines/{machine-id}/networks/{instance-id}/metrics",
+            get(handle_prometheus_stats_internal),
+        )
 }
 
 #[cfg(test)]

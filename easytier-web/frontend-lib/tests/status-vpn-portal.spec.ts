@@ -231,4 +231,25 @@ describe('WireGuard devices', () => {
     expect(wrapper.text()).not.toContain('phone-a')
     expect(wrapper.text()).toContain('vpn_portal_no_clients')
   })
+  it('isolates WireGuard counters by the actual portal client label', async () => {
+    const { api } = backend()
+    const metrics = [
+      { name: 'vpn_portal_client_bytes_rx', value: '1024', labels: { vpn_portal_client: 'phone-a', network_name: 'home' } },
+      { name: 'vpn_portal_client_bytes_tx', value: '2048', labels: { vpn_portal_client: 'phone-a', network_name: 'home' } },
+      { name: 'vpn_portal_client_bytes_rx', value: '1048576', labels: { vpn_portal_client: 'phone-b', network_name: 'home' } },
+    ]
+    ;(api as any).get_stats = vi.fn(async () => metrics)
+    const wrapper = render(VpnPortalDialog, api)
+    await load()
+    expect(wrapper.text()).toContain('1 KiB')
+    expect(wrapper.text()).toContain('2 KiB')
+    expect(wrapper.text()).not.toContain('1 MiB')
+    expect(wrapper.text()).toContain('↓ —')
+    ;(api as any).get_stats.mockRejectedValueOnce(new Error('old core'))
+    await vi.advanceTimersByTimeAsync(3001)
+    await flushPromises()
+    expect(wrapper.text()).toContain('web.adaptation.stats_unavailable')
+    expect(wrapper.text()).not.toContain('1 KiB')
+  })
+
 })

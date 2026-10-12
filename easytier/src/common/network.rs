@@ -4,7 +4,7 @@ use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 #[cfg(all(target_os = "macos", not(feature = "macos-ne")))]
 use tokio::sync::Mutex;
 
-use crate::proto::peer_rpc::GetIpListResponse;
+use crate::proto::peer_rpc::{GetIpListResponse, InterfaceNetwork};
 
 use super::netns::NetNS;
 
@@ -73,7 +73,6 @@ fn has_nonzero_mac(iface: &NetworkInterface) -> bool {
     })
 }
 
-#[allow(dead_code)]
 pub(crate) fn ip_mask_to_prefix(mask: IpAddr) -> Result<u8, ()> {
     match mask {
         IpAddr::V4(mask) => {
@@ -97,6 +96,22 @@ pub(crate) fn ip_mask_to_prefix(mask: IpAddr) -> Result<u8, ()> {
             (raw == expected).then_some(prefix).ok_or(())
         }
     }
+}
+
+fn describe_interface_address(
+    name: &str,
+    addr: network_interface::Addr,
+) -> Option<InterfaceNetwork> {
+    let prefix_length = addr
+        .netmask()
+        .map(|mask| ip_mask_to_prefix(mask).map(u32::from))
+        .transpose()
+        .ok()?;
+    Some(InterfaceNetwork {
+        name: name.to_owned(),
+        address: Some(addr.ip().into()),
+        prefix_length,
+    })
 }
 
 struct InterfaceFilter {
@@ -421,26 +436,32 @@ async fn collect_local_ip_addrs_in_current_namespace() -> GetIpListResponse {
 
     let ifaces = collect_interfaces_in_current_namespace(true).await;
     for iface in ifaces {
-        for ip in iface.addr {
-            let ip: std::net::IpAddr = ip.ip();
+        for addr in iface.addr {
+            let ip: std::net::IpAddr = addr.ip();
             if let std::net::IpAddr::V4(v4) = ip {
                 if ip.is_loopback() || ip.is_multicast() {
                     continue;
                 }
                 ret.interface_ipv4s.push(v4.into());
+                if let Some(network) = describe_interface_address(&iface.name, addr) {
+                    ret.interface_networks.push(network);
+                }
             }
         }
     }
 
     let ifaces = collect_interfaces_in_current_namespace(false).await;
     for iface in ifaces {
-        for ip in iface.addr {
-            let ip: std::net::IpAddr = ip.ip();
+        for addr in iface.addr {
+            let ip: std::net::IpAddr = addr.ip();
             if let std::net::IpAddr::V6(v6) = ip {
                 if v6.is_multicast() || v6.is_loopback() || v6.is_unicast_link_local() {
                     continue;
                 }
                 ret.interface_ipv6s.push(v6.into());
+                if let Some(network) = describe_interface_address(&iface.name, addr) {
+                    ret.interface_networks.push(network);
+                }
             }
         }
     }
@@ -480,6 +501,50 @@ mod tests {
             ip_mask_to_prefix(IpAddr::V4("255.0.255.0".parse().unwrap())),
             Err(())
         );
+    }
+
+    #[test]
+    fn reports_actual_interface_prefixes_and_keeps_unknown_masks_unknown() {
+        use network_interface::{Addr, V4IfAddr, V6IfAddr};
+
+        let v4 = Addr::V4(V4IfAddr {
+            ip: "10.0.3.11".parse().unwrap(),
+            netmask: Some("255.255.254.0".parse().unwrap()),
+            broadcast: None,
+        });
+        let network = describe_interface_address("eth0", v4).unwrap();
+        assert_eq!(network.name, "eth0");
+        assert_eq!(network.prefix_length, Some(23));
+        assert_eq!(network.address.unwrap().to_string(), "10.0.3.11");
+
+        let v6 = Addr::V6(V6IfAddr {
+            ip: "fd00:1:1::11".parse().unwrap(),
+            netmask: Some("ffff:ffff:ffff:ffff::".parse().unwrap()),
+            broadcast: None,
+        });
+        assert_eq!(
+            describe_interface_address("eth0", v6)
+                .unwrap()
+                .prefix_length,
+            Some(64)
+        );
+        let unknown = Addr::V4(V4IfAddr {
+            ip: "10.2.0.3".parse().unwrap(),
+            netmask: None,
+            broadcast: None,
+        });
+        assert_eq!(
+            describe_interface_address("eth1", unknown)
+                .unwrap()
+                .prefix_length,
+            None
+        );
+        let invalid = Addr::V4(V4IfAddr {
+            ip: "10.2.0.3".parse().unwrap(),
+            netmask: Some("255.0.255.0".parse().unwrap()),
+            broadcast: None,
+        });
+        assert!(describe_interface_address("eth1", invalid).is_none());
     }
 
     #[cfg(target_os = "linux")]

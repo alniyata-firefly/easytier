@@ -91,6 +91,29 @@ fn convert_error(e: RemoteClientError<DbErr>) -> (StatusCode, Json<Error>) {
     }
 }
 
+async fn ensure_management_access(
+    client_mgr: &crate::client_manager::ClientManager,
+    user_id: UserIdInDb,
+    machine_id: uuid::Uuid,
+) -> Result<(), HttpHandleError> {
+    // Offline desired-config editing remains available. A live session must
+    // still hold valid management credentials before any RPC is dispatched.
+    if let Some(session) = client_mgr.get_session_by_machine_id(user_id, &machine_id)
+        && !session.management_access_valid().await
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            other_error("device management access is no longer authorized").into(),
+        ));
+    }
+    Ok(())
+}
+
+fn public_heartbeat(mut request: HeartbeatRequest) -> HeartbeatRequest {
+    request.user_token.clear();
+    request
+}
+
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct ValidateConfigJsonReq {
     config: NetworkConfig,
@@ -258,6 +281,8 @@ impl NetworkApi {
         Path(machine_id): Path<uuid::Uuid>,
         Json(payload): Json<ValidateConfigJsonReq>,
     ) -> Result<Json<ValidateConfigResponse>, HttpHandleError> {
+        ensure_management_access(&client_mgr, Self::get_user_id(&auth_session)?, machine_id)
+            .await?;
         Ok(client_mgr
             .handle_validate_config(
                 (Self::get_user_id(&auth_session)?, machine_id),
@@ -276,6 +301,7 @@ impl NetworkApi {
         Json(mut payload): Json<RunNetworkJsonReq>,
     ) -> Result<Json<Void>, HttpHandleError> {
         let user_id = Self::get_user_id(&auth_session)?;
+        ensure_management_access(&client_mgr, user_id, machine_id).await?;
         let instance_id = match payload.config.instance_id.as_deref() {
             Some(raw) => uuid::Uuid::parse_str(raw).map_err(|error| {
                 (
@@ -318,6 +344,8 @@ impl NetworkApi {
         State(client_mgr): AppState,
         Path((machine_id, inst_id)): Path<(uuid::Uuid, uuid::Uuid)>,
     ) -> Result<Json<CollectNetworkInfoResponse>, HttpHandleError> {
+        ensure_management_access(&client_mgr, Self::get_user_id(&auth_session)?, machine_id)
+            .await?;
         Ok(client_mgr
             .handle_collect_network_info(
                 (Self::get_user_id(&auth_session)?, machine_id),
@@ -334,6 +362,8 @@ impl NetworkApi {
         Path(machine_id): Path<uuid::Uuid>,
         Json(payload): Json<CollectNetworkInfoJsonReq>,
     ) -> Result<Json<CollectNetworkInfoResponse>, HttpHandleError> {
+        ensure_management_access(&client_mgr, Self::get_user_id(&auth_session)?, machine_id)
+            .await?;
         Ok(client_mgr
             .handle_collect_network_info(
                 (Self::get_user_id(&auth_session)?, machine_id),
@@ -349,6 +379,8 @@ impl NetworkApi {
         State(client_mgr): AppState,
         Path(machine_id): Path<uuid::Uuid>,
     ) -> Result<Json<ListNetworkInstanceIdsJsonResp>, HttpHandleError> {
+        ensure_management_access(&client_mgr, Self::get_user_id(&auth_session)?, machine_id)
+            .await?;
         Ok(client_mgr
             .handle_list_network_instance_ids((Self::get_user_id(&auth_session)?, machine_id))
             .await
@@ -364,6 +396,7 @@ impl NetworkApi {
     ) -> Result<(), HttpHandleError> {
         let user_id = Self::get_user_id(&auth_session)?;
         let _mutation = network_service.lock_mutations().await;
+        ensure_management_access(&client_mgr, user_id, machine_id).await?;
         ensure_direct_mutation_allowed(&network_service, user_id, machine_id, inst_id, None)
             .await?;
         client_mgr
@@ -385,12 +418,9 @@ impl NetworkApi {
         Path(machine_id): Path<uuid::Uuid>,
         Query(params): Query<DeleteMachineParams>,
     ) -> Result<StatusCode, HttpHandleError> {
+        let user_id = Self::get_user_id(&auth_session)?;
         let deleted = network_service
-            .delete_device(
-                Self::get_user_id(&auth_session)?,
-                machine_id,
-                params.block.unwrap_or(false),
-            )
+            .delete_device(user_id, machine_id, params.block.unwrap_or(false))
             .await
             .map_err(super::central_network::convert_error)?;
         if !deleted {
@@ -471,7 +501,10 @@ impl NetworkApi {
             let client_urls = client_mgr.list_machine_by_user_id(user_id).await;
             let mut machines = Vec::with_capacity(client_urls.len());
             for client_url in client_urls {
-                let info = client_mgr.get_heartbeat_requests(&client_url).await;
+                let info = client_mgr
+                    .get_heartbeat_requests(&client_url)
+                    .await
+                    .map(public_heartbeat);
                 let location = client_mgr.get_machine_location(&client_url).await;
                 machines.push(ListMachineItem {
                     client_url: Some(client_url),
@@ -507,7 +540,10 @@ impl NetworkApi {
                     .into(),
                 )
             })?;
-            let session = client_mgr.get_session_by_machine_id(user_id, &machine_id);
+            let session = match client_mgr.get_session_by_machine_id(user_id, &machine_id) {
+                Some(session) if session.management_access_valid().await => Some(session),
+                _ => None,
+            };
             let client_url = match &session {
                 Some(session) => session.get_token().await.map(|token| token.client_url),
                 None => device.client_url.parse::<url::Url>().ok(),
@@ -518,7 +554,7 @@ impl NetworkApi {
             };
             let online = session.is_some();
             let info = match session {
-                Some(session) => session.get_heartbeat_req().await,
+                Some(session) => session.get_heartbeat_req().await.map(public_heartbeat),
                 None => Some(HeartbeatRequest {
                     machine_id: Some(machine_id.into()),
                     inst_id: None,
@@ -572,6 +608,7 @@ impl NetworkApi {
 
         let user_id = Self::get_user_id(&auth_session)?;
         let _mutation = network_service.lock_mutations().await;
+        ensure_management_access(&client_mgr, user_id, machine_id).await?;
         ensure_direct_mutation_allowed(&network_service, user_id, machine_id, inst_id, None)
             .await?;
         client_mgr
@@ -593,6 +630,8 @@ impl NetworkApi {
         Path(machine_id): Path<uuid::Uuid>,
         Json(payload): Json<GetNetworkMetasJsonReq>,
     ) -> Result<Json<GetNetworkMetasResponse>, HttpHandleError> {
+        ensure_management_access(&client_mgr, Self::get_user_id(&auth_session)?, machine_id)
+            .await?;
         Ok(Json(
             client_mgr
                 .handle_get_network_metas(
@@ -666,6 +705,7 @@ impl NetworkApi {
     ) -> Result<(), HttpHandleError> {
         let user_id = Self::get_user_id(&auth_session)?;
         let _mutation = network_service.lock_mutations().await;
+        ensure_management_access(&client_mgr, user_id, machine_id).await?;
         ensure_direct_mutation_allowed(&network_service, user_id, machine_id, inst_id, None)
             .await?;
         client_mgr
@@ -687,6 +727,7 @@ impl NetworkApi {
         Path((user_id, machine_id)): Path<(UserIdInDb, uuid::Uuid)>,
         Json(payload): Json<RunNetworkJsonReq>,
     ) -> Result<Json<Void>, HttpHandleError> {
+        ensure_management_access(&client_mgr, user_id, machine_id).await?;
         let source = payload
             .source
             .and_then(config_source_from_rpc)
@@ -713,6 +754,7 @@ impl NetworkApi {
         State(client_mgr): AppState,
         Path((user_id, machine_id, inst_id)): Path<(UserIdInDb, uuid::Uuid, uuid::Uuid)>,
     ) -> Result<(), HttpHandleError> {
+        ensure_management_access(&client_mgr, user_id, machine_id).await?;
         client_mgr
             .invalidate_applied_config_revision(user_id, machine_id)
             .await;
@@ -783,6 +825,7 @@ impl NetworkApi {
         State(client_mgr): AppState,
         Path((user_id, machine_id)): Path<(UserIdInDb, uuid::Uuid)>,
     ) -> Result<Json<ListNetworkInstanceIdsJsonResp>, HttpHandleError> {
+        ensure_management_access(&client_mgr, user_id, machine_id).await?;
         Ok(client_mgr
             .handle_list_network_instance_ids((user_id, machine_id))
             .await
@@ -795,6 +838,7 @@ impl NetworkApi {
         Path((user_id, machine_id)): Path<(UserIdInDb, uuid::Uuid)>,
         Json(payload): Json<CollectNetworkInfoJsonReq>,
     ) -> Result<Json<CollectNetworkInfoResponse>, HttpHandleError> {
+        ensure_management_access(&client_mgr, user_id, machine_id).await?;
         Ok(client_mgr
             .handle_collect_network_info((user_id, machine_id), payload.inst_ids)
             .await
@@ -879,6 +923,19 @@ impl NetworkApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_device_heartbeat_does_not_disclose_management_token() {
+        let request = HeartbeatRequest {
+            user_token: "management-token-canary".to_owned(),
+            hostname: "fixture-device".to_owned(),
+            ..Default::default()
+        };
+        let public = public_heartbeat(request);
+        assert_eq!(public.hostname, "fixture-device");
+        let json = serde_json::to_string(&public).unwrap();
+        assert!(!json.contains("management-token-canary"));
+    }
 
     #[tokio::test]
     async fn internal_runtime_only_write_reconciles_the_already_applied_revision() {
@@ -1060,6 +1117,8 @@ mod tests {
                         config_server_protocol: "tcp".into(),
                         config_server_port: 22020,
                         webhook_auth: true,
+                        advertised_config_server_url: None,
+                        registration_enabled: false,
                     };
                     let machines = NetworkApi::handle_list_machines(
                         auth.clone(),

@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { Button, Checkbox, Column, DataTable, Dialog, Drawer, InputText, SelectButton, Skeleton, useToast } from 'primevue';
 import Tooltip from 'primevue/tooltip';
 import { useRoute, useRouter } from 'vue-router';
 import { Utils } from 'easytier-frontend-lib';
 import DeviceDetails from './DeviceDetails.vue';
+import DeviceAccessTokens from './DeviceAccessTokens.vue';
+import { useVisiblePolling } from '../modules/polling';
 import { useI18n } from 'vue-i18n'
 import ApiClient from '../modules/api';
 
@@ -38,24 +40,9 @@ const viewModeOptions = [
 const viewModeLabel = (value: string) => t(value === 'card' ? 'web.console.view_card' : 'web.console.view_table');
 watch(viewMode, (mode) => localStorage.setItem('deviceList.viewMode', mode));
 
-// Zero-device state is where users look for "how do I add one": surface
-// the enrollment command right there.
-const enrollInfo = ref<Awaited<ReturnType<ApiClient['get_console_info']>> | null>(null);
-const enrollCommand = computed(() => {
-    if (!enrollInfo.value) return '';
-    const host = window.location.hostname;
-    const { config_server_protocol: proto, config_server_port: port, username } = enrollInfo.value;
-    return `easytier-core --config-server ${proto}://${host}:${port}/${username}`;
-});
-
-const copyEnrollCommand = async () => {
-    try {
-        await navigator.clipboard.writeText(enrollCommand.value);
-        toast.add({ severity: 'success', summary: t('web.common.confirm'), life: 1500 });
-    } catch (e) {
-        console.error(e);
-    }
-};
+const tokensVisible = ref(false);
+const tokenMachineId = ref<string>();
+const openTokens = (device?: Utils.DeviceInfo) => { tokenMachineId.value = device?.machine_id; tokensVisible.value = true; };
 
 const loadDevices = async () => {
     if (refreshing.value) return;
@@ -64,30 +51,17 @@ const loadDevices = async () => {
         const resp = await api?.list_machines();
         deviceList.value = (resp || []).map(Utils.buildDeviceInfo);
         loadError.value = false;
+        return true;
     } catch (e) {
         loadError.value = true;
         console.error(e);
+        return false;
     } finally {
         refreshing.value = false;
     }
 };
 
-const periodFunc = new Utils.PeriodicTask(async () => {
-    try {
-        await loadDevices();
-    } catch (e) {
-        console.error(e);
-    }
-}, 1000);
-
-onMounted(() => {
-    periodFunc.start();
-    api?.get_console_info().then(info => { enrollInfo.value = info; }).catch(() => {});
-});
-
-onUnmounted(() => {
-    periodFunc.stop();
-});
+useVisiblePolling(loadDevices, 2000);
 
 const selectedDeviceId = computed<string | undefined>(() => route.params.deviceId as string);
 
@@ -213,8 +187,9 @@ const locationText = (device: Utils.DeviceInfo) => {
                                 :aria-label="viewModeLabel(option.value)"></i>
                         </template>
                     </SelectButton>
+                    <Button v-if="centralEnabled" icon="pi pi-key" :label="t('web.adaptation.device_tokens')" severity="secondary" outlined @click="openTokens()" />
                     <Button icon="pi pi-refresh" text severity="secondary" :aria-label="t('web.console.refresh')"
-                        :loading="refreshing" @click="loadDevices" />
+                        :loading="refreshing" @click="api?.clear_snapshots(); loadDevices()" />
                 </div>
             </div>
             <div v-if="deviceList === undefined && !loadError" class="loading-rows">
@@ -223,17 +198,13 @@ const locationText = (device: Utils.DeviceInfo) => {
             <div v-else-if="loadError" class="console-empty-state">
                 <i class="pi pi-exclamation-triangle" aria-hidden="true"></i>
                 <h2>{{ t('web.console.load_failed') }}</h2>
-                <Button :label="t('web.console.retry')" icon="pi pi-refresh" @click="loadDevices" />
+                <Button :label="t('web.console.retry')" icon="pi pi-refresh" @click="api?.clear_snapshots(); loadDevices()" />
             </div>
             <div v-else-if="sortedDeviceList.length === 0" class="console-empty-state">
                 <i class="pi pi-server" aria-hidden="true"></i>
                 <h2>{{ search ? t('web.console.no_results') : t('web.console.devices_empty') }}</h2>
                 <p v-if="!search">{{ t('web.console.devices_empty_hint') }}</p>
-                <div v-if="!search && enrollCommand" class="flex items-center gap-2 justify-center mt-2 flex-wrap">
-                    <code class="mono-value p-2 rounded" style="background: var(--console-ground); word-break: break-all">{{ enrollCommand }}</code>
-                    <Button icon="pi pi-copy" severity="secondary" outlined size="small"
-                        :aria-label="t('web.console.enroll_copy')" @click="copyEnrollCommand" />
-                </div>
+                <Button v-if="!search && centralEnabled" :label="t('web.adaptation.issue_token')" icon="pi pi-plus" @click="openTokens()" />
             </div>
             <template v-else>
                 <DataTable v-if="viewMode === 'table'" :value="sortedDeviceList" class="console-table desktop-list" size="small"
@@ -264,6 +235,7 @@ const locationText = (device: Utils.DeviceInfo) => {
                     <Column :header="t('web.console.manage')" style="width: 7rem">
                         <template #body="{ data }">
                             <div class="flex items-center gap-1">
+                                <Button v-if="centralEnabled" icon="pi pi-key" text rounded severity="secondary" :aria-label="t('web.adaptation.device_tokens')" @click="openTokens(data)" />
                                 <Button v-if="centralEnabled" v-tooltip.top="t('web.console.set_alias')" icon="pi pi-pencil" severity="secondary"
                                     text rounded :aria-label="t('web.console.set_alias')" @click="handleSetAlias(data)" />
                                 <Button v-if="centralEnabled" v-tooltip.top="t('web.console.delete_device')" icon="pi pi-trash" severity="danger"
@@ -324,6 +296,8 @@ const locationText = (device: Utils.DeviceInfo) => {
                 </div>
             </template>
         </section>
+
+        <DeviceAccessTokens v-if="api" :api="api" :machine-id="tokenMachineId" v-model:visible="tokensVisible" />
 
         <!-- 设置别名对话框 -->
         <Dialog v-model:visible="aliasVisible" modal :header="t('web.console.alias_dialog_title')" :style="{ width: '26rem' }">

@@ -103,12 +103,30 @@ pub struct UpdateMemberReq {
     pub proxy_cidrs: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct GenerateCredentialReq {
     pub ttl_seconds: u32,
     pub credential_id: Option<String>,
     #[serde(default = "default_true")]
     pub reusable: bool,
+    #[serde(default)]
+    pub acl_groups: Vec<String>,
+    #[serde(default)]
+    pub allow_relay: bool,
+    #[serde(default)]
+    pub allowed_proxy_cidrs: Vec<String>,
+    pub device_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct UpdateCredentialReq {
+    pub ttl_seconds: Option<u32>,
+    pub acl_groups: Option<Vec<String>>,
+    pub allow_relay: Option<bool>,
+    pub allowed_proxy_cidrs: Option<Vec<String>>,
+    pub reusable: Option<bool>,
+    #[serde(default)]
+    pub rotate_secret: bool,
 }
 
 fn default_true() -> bool {
@@ -148,6 +166,27 @@ pub struct NetworkDetail {
     pub public_server_url: Option<String>,
     pub peer_urls: Vec<String>,
     pub member_count: usize,
+    pub deployment: NetworkDeploymentStatus,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeviceDeploymentStatus {
+    pub device_id: String,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desired_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NetworkDeploymentStatus {
+    pub state: String,
+    pub devices: Vec<DeviceDeploymentStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<super::gateway::GatewayDeploymentStatus>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -169,6 +208,7 @@ pub struct MemberInfo {
     pub temporary: bool,
     pub credential_id: Option<String>,
     pub credential_expiry_unix: Option<i64>,
+    pub deployment: DeviceDeploymentStatus,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -184,6 +224,11 @@ pub struct NetworkCredentialInfo {
     pub expiry_unix: i64,
     pub reusable: bool,
     pub online_peers: Vec<TemporaryPeerInfo>,
+    pub acl_groups: Vec<String>,
+    pub allow_relay: bool,
+    pub allowed_proxy_cidrs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -193,6 +238,7 @@ pub struct CentralNetworkService {
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
     network_instances: Option<Arc<crate::central_network::gateway::NetworkInstanceManager>>,
     reconciler_started: Arc<AtomicBool>,
+    publication_errors: Arc<tokio::sync::RwLock<BTreeMap<(UserIdInDb, Option<Uuid>), String>>>,
 }
 
 impl CentralNetworkService {
@@ -211,6 +257,7 @@ impl CentralNetworkService {
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             network_instances,
             reconciler_started: Arc::new(AtomicBool::new(false)),
+            publication_errors: Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -263,7 +310,7 @@ impl CentralNetworkService {
             // deleting their last network also retires its Gateway runtime.
             users.extend(
                 instances
-                    .network_ids()
+                    .tracked_network_ids()
                     .await
                     .into_iter()
                     .map(|(user_id, _)| user_id),
@@ -405,6 +452,7 @@ impl CentralNetworkService {
     ) -> Result<NetworkDetail, CentralNetworkServiceError> {
         let intent = self.load(user_id, network_id).await?;
         let (networking_method, public_server_url, peer_urls) = mode_view(&intent.mode);
+        let deployment = self.network_deployment_status(&intent).await?;
         Ok(NetworkDetail {
             network_id: network_id.to_string(),
             display_name: intent.display_name,
@@ -416,6 +464,7 @@ impl CentralNetworkService {
             public_server_url,
             peer_urls,
             member_count: intent.members.len(),
+            deployment,
         })
     }
 
@@ -471,6 +520,7 @@ impl CentralNetworkService {
         if let Some(session) = self
             .client_manager
             .get_session_by_machine_id(user_id, &machine_id)
+            && session.management_access_valid().await
         {
             let owned = self
                 .db
@@ -487,6 +537,7 @@ impl CentralNetworkService {
                 let stopped = tokio::time::timeout(Duration::from_secs(30), async {
                     loop {
                         if !session.is_running()
+                            || !session.management_access_valid().await
                             || !self
                                 .client_manager
                                 .get_session_by_machine_id(user_id, &machine_id)
@@ -546,8 +597,8 @@ impl CentralNetworkService {
         };
         if deleted {
             self.client_manager
-                .disconnect_session_by_machine_id(user_id, &machine_id)
-                .await;
+                .retire_revoked_device_sessions(user_id, machine_id)
+                .await?;
             self.publish_user(user_id).await;
         }
         Ok(deleted)
@@ -596,7 +647,19 @@ impl CentralNetworkService {
                 )));
             }
             let member_id = Uuid::new_v4();
-            let credential_id = request.temporary.then(|| format!("member-{member_id}"));
+            // Device identity remains Core-owned. Permanent administrator
+            // members still have no credential; only temporary members use it.
+            let credential_id = request.temporary.then(|| device_id.to_string());
+            if credential_id.as_ref().is_some_and(|id| {
+                intent
+                    .credentials
+                    .iter()
+                    .any(|credential| &credential.id == id)
+            }) {
+                return Err(CentralNetworkServiceError::Conflict(format!(
+                    "device credential already exists: {device_id}"
+                )));
+            }
             if let Some(credential_id) = credential_id.as_ref() {
                 intent.credentials.push(NetworkCredentialIntent {
                     id: credential_id.clone(),
@@ -761,6 +824,18 @@ impl CentralNetworkService {
                 "credential TTL must be between 1 second and 365 days".into(),
             ));
         }
+        if let Some(device_id) = request.device_id {
+            let position = member_position(&intent, device_id)?;
+            if intent.members[position].credential_id.is_none() {
+                return Err(CentralNetworkServiceError::Invalid(
+                    "permanent member credentials cannot be changed into temporary identities"
+                        .into(),
+                ));
+            }
+            return Err(CentralNetworkServiceError::Conflict(
+                "temporary device already has a credential; update that credential instead".into(),
+            ));
+        }
         let credential_id = request
             .credential_id
             .filter(|id| !id.trim().is_empty())
@@ -779,14 +854,83 @@ impl CentralNetworkService {
             secret: random_secret(),
             expiry_unix: chrono::Utc::now().timestamp() + i64::from(request.ttl_seconds),
             grant: CredentialGrant {
-                acl_groups: Vec::new(),
-                allow_relay: false,
-                allowed_proxy_cidrs: Vec::new(),
+                acl_groups: request.acl_groups,
+                allow_relay: request.allow_relay,
+                allowed_proxy_cidrs: request.allowed_proxy_cidrs,
                 reusable: request.reusable,
             },
         });
         self.persist(intent).await?;
         self.credential_info(user_id, network_id, &credential_id)
+            .await
+    }
+
+    pub async fn update_credential(
+        &self,
+        user_id: UserIdInDb,
+        network_id: Uuid,
+        credential_id: &str,
+        request: UpdateCredentialReq,
+    ) -> Result<NetworkCredentialInfo, CentralNetworkServiceError> {
+        let _mutation = self.mutation_lock.lock().await;
+        let mut intent = self.load(user_id, network_id).await?;
+        if !intent.secure_mode {
+            return Err(CentralNetworkServiceError::Invalid(
+                "credentials require secure mode".into(),
+            ));
+        }
+        if request
+            .ttl_seconds
+            .is_some_and(|ttl| !(1..=MAX_CREDENTIAL_TTL_SECONDS).contains(&ttl))
+        {
+            return Err(CentralNetworkServiceError::Invalid(
+                "credential TTL must be between 1 second and 365 days".into(),
+            ));
+        }
+        let member_group = intent
+            .members
+            .iter()
+            .find(|member| member.credential_id.as_deref() == Some(credential_id))
+            .map(|member| member_group_name(member.id));
+        if member_group.is_some() && request.reusable == Some(true) {
+            return Err(CentralNetworkServiceError::Invalid(
+                "a member credential must be non-reusable".into(),
+            ));
+        }
+        let credential = intent
+            .credentials
+            .iter_mut()
+            .find(|credential| credential.id == credential_id)
+            .ok_or_else(|| CentralNetworkServiceError::NotFound(credential_id.to_owned()))?;
+        if let Some(ttl) = request.ttl_seconds {
+            credential.expiry_unix = chrono::Utc::now().timestamp() + i64::from(ttl);
+        }
+        if let Some(mut groups) = request.acl_groups {
+            if let Some(required_group) = member_group {
+                // The dedicated member group expresses the existing role. It
+                // cannot be accidentally dropped by a custom group edit.
+                if !groups.contains(&required_group) {
+                    groups.push(required_group);
+                }
+            }
+            credential.grant.acl_groups = groups;
+        }
+        if let Some(allow_relay) = request.allow_relay {
+            credential.grant.allow_relay = allow_relay;
+        }
+        if let Some(cidrs) = request.allowed_proxy_cidrs {
+            credential.grant.allowed_proxy_cidrs = cidrs;
+        }
+        if let Some(reusable) = request.reusable {
+            credential.grant.reusable = reusable;
+        }
+        if request.rotate_secret {
+            credential.secret = random_secret();
+        }
+        // Compile and persist the complete intent atomically; never bypass
+        // central ownership through the ephemeral Core credential RPC.
+        self.persist(intent).await?;
+        self.credential_info(user_id, network_id, credential_id)
             .await
     }
 
@@ -834,7 +978,7 @@ impl CentralNetworkService {
         .await;
         let mut result = Vec::with_capacity(intent.credentials.len());
         for credential in &intent.credentials {
-            let mut info = Self::credential_info_from_intent(credential);
+            let mut info = Self::credential_info_from_intent(&intent, credential);
             info.online_peers = credential_peers(&temporary_peers, &credential.id);
             result.push(info);
         }
@@ -860,12 +1004,18 @@ impl CentralNetworkService {
             .into_iter()
             .map(|device| (device.machine_id.clone(), device))
             .collect::<BTreeMap<_, _>>();
+        let expected_configs = compiled_configs_by_device(&intent)?;
         let members = futures::stream::iter(
             intent
                 .members
                 .iter()
                 .map(|member| {
-                    self.member_info_with_device(&intent, member, devices.get(&member.device_id))
+                    self.member_info_with_device(
+                        &intent,
+                        member,
+                        devices.get(&member.device_id),
+                        expected_configs.get(&member.device_id),
+                    )
                 })
                 .collect::<Vec<_>>(),
         )
@@ -898,8 +1048,14 @@ impl CentralNetworkService {
         let device_id = Uuid::parse_str(&member.device_id)
             .map_err(|_| CentralNetworkServiceError::Database("invalid stored device id".into()))?;
         let device = self.db.get_device((intent.user_id, device_id)).await?;
-        self.member_info_with_device(intent, member, device.as_ref())
-            .await
+        let expected_configs = compiled_configs_by_device(intent)?;
+        self.member_info_with_device(
+            intent,
+            member,
+            device.as_ref(),
+            expected_configs.get(&member.device_id),
+        )
+        .await
     }
 
     async fn member_info_with_device(
@@ -907,15 +1063,19 @@ impl CentralNetworkService {
         intent: &CentralNetworkIntent,
         member: &NetworkMemberIntent,
         device: Option<&crate::db::entity::devices::Model>,
+        expected_config: Option<&NetworkConfig>,
     ) -> Result<MemberInfo, CentralNetworkServiceError> {
         let user_id = intent.user_id;
         let network_id = intent.id;
         let device_id = Uuid::parse_str(&member.device_id)
             .map_err(|_| CentralNetworkServiceError::Database("invalid stored device id".into()))?;
-        let online = self
+        let online = match self
             .client_manager
             .get_session_by_machine_id(user_id, &device_id)
-            .is_some();
+        {
+            Some(session) => session.management_access_valid().await,
+            None => false,
+        };
         let mut running = None;
         let mut runtime_virtual_ipv4 = None;
         let mut error_msg = None;
@@ -972,6 +1132,137 @@ impl CentralNetworkService {
             temporary: member.credential_id.is_some(),
             credential_id: member.credential_id.clone(),
             credential_expiry_unix,
+            deployment: self
+                .device_deployment_status(intent, member, expected_config)
+                .await?,
+        })
+    }
+
+    async fn device_deployment_status(
+        &self,
+        intent: &CentralNetworkIntent,
+        member: &NetworkMemberIntent,
+        expected_config: Option<&NetworkConfig>,
+    ) -> Result<DeviceDeploymentStatus, CentralNetworkServiceError> {
+        let device_id = Uuid::parse_str(&member.device_id)
+            .map_err(|_| CentralNetworkServiceError::Database("invalid stored device id".into()))?;
+        let desired_revision = self
+            .db
+            .get_managed_config_revision((intent.user_id, device_id))
+            .await?;
+        let session = match self
+            .client_manager
+            .get_session_by_machine_id(intent.user_id, &device_id)
+        {
+            Some(session) if session.management_access_valid().await => Some(session),
+            _ => None,
+        };
+        let applied_revision = match &session {
+            Some(session) => session.applied_config_revision().await,
+            None => None,
+        };
+        let errors = self.publication_errors.read().await;
+        let mut last_error = errors
+            .get(&(intent.user_id, Some(device_id)))
+            .or_else(|| errors.get(&(intent.user_id, None)))
+            .cloned();
+        drop(errors);
+        if last_error.is_none() {
+            if let Some(session) = &session {
+                last_error = session.reconciliation_error().await;
+            }
+        }
+        // The revision is per-device and includes every managed instance. Also
+        // compare this network's durable desired config to the published row so
+        // an old applied revision cannot label a newly saved intent as applied
+        // when publication failed before writing the new device snapshot.
+        let expected = expected_config
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| CentralNetworkServiceError::Database(error.to_string()))?;
+        let published = sqlx::query_scalar::<_, String>(
+            "SELECT network_config FROM user_running_network_configs WHERE user_id = ? AND device_id = ? AND network_instance_id = ? AND source = 'web'",
+        ).bind(intent.user_id).bind(device_id.to_string()).bind(intent.id.to_string())
+            .fetch_optional(&self.db.inner()).await
+            .map_err(|error| CentralNetworkServiceError::Database(error.to_string()))?
+            .map(|json| serde_json::from_str::<serde_json::Value>(&json))
+            .transpose().map_err(|_| CentralNetworkServiceError::Database("invalid published network configuration".into()))?;
+        let published_matches = expected.is_some() && published == expected;
+        let state = device_deployment_state(
+            session.is_some(),
+            published_matches,
+            desired_revision.as_deref(),
+            applied_revision.as_deref(),
+            last_error.is_some(),
+        );
+        Ok(DeviceDeploymentStatus {
+            device_id: member.device_id.clone(),
+            state: state.into(),
+            desired_revision,
+            applied_revision,
+            last_error,
+        })
+    }
+
+    async fn network_deployment_status(
+        &self,
+        intent: &CentralNetworkIntent,
+    ) -> Result<NetworkDeploymentStatus, CentralNetworkServiceError> {
+        let expected_configs = compiled_configs_by_device(intent)?;
+        // Materialize the futures before buffering them: keeping the
+        // borrowing iterator adapter in the Axum handler future imposes an
+        // invalid higher-ranked FnOnce bound on its member references.
+        let pending = intent
+            .members
+            .iter()
+            .map(|member| {
+                self.device_deployment_status(
+                    intent,
+                    member,
+                    expected_configs.get(&member.device_id),
+                )
+            })
+            .collect::<Vec<_>>();
+        let devices = futures::stream::iter(pending)
+            .buffered(16)
+            .try_collect::<Vec<_>>()
+            .await?;
+        let gateway = if matches!(intent.mode, NetworkMode::Gateway { .. }) {
+            match &self.network_instances {
+                Some(instances) => {
+                    Some(instances.deployment_status(intent.user_id, intent.id).await)
+                }
+                None => Some(super::gateway::GatewayDeploymentStatus {
+                    state: "failed".into(),
+                    running: false,
+                    peer_id: None,
+                    peer_url: None,
+                    last_error: Some("Gateway runtime is disabled".into()),
+                }),
+            }
+        } else {
+            None
+        };
+        let states = devices
+            .iter()
+            .map(|device| device.state.as_str())
+            .chain(gateway.iter().map(|gateway| gateway.state.as_str()))
+            .collect::<Vec<_>>();
+        let state = if states.contains(&"failed") {
+            "failed"
+        } else if states.contains(&"pending") {
+            "pending"
+        } else if states.contains(&"waiting_offline") {
+            "waiting_offline"
+        } else if states.contains(&"unknown") {
+            "unknown"
+        } else {
+            "applied"
+        };
+        Ok(NetworkDeploymentStatus {
+            state: state.into(),
+            devices,
+            gateway,
         })
     }
 
@@ -987,16 +1278,27 @@ impl CentralNetworkService {
             .iter()
             .find(|credential| credential.id == credential_id)
             .ok_or_else(|| CentralNetworkServiceError::NotFound(credential_id.to_owned()))?;
-        Ok(Self::credential_info_from_intent(credential))
+        Ok(Self::credential_info_from_intent(&intent, credential))
     }
 
-    fn credential_info_from_intent(credential: &NetworkCredentialIntent) -> NetworkCredentialInfo {
+    fn credential_info_from_intent(
+        intent: &CentralNetworkIntent,
+        credential: &NetworkCredentialIntent,
+    ) -> NetworkCredentialInfo {
         NetworkCredentialInfo {
             credential_id: credential.id.clone(),
             credential_secret: credential.secret.clone(),
             expiry_unix: credential.expiry_unix,
             reusable: credential.grant.reusable,
             online_peers: Vec::new(),
+            acl_groups: credential.grant.acl_groups.clone(),
+            allow_relay: credential.grant.allow_relay,
+            allowed_proxy_cidrs: credential.grant.allowed_proxy_cidrs.clone(),
+            device_id: intent
+                .members
+                .iter()
+                .find(|member| member.credential_id.as_deref() == Some(&credential.id))
+                .map(|member| member.device_id.clone()),
         }
     }
 
@@ -1032,6 +1334,10 @@ impl CentralNetworkService {
     async fn publish_user(&self, user_id: UserIdInDb) {
         if let Err(error) = self.publish_user_configs(user_id).await {
             tracing::error!(user_id, %error, "central configs will be retried");
+            self.publication_errors.write().await.insert(
+                (user_id, None),
+                "Saved intent could not be published; retry pending".into(),
+            );
         }
     }
 
@@ -1045,6 +1351,10 @@ impl CentralNetworkService {
             .order_by_asc(networks::Column::Id)
             .all(self.db.orm_db())
             .await?;
+        self.publication_errors
+            .write()
+            .await
+            .remove(&(user_id, None));
         let mut configs_by_device =
             BTreeMap::<Uuid, Vec<crate::webhook::ManagedNetworkConfig>>::new();
         let devices = sqlx::query_scalar::<_, String>(
@@ -1097,15 +1407,26 @@ impl CentralNetworkService {
                 .filter(|intent| matches!(intent.mode, NetworkMode::Gateway { .. }))
                 .map(|intent| intent.id)
                 .collect::<BTreeSet<_>>();
-            for (owner_id, network_id) in instances.network_ids().await {
+            for (owner_id, network_id) in instances.tracked_network_ids().await {
                 if owner_id == user_id && !gateway_ids.contains(&network_id) {
                     instances.remove(owner_id, network_id).await;
                 }
             }
+            let mut gateway_failed = false;
             for intent in &intents {
                 if gateway_ids.contains(&intent.id) {
                     instances.reconcile(intent).await;
+                    gateway_failed |=
+                        instances.deployment_status(user_id, intent.id).await.state == "failed";
                 }
+            }
+            if gateway_failed {
+                // Do not move clients to a new mesh identity/credential set
+                // when its Gateway could not accept it. Keep the previous
+                // published device snapshot and retry the saved intent.
+                return Err(CentralNetworkServiceError::Conflict(
+                    "Gateway update failed; device snapshot publication deferred".into(),
+                ));
             }
         }
         for (device_id, configs) in configs_by_device {
@@ -1115,17 +1436,63 @@ impl CentralNetworkService {
                 .await
             {
                 Ok((_, true)) => {
+                    self.publication_errors
+                        .write()
+                        .await
+                        .remove(&(user_id, Some(device_id)));
                     self.client_manager
                         .invalidate_applied_config_revision(user_id, device_id)
                         .await
                 }
-                Ok((_, false)) => {}
+                Ok((_, false)) => {
+                    self.publication_errors
+                        .write()
+                        .await
+                        .remove(&(user_id, Some(device_id)));
+                }
                 Err(error) => {
+                    self.publication_errors.write().await.insert(
+                        (user_id, Some(device_id)),
+                        "Saved device configuration could not be published; retry pending".into(),
+                    );
                     tracing::error!(user_id, %device_id, %error, "central device config will be retried")
                 }
             }
         }
         Ok(())
+    }
+}
+
+fn compiled_configs_by_device(
+    intent: &CentralNetworkIntent,
+) -> Result<BTreeMap<String, NetworkConfig>, CentralNetworkServiceError> {
+    Ok(super::compiler::compile(intent)
+        .map_err(|error| CentralNetworkServiceError::Invalid(error.to_string()))?
+        .members
+        .into_iter()
+        .map(|member| (member.device_id, member.network_config))
+        .collect())
+}
+
+fn device_deployment_state(
+    online: bool,
+    published_matches: bool,
+    desired_revision: Option<&str>,
+    applied_revision: Option<&str>,
+    failed: bool,
+) -> &'static str {
+    if failed {
+        "failed"
+    } else if !online {
+        "waiting_offline"
+    } else if !published_matches {
+        "pending"
+    } else if desired_revision.is_none() {
+        "unknown"
+    } else if desired_revision == applied_revision {
+        "applied"
+    } else {
+        "pending"
     }
 }
 
@@ -1326,6 +1693,247 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deployment_requires_matching_saved_published_and_applied_versions() {
+        assert_eq!(
+            device_deployment_state(true, true, Some("new"), Some("new"), false),
+            "applied"
+        );
+        assert_eq!(
+            device_deployment_state(true, false, Some("old"), Some("old"), false),
+            "pending"
+        );
+        assert_eq!(
+            device_deployment_state(true, true, Some("new"), Some("old"), false),
+            "pending"
+        );
+        assert_eq!(
+            device_deployment_state(false, true, Some("new"), None, false),
+            "waiting_offline"
+        );
+        assert_eq!(
+            device_deployment_state(true, true, None, None, false),
+            "unknown"
+        );
+        assert_eq!(
+            device_deployment_state(true, true, Some("new"), Some("new"), true),
+            "failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_grants_update_rotate_and_remain_tenant_owned() {
+        let (service, user_a, user_b) = service().await;
+        let mut settings = standalone_settings();
+        settings.secure_mode = true;
+        let network = service
+            .create_network(user_a, settings, None)
+            .await
+            .unwrap();
+        let network_id = Uuid::parse_str(&network.network_id).unwrap();
+        let generated = service
+            .generate_credential(
+                user_a,
+                network_id,
+                GenerateCredentialReq {
+                    ttl_seconds: 60,
+                    credential_id: Some("mobile".into()),
+                    reusable: true,
+                    acl_groups: vec!["users".into()],
+                    allow_relay: false,
+                    allowed_proxy_cidrs: vec!["10.0.0.0/8".into()],
+                    device_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(generated.acl_groups, vec!["users"]);
+        assert_eq!(generated.allowed_proxy_cidrs, vec!["10.0.0.0/8"]);
+        let updated = service
+            .update_credential(
+                user_a,
+                network_id,
+                "mobile",
+                UpdateCredentialReq {
+                    ttl_seconds: Some(3600),
+                    acl_groups: Some(vec!["ops".into()]),
+                    allow_relay: Some(true),
+                    rotate_secret: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_ne!(updated.credential_secret, generated.credential_secret);
+        assert!(updated.expiry_unix > generated.expiry_unix);
+        assert_eq!(updated.acl_groups, vec!["ops"]);
+        assert!(updated.allow_relay);
+        assert!(matches!(
+            service
+                .update_credential(user_b, network_id, "mobile", UpdateCredentialReq::default())
+                .await,
+            Err(CentralNetworkServiceError::NotFound(_))
+        ));
+        assert!(
+            service
+                .update_credential(
+                    user_a,
+                    network_id,
+                    "mobile",
+                    UpdateCredentialReq {
+                        allowed_proxy_cidrs: Some(vec!["invalid".into()]),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            service
+                .credential_info(user_a, network_id, "mobile")
+                .await
+                .unwrap()
+                .credential_secret,
+            updated.credential_secret
+        );
+    }
+
+    #[tokio::test]
+    async fn temporary_member_uses_core_device_id_without_changing_permanent_role() {
+        let (service, user_a, _) = service().await;
+        let temporary = Uuid::new_v4();
+        let permanent = Uuid::new_v4();
+        register_device(&service, user_a, temporary).await;
+        register_device(&service, user_a, permanent).await;
+        let mut settings = standalone_settings();
+        settings.secure_mode = true;
+        let network = service
+            .create_network(user_a, settings, None)
+            .await
+            .unwrap();
+        let network_id = Uuid::parse_str(&network.network_id).unwrap();
+        service
+            .add_members(
+                user_a,
+                network_id,
+                AddMembersReq {
+                    device_ids: vec![temporary.to_string()],
+                    temporary: true,
+                    ttl_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+        service
+            .add_members(
+                user_a,
+                network_id,
+                AddMembersReq {
+                    device_ids: vec![permanent.to_string()],
+                    temporary: false,
+                    ttl_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+        let intent = service.load(user_a, network_id).await.unwrap();
+        let member = intent
+            .members
+            .iter()
+            .find(|member| member.device_id == temporary.to_string())
+            .unwrap();
+        assert_eq!(
+            member.credential_id.as_deref(),
+            Some(temporary.to_string().as_str())
+        );
+        assert!(
+            intent
+                .members
+                .iter()
+                .find(|member| member.device_id == permanent.to_string())
+                .unwrap()
+                .credential_id
+                .is_none()
+        );
+        let updated = service
+            .update_credential(
+                user_a,
+                network_id,
+                &temporary.to_string(),
+                UpdateCredentialReq {
+                    acl_groups: Some(vec!["mobile".into()]),
+                    ttl_seconds: Some(3600),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            updated.device_id.as_deref(),
+            Some(temporary.to_string().as_str())
+        );
+        assert!(updated.acl_groups.contains(&member_group_name(member.id)));
+        assert!(
+            service
+                .update_credential(
+                    user_a,
+                    network_id,
+                    &temporary.to_string(),
+                    UpdateCredentialReq {
+                        reusable: Some(true),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let members = service.list_members(user_a, network_id).await.unwrap();
+        assert!(
+            members
+                .members
+                .iter()
+                .all(|member| member.deployment.state == "waiting_offline")
+        );
+        assert!(
+            members
+                .members
+                .iter()
+                .all(|member| member.deployment.desired_revision.is_some())
+        );
+        // Legacy credential IDs are still loaded and updated in place.
+        let mut legacy = service.load(user_a, network_id).await.unwrap();
+        let legacy_member = legacy
+            .members
+            .iter_mut()
+            .find(|member| member.device_id == temporary.to_string())
+            .unwrap();
+        legacy_member.credential_id = Some("member-legacy".into());
+        legacy
+            .credentials
+            .iter_mut()
+            .find(|credential| credential.id == temporary.to_string())
+            .unwrap()
+            .id = "member-legacy".into();
+        service.persist(legacy).await.unwrap();
+        assert_eq!(
+            service
+                .update_credential(
+                    user_a,
+                    network_id,
+                    "member-legacy",
+                    UpdateCredentialReq {
+                        ttl_seconds: Some(7200),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some(temporary.to_string().as_str())
+        );
+    }
+
     struct NoopGatewayRuntime;
 
     #[async_trait]
@@ -1335,6 +1943,13 @@ mod tests {
         }
 
         async fn stop(&self) {}
+
+        async fn replace_credentials(
+            &self,
+            _credentials: &[easytier_core::config::toml::ManagedCredentialConfig],
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
 
         fn peer_manager(&self) -> Option<Arc<easytier_core::peers::peer_manager::PeerManagerCore>> {
             None
@@ -1370,6 +1985,13 @@ mod tests {
 
         async fn stop(&self) {}
 
+        async fn replace_credentials(
+            &self,
+            _credentials: &[easytier_core::config::toml::ManagedCredentialConfig],
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         fn peer_manager(&self) -> Option<Arc<easytier_core::peers::peer_manager::PeerManagerCore>> {
             None
         }
@@ -1402,6 +2024,13 @@ mod tests {
         }
 
         async fn stop(&self) {}
+
+        async fn replace_credentials(
+            &self,
+            _credentials: &[easytier_core::config::toml::ManagedCredentialConfig],
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
 
         fn peer_manager(&self) -> Option<Arc<easytier_core::peers::peer_manager::PeerManagerCore>> {
             None
@@ -1880,10 +2509,14 @@ mod tests {
             .await
             .unwrap();
         let before = service.load(user_id, network_id).await.unwrap();
+        let access = db
+            .create_device_access_token(user_id, "delete-test", Some(device), None)
+            .await
+            .unwrap();
         let core = Arc::new(native_instance_manager());
         let _client = WebClient::new(
             runtime_udp_tunnel_dialer(url),
-            "delete-owner",
+            &access.token,
             device,
             "delete-test",
             false,
@@ -2719,6 +3352,108 @@ mod tests {
         assert_eq!(instances.network_ids().await, vec![(user_id, network_id)]);
         service.delete_network(user_id, network_id).await.unwrap();
         assert!(instances.network_ids().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_gateway_replacement_keeps_clients_on_previous_published_mesh() {
+        let factory = Arc::new(FailingGatewayFactory {
+            fail_build: AtomicBool::new(false),
+            fail_start: AtomicBool::new(false),
+        });
+        let (service, user_id) = service_with_gateway_factory(factory.clone()).await;
+        let device_id = Uuid::new_v4();
+        register_device(&service, user_id, device_id).await;
+        let network = service
+            .create_network(user_id, gateway_settings(vec![]), None)
+            .await
+            .unwrap();
+        let network_id = Uuid::parse_str(&network.network_id).unwrap();
+        service
+            .add_members(
+                user_id,
+                network_id,
+                AddMembersReq {
+                    device_ids: vec![device_id.to_string()],
+                    temporary: false,
+                    ttl_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+        let previous_revision = service
+            .db
+            .get_managed_config_revision((user_id, device_id))
+            .await
+            .unwrap();
+        factory.fail_build.store(true, Ordering::Release);
+        let mut settings = gateway_settings(vec![]);
+        settings.network_name = Some("replacement-mesh".into());
+        let saved = service
+            .update_network(
+                user_id,
+                network_id,
+                UpdateNetworkReq {
+                    settings,
+                    network_secret: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.network_name, "replacement-mesh");
+        assert_eq!(saved.deployment.state, "failed");
+        assert!(saved.deployment.gateway.as_ref().unwrap().running);
+        assert_eq!(
+            service
+                .network_instances()
+                .unwrap()
+                .actual_mesh_name(user_id, network_id)
+                .await
+                .as_deref(),
+            Some(network.network_name.as_str())
+        );
+        assert_eq!(
+            service
+                .db
+                .get_managed_config_revision((user_id, device_id))
+                .await
+                .unwrap(),
+            previous_revision
+        );
+        let published: String = sqlx::query_scalar("SELECT network_config FROM user_running_network_configs WHERE user_id = ? AND device_id = ? AND network_instance_id = ?")
+            .bind(user_id).bind(device_id.to_string()).bind(network_id.to_string()).fetch_one(&service.db.inner()).await.unwrap();
+        let published: NetworkConfig = serde_json::from_str(&published).unwrap();
+        assert_eq!(
+            published.network_name.as_deref(),
+            Some(network.network_name.as_str())
+        );
+        service.reconcile_all().await.unwrap();
+        assert_eq!(
+            service
+                .network_instances()
+                .unwrap()
+                .actual_mesh_name(user_id, network_id)
+                .await
+                .as_deref(),
+            Some("replacement-mesh")
+        );
+        assert_ne!(
+            service
+                .db
+                .get_managed_config_revision((user_id, device_id))
+                .await
+                .unwrap(),
+            previous_revision
+        );
+        assert_eq!(
+            service
+                .get_network(user_id, network_id)
+                .await
+                .unwrap()
+                .deployment
+                .state,
+            "waiting_offline"
+        );
+        service.delete_network(user_id, network_id).await.unwrap();
     }
 
     #[tokio::test]

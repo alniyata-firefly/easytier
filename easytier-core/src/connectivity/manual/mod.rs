@@ -39,6 +39,58 @@ use crate::{
 const MANUAL_PREFLIGHT_DEFAULT_PORT: u16 = 1000;
 const MAX_MANUAL_ENDPOINT_HOPS: usize = 16;
 
+/// Render transport endpoints without credentials or URL payloads. The real
+/// URL continues to be used for discovery, dialing and connector persistence.
+pub fn redacted_endpoint_url(url: &Url) -> Url {
+    let mut endpoint = url.clone();
+    let _ = endpoint.set_username("");
+    let _ = endpoint.set_password(None);
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+    endpoint.set_path(if endpoint.cannot_be_a_base() {
+        "<redacted>"
+    } else {
+        ""
+    });
+    endpoint
+}
+
+fn redacted_endpoint_error(error: &anyhow::Error, endpoint: &Url) -> String {
+    let mut message =
+        format!("{error:#}").replace(endpoint.as_str(), redacted_endpoint_url(endpoint).as_str());
+    // Lower transport layers may report only a path or a query value. Scrub
+    // endpoint-owned credential components before exporting their diagnostics.
+    let mut sensitive = vec![endpoint.username().to_owned(), endpoint.path().to_owned()];
+    sensitive.extend(endpoint.password().map(str::to_owned));
+    sensitive.extend(endpoint.query().map(str::to_owned));
+    sensitive.extend(endpoint.fragment().map(str::to_owned));
+    if let Some(segments) = endpoint.path_segments() {
+        sensitive.extend(
+            segments
+                .filter(|segment| segment.len() >= 8)
+                .map(str::to_owned),
+        );
+    }
+    sensitive.extend(
+        endpoint
+            .query_pairs()
+            .map(|(_, value)| value.into_owned())
+            .filter(|value| value.len() >= 8),
+    );
+    for component in sensitive {
+        if component.is_empty() || component == "/" {
+            continue;
+        }
+        message = message.replace(&component, "<redacted>");
+        if let Ok(decoded) = percent_decode_str(&component).decode_utf8() {
+            if decoded != component {
+                message = message.replace(decoded.as_ref(), "<redacted>");
+            }
+        }
+    }
+    message
+}
+
 fn manual_default_port(url: &Url) -> u16 {
     crate::connectivity::protocol::protocol_default_port(url.scheme()).unwrap_or(11010)
 }
@@ -52,7 +104,10 @@ pub fn validate_manual_url(url: &Url) -> anyhow::Result<()> {
     if ManualTransport::from_url(url).is_ok() || is_manual_endpoint_scheme(url.scheme()) {
         Ok(())
     } else {
-        anyhow::bail!("unsupported core manual connector URL: {url}")
+        anyhow::bail!(
+            "unsupported core manual connector URL: {}",
+            redacted_endpoint_url(url)
+        )
     }
 }
 
@@ -70,7 +125,10 @@ impl ManualTransport {
             Some(ProtocolTransport::FakeTcp) => Ok(Self::Tcp(TcpSocketPurpose::FakeTcp)),
             Some(ProtocolTransport::Udp(mode)) => Ok(Self::Udp(mode)),
             None if matches!(url.scheme(), "ring" | "unix") => Ok(Self::ByteStream),
-            None => anyhow::bail!("unsupported core manual connector URL: {url}"),
+            None => anyhow::bail!(
+                "unsupported core manual connector URL: {}",
+                redacted_endpoint_url(url)
+            ),
         }
     }
 
@@ -115,7 +173,10 @@ pub trait ManualConnectorHost: VirtualTcpSocketFactory + VirtualUdpSocketFactory
         &self,
         url: &Url,
     ) -> anyhow::Result<ConnectedByteStream<<Self as VirtualTcpSocketFactory>::Socket>> {
-        anyhow::bail!("host does not support external byte stream: {url}")
+        anyhow::bail!(
+            "host does not support external byte stream: {}",
+            redacted_endpoint_url(url)
+        )
     }
 }
 
@@ -393,7 +454,7 @@ impl Drop for ReconnectReservation {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if finish_reconnect_attempt(&self.state, &self.url) {
-            tracing::warn!(url = %self.url, "manual connector removed after reconnect");
+            tracing::warn!(url = %redacted_endpoint_url(&self.url), "manual connector removed after reconnect");
         }
     }
 }
@@ -471,7 +532,7 @@ where
     pub fn remove_connector(&self, url: &Url) -> bool {
         let _state_guard = self.data.state.state_lock.lock().unwrap();
         if self.data.state.connectors.remove(url).is_some() {
-            tracing::warn!(%url, "manual connector removed");
+            tracing::warn!(url = %redacted_endpoint_url(&url), "manual connector removed");
             return true;
         }
         if self.data.state.reconnecting.contains(url) {
@@ -546,7 +607,9 @@ where
                     };
                     match result {
                         Ok((url, reconnect_result)) => {
-                            tracing::warn!(?url, ?reconnect_result, "manual reconnect task done");
+                            tracing::warn!(url = %redacted_endpoint_url(&url),
+                                error = ?reconnect_result.err().map(|error| redacted_endpoint_error(&error, &url)),
+                                "manual reconnect task done");
                         }
                         Err(error) => {
                             tracing::error!(?error, "manual reconnect task failed");
@@ -629,7 +692,10 @@ async fn resolve_manual_endpoint(
     let mut visited = BTreeSet::new();
     loop {
         if !visited.insert(url.clone()) {
-            anyhow::bail!("manual endpoint resolution cycle detected at {url}");
+            anyhow::bail!(
+                "manual endpoint resolution cycle detected at {}",
+                redacted_endpoint_url(&url)
+            );
         }
         if ManualTransport::from_url(&url).is_ok() {
             return Ok(ResolvedManualEndpoint {
@@ -638,7 +704,10 @@ async fn resolve_manual_endpoint(
             });
         }
         if !is_manual_endpoint_scheme(url.scheme()) {
-            anyhow::bail!("unsupported resolved manual connector URL: {url}");
+            anyhow::bail!(
+                "unsupported resolved manual connector URL: {}",
+                redacted_endpoint_url(&url)
+            );
         }
         if tunnel_prefixes.len() >= MAX_MANUAL_ENDPOINT_HOPS {
             anyhow::bail!("manual endpoint resolution exceeded {MAX_MANUAL_ENDPOINT_HOPS} hops");
@@ -675,7 +744,12 @@ fn connect_ring_tunnel(
 ) -> anyhow::Result<Box<dyn Tunnel>> {
     let remote_id = endpoint
         .host_str()
-        .ok_or_else(|| anyhow::anyhow!("ring URL has no peer id: {endpoint}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "ring URL has no peer id: {}",
+                redacted_endpoint_url(endpoint)
+            )
+        })?
         .parse()?;
     Ok(registry.connect(remote_id)?.into_tunnel())
 }
@@ -708,7 +782,7 @@ async fn resolve_reconnect_ip_versions(
         ),
     )
     .await?;
-    tracing::info!(?addrs, %url, "manual preflight resolve done");
+    tracing::info!(?addrs, url = %redacted_endpoint_url(url), "manual preflight resolve done");
 
     let mut ip_versions = Vec::new();
     if addrs.iter().any(SocketAddr::is_ipv4) {
@@ -726,7 +800,7 @@ where
 {
     validate_manual_url(&url)?;
     let connect_timeout = data.options.connect_timeout(&url, data.protocol.as_ref());
-    tracing::info!(%url, "manual reconnect start");
+    tracing::info!(url = %redacted_endpoint_url(&url), "manual reconnect start");
     let normalized_url = match convert_idn_to_ascii(url.clone()) {
         Ok(url) => url,
         Err(error) => {
@@ -859,7 +933,10 @@ where
                 .connect_external_tunnel(&endpoint.url)
                 .await?
                 .ok_or_else(|| {
-                    anyhow::anyhow!("host did not provide external tunnel for {}", endpoint.url)
+                    anyhow::anyhow!(
+                        "host did not provide external tunnel for {}",
+                        redacted_endpoint_url(&endpoint.url)
+                    )
                 });
         }
         let transport = transport.expect("non-Ring endpoint should have a transport");
@@ -896,7 +973,7 @@ where
                 .map_err(anyhow::Error::from)
         })
         .await?;
-    tracing::info!(peer_id, %conn_id, %requested_url, "manual reconnect succeeded");
+    tracing::info!(peer_id, %conn_id, requested_url = %redacted_endpoint_url(&requested_url), "manual reconnect succeeded");
     Ok(())
 }
 
@@ -950,7 +1027,8 @@ where
         };
         if peer_manager.is_easytier_managed_ipv6(v6_addr.ip()).await {
             rejected_reason = Some(format!(
-                "{url} resolves to EasyTier-managed IPv6 {}",
+                "{} resolves to EasyTier-managed IPv6 {}",
+                redacted_endpoint_url(url),
                 v6_addr.ip()
             ));
             continue;
@@ -960,7 +1038,8 @@ where
                 if peer_manager.is_easytier_managed_ipv6(local_addr.ip()).await =>
             {
                 rejected_reason = Some(format!(
-                    "{url} would use EasyTier-managed IPv6 {} as local source for {v6_addr}",
+                    "{} would use EasyTier-managed IPv6 {} as local source for {v6_addr}",
+                    redacted_endpoint_url(url),
                     local_addr.ip()
                 ));
             }
@@ -1023,7 +1102,7 @@ pub(crate) async fn resolve_url_addrs(
     let ip_version = context.ip_version;
     let host = url
         .host()
-        .ok_or_else(|| anyhow::anyhow!("URL has no host: {url}"))?;
+        .ok_or_else(|| anyhow::anyhow!("URL has no host: {}", redacted_endpoint_url(url)))?;
     let port = url.port().unwrap_or(default_port);
     let addrs = match host {
         url::Host::Ipv4(addr) => vec![SocketAddr::new(IpAddr::V4(addr), port)],
@@ -1072,7 +1151,7 @@ fn emit_connect_error<H>(
     data.events.emit(CoreEvent::ManualConnectError {
         url: url.clone(),
         ip_version,
-        error: format!("{error:#?}"),
+        error: redacted_endpoint_error(error, url),
     });
 }
 
@@ -1101,6 +1180,80 @@ mod tests {
     use crate::socket::udp::UdpSessionProtocol;
 
     use super::*;
+
+    #[derive(Clone)]
+    struct CanaryLogCapture(Arc<Mutex<String>>);
+
+    impl tracing::Subscriber for CanaryLogCapture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields<'a>(&'a mut String);
+            impl tracing::field::Visit for Fields<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write as _;
+                    write!(self.0, "{}={value:?} ", field.name()).unwrap();
+                }
+            }
+            event.record(&mut Fields(&mut self.0.lock().unwrap()));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn connector_diagnostics_redact_256_bit_token_without_changing_real_endpoint() {
+        use base64::Engine as _;
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([29u8; 32]);
+        let url = Url::parse(&format!(
+            "wss://{token}:{token}@[2001:db8::1]:22020/config/{token}?access={token}#{token}"
+        ))
+        .unwrap();
+        let original = url.clone();
+        let endpoint = redacted_endpoint_url(&url);
+        assert_eq!(endpoint.host_str(), url.host_str());
+        assert_eq!(endpoint.port(), Some(22020));
+        assert!(endpoint.username().is_empty());
+        assert!(endpoint.password().is_none());
+        assert!(endpoint.query().is_none());
+        assert!(endpoint.fragment().is_none());
+        assert!(!endpoint.as_str().contains(&token));
+        let error = anyhow::anyhow!("failed {url}; rejected credential {token}");
+        let diagnostic = redacted_endpoint_error(&error, &url);
+        assert!(!diagnostic.contains(&token));
+        assert!(diagnostic.contains("failed"));
+        // Exercise a real reconnect-reservation drop log, rather than only
+        // testing the helper's return value.
+        let logs = Arc::new(Mutex::new(String::new()));
+        let state = Arc::new(ManualConnectorState::default());
+        state.reconnecting.insert(url.clone());
+        state.removed.insert(url.clone());
+        let reservation = ReconnectReservation::new(state, url.clone());
+        tracing::subscriber::with_default(CanaryLogCapture(logs.clone()), || drop(reservation));
+        let logs = logs.lock().unwrap();
+        assert!(logs.contains("manual connector removed after reconnect"));
+        assert!(!logs.contains(&token));
+        let invalid =
+            Url::parse(&format!("unsupported://example.com/{token}?access={token}")).unwrap();
+        assert!(
+            !validate_manual_url(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains(&token)
+        );
+        assert_eq!(url, original);
+        assert!(url.path().contains(&token));
+    }
 
     fn reserve_pending_connector(
         state: &Arc<ManualConnectorState>,

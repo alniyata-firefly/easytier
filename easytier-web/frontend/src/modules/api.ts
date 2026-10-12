@@ -1,5 +1,5 @@
 import axios, { AxiosError, AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
-import { type Api, NetworkTypes, Utils } from 'easytier-frontend-lib';
+import { type Api, NetworkTypes, Utils, RuntimeDisplay } from 'easytier-frontend-lib';
 import { Md5 } from 'ts-md5';
 
 export interface ValidateConfigResponse {
@@ -80,7 +80,20 @@ export interface CentralNetworkSummary {
     online_member_count: number;
 }
 
-export interface CentralNetworkDetail extends CentralNetworkSummary {
+export interface DeploymentStatus {
+    state: 'waiting_offline' | 'pending' | 'applied' | 'failed' | 'unknown';
+    desired_revision?: string | null;
+    applied_revision?: string | null;
+    last_error?: string | null;
+}
+
+export interface NetworkDeployment extends DeploymentStatus {
+    devices: Array<DeploymentStatus & { device_id: string }>;
+    gateway?: (DeploymentStatus & { running: boolean; peer_id?: number | null; peer_url?: string | null }) | null;
+}
+
+export interface CentralNetworkDetail extends Omit<CentralNetworkSummary, 'online_member_count'> {
+    deployment?: NetworkDeployment;
     network_secret: string;
     virtual_cidr?: string | null;
     public_server_url?: string | null;
@@ -88,6 +101,7 @@ export interface CentralNetworkDetail extends CentralNetworkSummary {
 }
 
 export interface CentralNetworkMember {
+    deployment?: DeploymentStatus;
     member_id: string;
     device_id: string;
     hostname: string | null;
@@ -118,6 +132,8 @@ export interface NodeRouteInfo {
     hostname: string;
     ipv4_addr?: { address?: { addr?: number }, network_length?: number } | null;
     cost: number;
+    ipv6_addr?: { address?: NetworkTypes.Ipv6Addr; network_length?: number } | null;
+    stun_info?: NetworkTypes.StunInfo;
     path_latency: number;
     proxy_cidrs: string[];
     version: string;
@@ -127,7 +143,7 @@ export interface NodeRouteInfo {
 export interface NodePeerConn {
     conn_id: string;
     tunnel?: { tunnel_type?: string, local_addr?: any, remote_addr?: any } | null;
-    stats?: { latency_us?: number, rx_bytes?: number, tx_bytes?: number } | null;
+    stats?: { latency_us?: number | string, rx_bytes?: number | string, tx_bytes?: number | string } | null;
     loss_rate?: number;
     is_closed?: boolean;
 }
@@ -139,10 +155,20 @@ export interface NodePeerInfo {
 
 export interface NodeAclRuleStat {
     rule?: { name?: string };
-    stat?: { packet_count?: number, byte_count?: number };
+    stat?: { packet_count?: number | string, byte_count?: number | string };
 }
 
-export interface NetworkCredential {
+export interface MetricSnapshot { name: string; value?: number | string; labels?: Record<string, string>; }
+
+export interface InterfaceNetwork { name: string; address: { ipv4?: NetworkTypes.Ipv4Addr; ipv6?: NetworkTypes.Ipv6Addr }; prefix_length?: number; }
+
+export interface NodeRuntimeInfo { peer_id?: number; hostname?: string; virtual_ipv4?: NetworkTypes.Ipv4Inet; public_ipv6_addr?: { address?: NetworkTypes.Ipv6Addr; network_length?: number }; stun_info?: NetworkTypes.StunInfo; ip_list?: { interface_networks?: InterfaceNetwork[]; interface_ipv4s?: NetworkTypes.Ipv4Addr[]; interface_ipv6s?: NetworkTypes.Ipv6Addr[] }; }
+
+export interface DeviceAccessToken { status?: string; id: string; label: string; machine_id?: string | null; created_at: string; bound_at?: string | null; last_used_at?: string | null; expires_at?: string | null; revoked_at?: string | null; auth_generation?: number; }
+
+export interface CredentialGrant { acl_groups?: string[]; allow_relay?: boolean; allowed_proxy_cidrs?: string[]; device_id?: string | null; }
+
+export interface NetworkCredential extends CredentialGrant {
     credential_id: string;
     credential_secret: string;
     expiry_unix: number;
@@ -173,6 +199,8 @@ export interface BlockedDevice {
 
 export interface ConsoleInfo {
     username: string;
+    advertised_config_server_url?: string | null;
+    registration_enabled?: boolean;
     config_server_protocol: string;
     config_server_port: number;
     webhook_auth: boolean;
@@ -212,6 +240,21 @@ export interface AclPolicyInfo {
 export class ApiClient {
     private client: AxiosInstance;
     private authFailedCb: Function | undefined;
+    private snapshots = new Map<string, { time: number; promise: Promise<any> }>();
+    private cacheGeneration = 0;
+
+    public clear_snapshots() { this.cacheGeneration++; this.snapshots.clear(); }
+    private snapshot<T>(key: string, request: () => Promise<T>): Promise<T> {
+        const old = this.snapshots.get(key);
+        if (old && Date.now() - old.time < 2000) return old.promise;
+        const generation = this.cacheGeneration;
+        const promise = request().catch(error => {
+            if (generation === this.cacheGeneration && this.snapshots.get(key)?.promise === promise) this.snapshots.delete(key);
+            throw error;
+        });
+        this.snapshots.set(key, { time: Date.now(), promise });
+        return promise;
+    }
 
     constructor(baseUrl: string, authFailedCb: Function | undefined = undefined) {
         this.client = axios.create({
@@ -225,6 +268,8 @@ export class ApiClient {
 
         // 添加请求拦截器
         this.client.interceptors.request.use((config: InternalAxiosRequestConfig) => {
+            const readonlyRpc = config.url?.endsWith('/proxy-rpc') && ['list_route', 'list_peer', 'get_acl_stats', 'show_node_info', 'get_stats', 'get_prometheus_stats', 'get_logger_config', 'get_vpn_portal_info'].includes(config.data?.method_name);
+            if (config.method && !['get', 'head'].includes(config.method.toLowerCase()) && !readonlyRpc) this.clear_snapshots();
             return config;
         }, (error: any) => {
             return Promise.reject(error);
@@ -232,21 +277,22 @@ export class ApiClient {
 
         // 添加响应拦截器
         this.client.interceptors.response.use((response: AxiosResponse) => {
-            console.debug('Axios Response:', response);
+            // Responses may contain one-time device tokens or network credentials.
+            // Never log response bodies.
             return response.data; // 假设服务器返回的数据都在data属性中
         }, (error: any) => {
             if (error.response) {
                 let response: AxiosResponse = error.response;
                 if (response.status == 401 && this.authFailedCb) {
-                    console.error('Unauthorized:', response.data);
+                    this.clear_snapshots();
                     this.authFailedCb();
                 } else {
                     // 请求已发出，但是服务器响应的状态码不在2xx范围
-                    console.error('Response Error:', error.response.data);
+                    console.error('API request failed:', response.status);
                 }
             } else if (error.request) {
                 // 请求已发出，但是没有收到响应
-                console.error('Request Error:', error.request);
+                console.error('API request did not receive a response');
             } else {
                 // 发生了一些问题导致请求未发出
                 console.error('Error:', error.message);
@@ -259,8 +305,8 @@ export class ApiClient {
     public async register(data: RegisterData): Promise<RegisterResponse> {
         try {
             data.credentials.password = Md5.hashStr(data.credentials.password);
-            const response = await this.client.post<RegisterResponse>('/auth/register', data);
-            console.log("register response:", response);
+            await this.client.post<RegisterResponse>('/auth/register', data);
+            this.clear_snapshots();
             return { success: true, message: 'Register success', };
         } catch (error) {
             if (error instanceof AxiosError) {
@@ -274,8 +320,8 @@ export class ApiClient {
     public async login(data: Credential): Promise<LoginResponse> {
         try {
             data.password = Md5.hashStr(data.password);
-            const response = await this.client.post<any>('/auth/login', data);
-            console.log("login response:", response);
+            await this.client.post<any>('/auth/login', data);
+            this.clear_snapshots();
             return { success: true, message: 'Login success', };
         } catch (error) {
             if (error instanceof AxiosError) {
@@ -290,6 +336,7 @@ export class ApiClient {
     }
 
     public async logout() {
+        this.clear_snapshots();
         await this.client.get('/auth/logout');
         if (this.authFailedCb) {
             this.authFailedCb();
@@ -315,8 +362,10 @@ export class ApiClient {
     }
 
     public async list_machines(): Promise<Array<any>> {
-        const response = await this.client.get<any, Record<string, Array<any>>>('/machines');
-        return response.machines;
+        return this.snapshot('machines', async () => {
+            const response = await this.client.get<any, Record<string, Array<any>>>('/machines');
+            return response.machines;
+        });
     }
 
     public async delete_machine(machine_id: string, block = false): Promise<undefined> {
@@ -342,15 +391,16 @@ export class ApiClient {
     }
 
     public async get_summary(): Promise<Summary> {
-        const response = await this.client.get<any, Summary>('/summary');
-        return response;
+        return this.snapshot('summary', () => this.client.get<any, Summary>('/summary'));
     }
 
     // --- Central networks ---
 
     public async list_networks(): Promise<CentralNetworkSummary[]> {
-        const response = await this.client.get<any, { networks: CentralNetworkSummary[] }>('/networks');
-        return response.networks;
+        return this.snapshot('networks', async () => {
+            const response = await this.client.get<any, { networks: CentralNetworkSummary[] }>('/networks');
+            return response.networks;
+        });
     }
 
     public async create_network(settings: CentralNetworkSettings, network_secret?: string): Promise<CentralNetworkDetail> {
@@ -419,7 +469,7 @@ export class ApiClient {
             method_name: 'list_peer',
             payload: { instance: { id: Utils.StrToUuid(inst_id) } },
         });
-        return response.peer_infos ?? [];
+        return RuntimeDisplay.normalizePeerInfos(response.peer_infos ?? []);
     }
 
     public async get_node_acl_stats(machine_id: string, inst_id: string): Promise<NodeAclRuleStat[]> {
@@ -494,11 +544,12 @@ export class ApiClient {
         return response.credentials;
     }
 
-    public async generate_credential(network_id: string, ttl_seconds: number, reusable = true, credential_id?: string): Promise<NetworkCredential> {
+    public async generate_credential(network_id: string, ttl_seconds: number, reusable = true, credential_id?: string, grant?: CredentialGrant): Promise<NetworkCredential> {
         return await this.client.post<any, NetworkCredential>(`/networks/${network_id}/credentials`, {
             ttl_seconds,
             reusable,
             credential_id,
+            ...grant,
         });
     }
 
@@ -508,6 +559,51 @@ export class ApiClient {
 
     public async get_gateway_info(): Promise<GatewayInfo> {
         return await this.client.get<any, GatewayInfo>('/networks/gateway-info');
+    }
+
+    public async get_auth_config(): Promise<{ registration_enabled: boolean }> {
+        return this.client.get<any, { registration_enabled: boolean }>('/auth/config');
+    }
+
+    public async list_device_access_tokens(): Promise<DeviceAccessToken[]> {
+        const response = await this.client.get<any, { tokens: DeviceAccessToken[] }>('/device-access-tokens');
+        return response.tokens;
+    }
+    public async create_device_access_token(data: { label: string; machine_id?: string; expires_in_seconds?: number }): Promise<{ token: string; info: DeviceAccessToken }> {
+        return this.client.post<any, { token: string; info: DeviceAccessToken }>('/device-access-tokens', data);
+    }
+    public async rotate_device_access_token(id: string): Promise<{ token: string; info: DeviceAccessToken }> {
+        return this.client.post<any, { token: string; info: DeviceAccessToken }>(`/device-access-tokens/${encodeURIComponent(id)}/rotate`);
+    }
+    public async revoke_device_access_token(id: string): Promise<void> {
+        await this.client.delete(`/device-access-tokens/${encodeURIComponent(id)}`);
+    }
+    public async get_node_info(machine_id: string, inst_id: string): Promise<NodeRuntimeInfo | undefined> {
+        const response = await this.client.post<any, { node_info?: NodeRuntimeInfo }>(`/machines/${machine_id}/proxy-rpc`, {
+            service_name: 'api.instance.PeerManageRpcService', method_name: 'show_node_info',
+            payload: { instance: { id: Utils.StrToUuid(inst_id) } },
+        });
+        return response.node_info;
+    }
+    public async get_node_stats(machine_id: string, inst_id: string): Promise<MetricSnapshot[]> {
+        const response = await this.client.post<any, { metrics?: MetricSnapshot[] }>(`/machines/${machine_id}/proxy-rpc`, {
+            service_name: 'api.instance.StatsRpcService', method_name: 'get_stats',
+            payload: { instance: { id: Utils.StrToUuid(inst_id) } },
+        });
+        return RuntimeDisplay.normalizeMetrics(response.metrics);
+    }
+    public async get_node_prometheus_stats(machine_id: string, inst_id: string): Promise<string> {
+        const response = await this.client.post<any, { prometheus_text?: string }>(`/machines/${machine_id}/proxy-rpc`, {
+            service_name: 'api.instance.StatsRpcService', method_name: 'get_prometheus_stats',
+            payload: { instance: { id: Utils.StrToUuid(inst_id) } },
+        });
+        return response.prometheus_text ?? '';
+    }
+    public async get_node_http_metrics(machine_id: string, inst_id: string): Promise<string> {
+        return this.client.get<any, string>(`/machines/${encodeURIComponent(machine_id)}/networks/${encodeURIComponent(inst_id)}/metrics`, { responseType: 'text' });
+    }
+    public async update_credential(network_id: string, credential_id: string, update: CredentialGrant & { ttl_seconds?: number; reusable?: boolean; rotate_secret?: boolean }): Promise<NetworkCredential> {
+        return this.client.patch<any, NetworkCredential>(`/networks/${network_id}/credentials/${encodeURIComponent(credential_id)}`, update);
     }
 
     public captcha_url() {
@@ -554,7 +650,14 @@ class WebRemoteClient implements Api.RemoteClient {
     }
     async get_network_info(inst_id: string): Promise<NetworkTypes.NetworkInstanceRunningInfo | undefined> {
         const response = await this.client.get<any, Api.CollectNetworkInfoResponse>('/machines/' + this.machine_id + '/networks/info/' + inst_id);
-        return response.info?.map?.[inst_id];
+        return RuntimeDisplay.normalizeNetworkRuntime(response.info?.map?.[inst_id]);
+    }
+    async get_stats(inst_id: string): Promise<Api.RuntimeMetric[]> {
+        const response = await this.client.post<any, { metrics?: Api.RuntimeMetric[] }>(`/machines/${this.machine_id}/proxy-rpc`, {
+            service_name: 'api.instance.StatsRpcService', method_name: 'get_stats',
+            payload: { instance: { id: Utils.StrToUuid(inst_id) } },
+        });
+        return RuntimeDisplay.normalizeMetrics(response.metrics);
     }
     async get_vpn_portal_info(inst_id: string): Promise<NetworkTypes.VpnPortalInfo | undefined> {
         const response = await this.client.post<any, { vpn_portal_info?: NetworkTypes.VpnPortalInfo }>(

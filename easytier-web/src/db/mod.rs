@@ -1,10 +1,15 @@
 // sea-orm-cli generate entity -u sqlite:./et.db -o easytier-web/src/db/entity/ --with-serde both --with-copy-enums
 mod central_intent;
+mod device_access_tokens;
 mod devices;
 #[allow(unused_imports)]
 pub mod entity;
 
 pub(crate) use central_intent::{CentralIntentError, CentralOwnedRuntimeConfig};
+pub(crate) use device_access_tokens::token_hash as device_access_token_hash;
+pub(crate) use device_access_tokens::{
+    DeviceAccessTokenInfo, DeviceTokenIdentity, IssuedDeviceAccessToken,
+};
 pub use devices::DeviceHeartbeatRecord;
 
 use easytier::common::config::{ConfigSource, NetworkConfig};
@@ -233,6 +238,8 @@ pub struct Db {
     db_path: String,
     db: SqlitePool,
     orm_db: DatabaseConnection,
+    /// Serializes credential mutation against application of validated sessions.
+    pub(crate) device_auth_gate: std::sync::Arc<tokio::sync::RwLock<()>>,
 }
 
 impl Db {
@@ -245,6 +252,7 @@ impl Db {
             db_path: db_path.to_string(),
             db,
             orm_db,
+            device_auth_gate: std::sync::Arc::new(tokio::sync::RwLock::new(())),
         })
     }
 

@@ -53,7 +53,10 @@ export interface GetNetworkMetasResponse {
     metas: Record<string, NetworkMeta>;
 }
 
+export interface RuntimeMetric { name: string; value?: number | string; labels?: Record<string, string> }
+
 export interface RemoteClient {
+    get_stats?(inst_id: string): Promise<RuntimeMetric[]>;
     validate_config(config: NetworkConfig): Promise<ValidateConfigResponse>;
     run_network(config: NetworkConfig, save: boolean): Promise<undefined>;
     get_network_info(inst_id: string): Promise<NetworkInstanceRunningInfo | undefined>;

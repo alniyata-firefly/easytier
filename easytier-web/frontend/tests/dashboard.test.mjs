@@ -43,7 +43,7 @@ function fixture() {
         online_member_count: 1, member_count: 2, network_secret: 'test-secret', peer_urls: i === 0 ? [] : ['tcp://192.0.2.1:11010'],
     }));
     const members = [{ member_id: id(101), device_id: id(1), hostname: 'Amsterdam gateway', hostname_override: null, virtual_ipv4: '10.126.126.1', online: true, running: true, version: '2.4.5', error_msg: null, runtime_virtual_ipv4: '10.126.126.1' }];
-    return { machines, networks, members, memberConfig: {}, aclPolicy: { default_action: 'allow', rules: [] }, credentials: [], temporaryPeers: [], nodeRoutes: [], nodePeers: [], nodeAclStats: [], loggerConfig: { level: 'INFO' }, writes: [], requests: [], failures: new Set(), gatewayDelay: 0, gatewayEnabled: true };
+    return { machines, networks, members, memberConfig: {}, aclPolicy: { default_action: 'allow', rules: [] }, credentials: [], temporaryPeers: [], nodeRoutes: [], nodePeers: [], nodeAclStats: [], loggerConfig: { level: 'INFO' }, writes: [], requests: [], failures: new Set(), gatewayDelay: 0, gatewayEnabled: true, tokens: [], nodeInfo: { peer_id: 1, ip_list: {} }, nodeStats: [] };
 }
 
 async function open(t, route = '/h', options = {}, configure = () => {}) {
@@ -83,7 +83,18 @@ async function open(t, route = '/h', options = {}, configure = () => {}) {
         if (state.failures.has(path)) return route.fulfill({ status: 503, json: { message: 'Test unavailable' } });
         let result = {};
         if (path === '/summary') result = { device_count: state.machines.length };
-        else if (path === '/console-info') result = { username: 'test-user', config_server_protocol: 'udp', config_server_port: 22020, webhook_auth: state.externalConsole ?? false };
+        else if (path === '/console-info') result = { username: 'test-user', config_server_protocol: 'udp', config_server_port: 22020, webhook_auth: state.externalConsole ?? false, advertised_config_server_url: state.advertisedEntry, registration_enabled: state.registrationEnabled ?? true };
+        else if (path === '/auth/config') result = { registration_enabled: state.registrationEnabled ?? true };
+        else if (path === '/device-access-tokens') {
+            if (method === 'POST') {
+                const info = { id: `token-${state.tokens.length}`, label: payload.label, machine_id: payload.machine_id || null, created_at: new Date().toISOString(), revoked_at: null };
+                state.tokens.push(info); result = { token: 'fixture-device-token', info };
+            } else result = { tokens: state.tokens };
+        } else if (path.startsWith('/device-access-tokens/')) {
+            const info = state.tokens.find(token => token.id === path.split('/')[2]);
+            if (method === 'DELETE') { info.revoked_at = new Date().toISOString(); result = {}; }
+            else result = { token: 'fixture-rotated-token', info };
+        }
         else if (path === '/machines') result = { machines: state.machines };
         else if (path === '/networks/gateway-info') {
             await delay(state.gatewayDelay);
@@ -114,13 +125,22 @@ async function open(t, route = '/h', options = {}, configure = () => {}) {
             result = member ?? {};
         } else if (/^\/networks\/[^/]+\/credentials$/.test(path)) {
             result = { credentials: state.credentials };
+        } else if (/^\/networks\/[^/]+\/credentials\/[^/]+$/.test(path)) {
+            const record = state.credentials.find(value => value.credential_id === decodeURIComponent(path.split('/').at(-1)));
+            if (method === 'PATCH') Object.assign(record, payload);
+            result = record ?? {};
         } else if (path.endsWith('/proxy-rpc')) {
-            if (payload.method_name === 'list_route') result = { routes: state.nodeRoutes };
-            else if (payload.method_name === 'list_peer') result = { peer_infos: state.nodePeers };
+            const machineId = path.split('/')[2];
+            if (state.rpcDelayByMachine?.[machineId]) await delay(state.rpcDelayByMachine[machineId]);
+            if (payload.method_name === 'get_stats' && state.failStats) return route.fulfill({ status: 400, json: { message: 'unsupported RPC service' } });
+            if (payload.method_name === 'list_route') result = { routes: state.nodeRoutesByMachine?.[machineId] ?? state.nodeRoutes };
+            else if (payload.method_name === 'list_peer') result = { peer_infos: state.nodePeersByMachine?.[machineId] ?? state.nodePeers };
             else if (payload.method_name === 'get_acl_stats') result = { acl_stats: { rules: state.nodeAclStats } };
             else if (payload.method_name === 'get_logger_config') result = state.loggerConfig;
             else if (payload.method_name === 'set_logger_config') state.loggerConfig = { level: ['DISABLED', 'ERROR', 'WARNING', 'INFO', 'DEBUG', 'TRACE'][payload.payload.level] };
-            else if (payload.method_name === 'show_node_info') result = { node_info: { config: '[instance]\nname = "Engineering"' } };
+            else if (payload.method_name === 'show_node_info') result = { node_info: { config: '[instance]\nname = "Engineering"', ...(state.nodeInfoByMachine?.[path.split('/')[2]] ?? state.nodeInfo) } };
+            else if (payload.method_name === 'get_stats') result = { metrics: state.nodeStats };
+            else if (payload.method_name === 'get_prometheus_stats') result = { prometheus_text: 'easytier_fixture 1\n' };
         } else if (/\/machines\/[^/]+\/networks$/.test(path)) result = { running_inst_ids: [uuid(100)], disabled_inst_ids: [] };
         else if (path.endsWith('/networks/metas')) result = { metas: { [id(100)]: { network_name: 'Engineering', config_permission: 7 } } };
         else if (path.includes('/networks/info/')) result = { info: { map: { [id(100)]: { error_msg: 'Test device is reconnecting' } } } };
@@ -156,10 +176,22 @@ test('overview uses real counts and recovers from partial refresh failures', asy
     assert.equal(await page.getByText('Unable to refresh data.', { exact: false }).count(), 0);
 });
 
-test('enrollment command uses the console info response', async t => {
-    const { page } = await open(t);
+test('device tokens are issued once, rotated, revoked, and use the advertised entry', async t => {
+    const { page, state } = await open(t, '/h', {}, state => { state.advertisedEntry = 'udp://[2001:db8::5]:22020/config/'; });
     await page.getByRole('button', { name: 'Device Enrollment', exact: true }).click();
-    await page.getByText('easytier-core --config-server udp://127.0.0.1:22020/test-user').waitFor();
+    const dialog = page.getByRole('dialog', { name: 'Device access tokens', exact: true });
+    await dialog.getByLabel('Device label', { exact: true }).fill('Phone');
+    await dialog.getByRole('button', { name: 'Issue device token', exact: true }).click();
+    await dialog.getByText("easytier-core --config-server 'udp://[2001:db8::5]:22020/config/fixture-device-token'", { exact: true }).waitFor();
+    assert.equal(state.tokens[0].machine_id, null);
+    await dialog.getByRole('button', { name: 'Rotate', exact: true }).click();
+    await dialog.getByText("easytier-core --config-server 'udp://[2001:db8::5]:22020/config/fixture-rotated-token'", { exact: true }).waitFor();
+    assert.equal(await dialog.getByText(/fixture-device-token/).count(), 0);
+    await dialog.getByRole('button', { name: 'Revoke', exact: true }).click();
+    await dialog.getByText('Revoked', { exact: true }).waitFor();
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await page.getByRole('button', { name: 'Device Enrollment', exact: true }).click();
+    assert.equal(await page.getByText(/fixture-rotated-token/).count(), 0);
 });
 
 for (const [apiHost, hostname] of [
@@ -167,10 +199,13 @@ for (const [apiHost, hostname] of [
     ['http://[2001:db8::1]:8848/', '[2001:db8::1]'],
     ['.', '127.0.0.1'],
 ]) {
-    test(`enrollment command uses the configured API hostname for ${apiHost}`, async t => {
+    test(`device token command uses configured API hostname for ${apiHost}`, async t => {
         const { page } = await open(t, '/h', {}, state => { state.apiHost = apiHost; });
         await page.getByRole('button', { name: 'Device Enrollment', exact: true }).click();
-        await page.getByText(`easytier-core --config-server udp://${hostname}:22020/test-user`).waitFor();
+        const dialog = page.getByRole('dialog', { name: 'Device access tokens', exact: true });
+        await dialog.getByLabel('Device label', { exact: true }).fill('Laptop');
+        await dialog.getByRole('button', { name: 'Issue device token', exact: true }).click();
+        await dialog.getByText(`easytier-core --config-server 'udp://${hostname}:22020/fixture-device-token'`).waitFor();
     });
 }
 
@@ -304,10 +339,13 @@ test('ACL rules and network secrets use secure randomness without randomUUID', a
         await page.keyboard.press('Escape');
     }
     await editor.getByRole('checkbox', { name: 'ICMP', exact: true }).check();
+    await editor.getByRole('checkbox', { name: 'ICMPv6', exact: true }).check();
+    await editor.getByRole('checkbox', { name: 'Any protocol', exact: true }).check();
     await editor.getByRole('button', { name: 'Save Rule', exact: true }).click();
     await editor.waitFor({ state: 'detached' });
     await page.getByRole('button', { name: 'Save Policy', exact: true }).click();
     await page.getByText('Access policy saved', { exact: true }).waitFor();
+    assert.deepEqual(state.aclPolicy.rules[0].protocols.map(p => p.protocol), ['icmp', 'icmpv6', 'any']);
     assert.match(state.aclPolicy.rules[0].id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 
     await page.getByRole('tab', { name: 'Settings', exact: true }).click();
@@ -483,7 +521,7 @@ test('PublicServer credential exports use the configured public server', async t
     await page.getByRole('button', { name: 'Show join command', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Temporary device join command' });
     assert.equal(await dialog.locator('pre').textContent(),
-        `easytier-core --network-name team-0 --secure-mode --credential test-credential-secret -p ${peer}`);
+        `easytier-core --network-name 'team-0' --secure-mode --credential 'test-credential-secret' -p '${peer}'`);
     await dialog.getByRole('button', { name: 'Config file', exact: true }).click();
     assert.equal(await dialog.locator('pre').textContent(), [
         '[network_identity]', 'network_name = "team-0"', '',
@@ -552,7 +590,7 @@ test('logger levels decode protobuf responses, persist selections and translate 
     await drawer.waitFor({ state: 'hidden' });
     await page.getByRole('button', { name: 'Switch language', exact: true }).click();
     await page.getByRole('button', { name: '节点详情', exact: true }).click();
-    await drawer.getByRole('tab').nth(1).click();
+    await drawer.getByRole('tab', { name: '设置与操作', exact: true }).click();
     await select.getByText('跟踪', { exact: true }).waitFor();
     await select.click();
     assert.deepEqual(await page.getByRole('option').allTextContents(), ['禁用', '错误', '警告', '信息', '调试', '跟踪']);
@@ -570,7 +608,7 @@ test('node detail groups populated peers, routes, connections and ACL stats', as
     await drawer.locator('.node-drawer-mobile-peer').getByText('Build server').waitFor();
     await page.waitForFunction(() => Math.abs(document.querySelector('.console-node-drawer').getBoundingClientRect().right - innerWidth) < 1);
     assert.deepEqual(await drawer.locator('.node-drawer-metric strong').allTextContents().then(values => values.map(s => s.trim())), ['Running', '1', '1', '1']);
-    assert.equal(await drawer.getByRole('tab').count(), 2);
+    assert.equal(await drawer.getByRole('tab').count(), 3);
     const drawerWidth = await drawer.evaluate(el => ({ drawer: el.getBoundingClientRect().width, viewport: innerWidth }));
     assert.ok(drawerWidth.drawer <= drawerWidth.viewport + 1, JSON.stringify(drawerWidth));
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
@@ -660,5 +698,223 @@ test('external Console keeps the device dashboard without central requests or na
     await delay(2500);
     assert.equal(state.requests.some(request => request.path.startsWith('/networks')), false);
     assert.equal(await page.locator('a[href*="/networks"]').count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'Device Enrollment', exact: true }).count(), 0);
+    assert.equal(state.requests.some(request => request.path === '/device-access-tokens'), false);
     assert.equal(await page.locator('.p-message-warn').count(), 0);
+});
+
+
+test('node metrics show real uint64 values and WireGuard scope labels; unsupported cores stay unknown', async t => {
+    const { page, state } = await open(t, `/h/networks/${id(100)}`, {}, state => {
+        state.networks[0].network_id = id(100);
+        state.nodeStats = [
+            { name: 'vpn_portal_client_bytes_rx', value: '18446744073709551000', labels: { vpn_portal_client: 'phone-a', network_name: 'team-0' } },
+            { name: 'vpn_portal_client_bytes_rx', value: '1024', labels: { vpn_portal_client: 'phone-b', network_name: 'team-0' } },
+            { name: 'vpn_portal_client_bytes_rx', labels: { vpn_portal_client: 'phone-zero', network_name: 'team-0' } },
+        ];
+    });
+    await page.getByRole('button', { name: 'Node Detail', exact: true }).click();
+    const drawer = page.locator('.console-node-drawer');
+    await drawer.getByRole('tab', { name: 'Runtime metrics', exact: true }).click();
+    await drawer.getByText('vpn_portal_client=phone-a · network_name=team-0', { exact: true }).waitFor();
+    const rows = drawer.getByRole('row').filter({ hasText: 'vpn_portal_client_bytes_rx' });
+    assert.equal(await rows.count(), 3);
+    await drawer.getByRole('cell', { name: '1 KiB', exact: true }).waitFor();
+    await drawer.getByRole('cell', { name: '0 B', exact: true }).waitFor();
+    assert.equal(await rows.first().getByRole('cell').last().textContent(), '—');
+    state.failStats = true;
+    await drawer.getByText('Core statistics are unavailable:', { exact: false }).waitFor();
+    assert.equal(await drawer.getByRole('button', { name: 'Export Prometheus' }).isDisabled(), true);
+});
+
+test('LAN candidates retain true masks, filter public interfaces, and never guess an old core mask', async t => {
+    const { page } = await open(t, `/h/networks/${id(100)}`, {}, state => {
+        state.networks[0].network_id = id(100);
+        state.nodeInfo = { peer_id: 1, ip_list: { interface_networks: [
+            { name: 'lan', address: { ipv4: { addr: 0x0a00030b } }, prefix_length: 23 },
+            { name: 'public', address: { ipv4: { addr: 0x08080808 } }, prefix_length: 24 },
+            { name: 'broad10', address: { ipv4: { addr: 0x0a010203 } }, prefix_length: 1 },
+            { name: 'broad172', address: { ipv4: { addr: 0xac100102 } }, prefix_length: 8 },
+            { name: 'broad192', address: { ipv4: { addr: 0xc0a80102 } }, prefix_length: 15 },
+            { name: 'old', address: { ipv4: { addr: 0xc0a80101 } } },
+            { name: 'v6', address: { ipv6: { part1: 0xfd000001, part2: 0, part3: 0, part4: 1 } }, prefix_length: 64 },
+        ] } };
+    });
+    await page.getByRole('button', { name: 'Edit Member', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('button', { name: /10\.0\.2\.0\/23/ }).waitFor();
+    assert.equal(await dialog.getByRole('button', { name: /8\.8\.8\.0\/24/ }).count(), 0);
+    assert.equal(await dialog.getByRole('button', { name: /0\.0\.0\.0\/1|172\.0\.0\.0\/8|192\.168\.0\.0\/15/ }).count(), 0);
+    assert.equal(await dialog.getByRole('button', { name: /192\.168\.1\.0\/24/ }).count(), 0);
+    await dialog.getByText('old: 192.168.1.1 · Prefix unavailable; enter the CIDR manually', { exact: true }).waitFor();
+    await dialog.getByText('IPv6 interface; central subnet proxy configuration currently supports IPv4', { exact: false }).waitFor();
+});
+
+test('switching a node while its response is in flight cannot overwrite the new detail', async t => {
+    const { page } = await open(t, `/h/networks/${id(100)}`, {}, state => {
+        state.networks[0].network_id = id(100);
+        state.members.push({ ...state.members[0], device_id: id(2), member_id: id(102), hostname: 'Build server' });
+        state.rpcDelayByMachine = { [id(1)]: 1200 };
+        state.nodeRoutesByMachine = {
+            [id(1)]: [{ peer_id: 3, hostname: 'Old response', cost: 1, proxy_cidrs: [] }],
+            [id(2)]: [{ peer_id: 4, hostname: 'Current response', cost: 1, proxy_cidrs: [] }],
+        };
+    });
+    await page.getByRole('row').filter({ hasText: 'Amsterdam gateway' }).getByRole('button', { name: 'Node Detail', exact: true }).click();
+    await page.keyboard.press('Escape');
+    await page.locator('.console-node-drawer').waitFor({ state: 'hidden' });
+    await page.getByRole('row').filter({ hasText: 'Build server' }).getByRole('button', { name: 'Node Detail', exact: true }).click();
+    const drawer = page.locator('.console-node-drawer');
+    await drawer.getByRole('cell', { name: 'Current response', exact: true }).first().waitFor();
+    await delay(1400);
+    assert.equal(await drawer.getByRole('cell', { name: 'Old response', exact: true }).count(), 0);
+});
+
+test('topology draws only authorized devices and actual connection observations', async t => {
+    const { page } = await open(t, `/h/networks/${id(100)}`, {}, state => {
+        state.networks[0].network_id = id(100);
+        state.members.push({ ...state.members[0], device_id: id(2), member_id: id(102), hostname: 'Build server', temporary: true, credential_id: id(2) });
+        state.temporaryPeers = [{ peer_id: 2, credential_id: id(2), hostname: 'Build server', ipv4: '10.126.126.2', version: '2.7.0' }];
+        state.nodeInfoByMachine = { [id(1)]: { peer_id: 1 }, [id(2)]: { peer_id: 2 } };
+        state.nodePeersByMachine = { [id(1)]: [{ peer_id: 2, conns: [{ tunnel: { tunnel_type: 'udp', remote_addr: { url: 'udp://[2001:db8::2]:11010' } } }] }], [id(2)]: [] };
+        state.nodeRoutesByMachine = { [id(1)]: [{ peer_id: 99, hostname: 'Untrusted unknown', next_hop_peer_id: 2 }], [id(2)]: [] };
+    });
+    await page.getByRole('tab', { name: 'Network topology', exact: true }).click();
+    const map = page.getByRole('img', { name: 'Network topology', exact: true });
+    await map.getByText('udp IPv6', { exact: true }).waitFor();
+    assert.equal(await map.locator('circle').count(), 2);
+    assert.equal(await map.locator('line').count(), 1);
+    assert.equal(await map.getByText('Untrusted unknown').count(), 0);
+});
+
+
+test('Gateway deployment failures are visible even before a device joins', async t => {
+    const { page } = await open(t, `/h/networks/${id(100)}`, {}, state => {
+        state.networks[0].network_id = id(100);
+        state.networks[0].deployment = { state: 'failed', devices: [], gateway: { state: 'failed', running: true, last_error: 'Gateway update rejected' } };
+        state.members = [];
+    });
+    await page.getByText('Gateway update rejected', { exact: true }).waitFor();
+    assert.ok(await page.getByText('Failed; retry pending', { exact: true }).count() > 0);
+    await page.getByText('Running', { exact: true }).waitFor();
+});
+
+
+test('device token commands disappear when another tab changes the credential generation', async t => {
+    const { page, state } = await open(t);
+    await page.getByRole('button', { name: 'Device Enrollment', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Device access tokens', exact: true });
+    await dialog.getByLabel('Device label', { exact: true }).fill('Phone');
+    await dialog.getByRole('button', { name: 'Issue device token', exact: true }).click();
+    await dialog.getByText(/fixture-device-token/).waitFor();
+    state.tokens[0].auth_generation = 2;
+    await page.evaluate(() => { const channel = new BroadcastChannel('easytier-device-access-tokens'); channel.postMessage('changed'); channel.close(); });
+    await dialog.getByText(/fixture-device-token/).waitFor({ state: 'detached' });
+});
+
+test('credential editing persists grant fields and keeps linked device credentials single-use', async t => {
+    const { page, state } = await open(t, `/h/networks/${id(100)}`, {}, state => {
+        state.networks[0].network_id = id(100); state.networks[0].secure_mode = true;
+        state.credentials = [{ credential_id: id(1), credential_secret: 'fixture-secret', device_id: id(1), expiry_unix: 1893456000, reusable: false, acl_groups: ['member:a'], allow_relay: false, allowed_proxy_cidrs: [], online_peers: [] }];
+    });
+    await page.getByRole('tab', { name: 'Credentials', exact: true }).click();
+    await page.getByRole('button', { name: 'Credential permissions', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Credential permissions', exact: true });
+    await dialog.getByLabel('ACL groups (comma separated)', { exact: true }).fill('member:a, mobile');
+    await dialog.getByLabel('Allowed proxy CIDRs (comma separated)', { exact: true }).fill('10.0.2.0/23');
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await dialog.waitFor({ state: 'detached' });
+    const saved = state.writes.find(write => write.method === 'PATCH' && write.path.includes('/credentials/'));
+    assert.deepEqual(saved.payload.acl_groups, ['member:a', 'mobile']);
+    assert.deepEqual(saved.payload.allowed_proxy_cidrs, ['10.0.2.0/23']);
+    assert.equal(saved.payload.reusable, false);
+    assert.equal(saved.payload.ttl_seconds, undefined);
+});
+
+test('shared console polling pauses while the page is hidden and resumes with fresh data', async t => {
+    const { page, state } = await open(t);
+    await page.getByText('Amsterdam gateway', { exact: true }).waitFor();
+    await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')); });
+    await delay(200);
+    const count = state.requests.length;
+    await delay(2500);
+    assert.equal(state.requests.length, count);
+    state.machines.pop();
+    await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: false }); document.dispatchEvent(new Event('visibilitychange')); });
+    await page.waitForFunction(() => document.querySelector('.summary-value')?.textContent.trim() === '5');
+});
+
+
+test('removing the selected member closes its runtime drawer instead of keeping old state', async t => {
+    const { page, state } = await open(t, `/h/networks/${id(100)}`, {}, state => { state.networks[0].network_id = id(100); });
+    await page.getByRole('button', { name: 'Node Detail', exact: true }).click();
+    const drawer = page.locator('.console-node-drawer');
+    await drawer.getByText('No other nodes yet', { exact: true }).waitFor();
+    state.members = [];
+    await drawer.waitFor({ state: 'hidden' });
+});
+
+test('disabled registration hides the action and rejects the direct register view', async t => {
+    const { page } = await open(t, '/h', {}, state => { state.registrationEnabled = false; });
+    await page.goto(`${base}/#/auth/register`);
+    await page.locator('#username').waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Register', exact: true }).count(), 0);
+    await page.waitForURL('**/#/auth');
+});
+
+
+test('secure networks default new devices to dedicated credentials while permanent remains explicit', async t => {
+    const { page, state } = await open(t, `/h/networks/${id(100)}`, {}, state => { state.networks[0].network_id = id(100); state.networks[0].secure_mode = true; });
+    await page.getByRole('button', { name: 'Add Devices', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Add Devices', exact: true });
+    assert.equal(await dialog.getByRole('button', { name: 'Device (dedicated credential)', exact: true }).getAttribute('aria-pressed'), 'true');
+    await dialog.getByRole('row').filter({ hasText: 'Build server' }).getByRole('checkbox').check();
+    await dialog.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await dialog.waitFor({ state: 'detached' });
+    const created = state.writes.find(write => write.path.endsWith('/members') && write.method === 'POST');
+    assert.equal(created.payload.temporary, true);
+    assert.equal(created.payload.ttl_seconds, 7 * 24 * 3600);
+    assert.equal(state.members[0].temporary, undefined, 'existing permanent member is unchanged');
+
+    await page.getByRole('button', { name: 'Add Devices', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Trusted management node (permanent)', exact: true }).click();
+    await dialog.getByRole('row').filter({ hasText: 'Office workstation' }).getByRole('checkbox').check();
+    await dialog.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await dialog.waitFor({ state: 'detached' });
+    const permanent = state.writes.filter(write => write.path.endsWith('/members') && write.method === 'POST').at(-1);
+    assert.equal(permanent.payload.temporary, false);
+    assert.equal(permanent.payload.ttl_seconds, undefined);
+});
+
+test('non-secure networks keep permanent membership and cannot select dedicated credential role', async t => {
+    const { page, state } = await open(t, `/h/networks/${id(100)}`, {}, state => { state.networks[0].network_id = id(100); state.networks[0].secure_mode = false; });
+    await page.getByRole('button', { name: 'Add Devices', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Add Devices', exact: true });
+    assert.equal(await dialog.getByRole('button', { name: 'Trusted management node (permanent)', exact: true }).getAttribute('aria-pressed'), 'true');
+    assert.equal(await dialog.getByRole('button', { name: 'Device (dedicated credential)', exact: true }).isDisabled(), true);
+    await dialog.getByRole('row').filter({ hasText: 'Build server' }).getByRole('checkbox').check();
+    await dialog.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await dialog.waitFor({ state: 'detached' });
+    assert.equal(state.writes.find(write => write.path.endsWith('/members') && write.method === 'POST').payload.temporary, false);
+});
+
+
+test('Gateway topology uses its actual published peer ID and does not infer links from an entry URL', async t => {
+    const { page, state } = await open(t, `/h/networks/${id(100)}`, {}, state => {
+        state.networks[0].network_id = id(100);
+        state.networks[0].deployment = { state: 'applied', devices: [], gateway: { state: 'applied', running: true, peer_id: 101, peer_url: 'tcp://127.0.0.1:22020' } };
+        state.members.push({ ...state.members[0], device_id: id(2), member_id: id(102), hostname: 'Build server' });
+        state.nodeInfoByMachine = { [id(1)]: { peer_id: 1 }, [id(2)]: { peer_id: 2 } };
+        const connection = [{ peer_id: 101, conns: [{ tunnel: { tunnel_type: 'tcp', remote_addr: { url: 'tcp://127.0.0.1:22020' } } }] }];
+        state.nodePeersByMachine = { [id(1)]: connection, [id(2)]: connection };
+        state.nodeRoutes = [];
+    });
+    await page.getByRole('tab', { name: 'Network topology', exact: true }).click();
+    const map = page.getByRole('img', { name: 'Network topology', exact: true });
+    await map.getByText('Gateway', { exact: true }).waitFor();
+    await page.waitForFunction(() => document.querySelector('.topology-map').querySelectorAll('line').length === 2);
+    assert.equal(await map.locator('circle').count(), 3);
+    delete state.networks[0].deployment.gateway.peer_id;
+    await page.waitForFunction(() => document.querySelector('.topology-map').querySelectorAll('line').length === 0);
+    assert.equal(await map.locator('circle').count(), 3, 'configured Gateway remains visible with unknown runtime ID');
 });

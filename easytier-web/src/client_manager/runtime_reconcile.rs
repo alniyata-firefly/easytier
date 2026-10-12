@@ -10,8 +10,8 @@ use easytier::{
         acl::Acl,
         api::{
             config::{
-                AclPatch, ConfigPatchAction, InstanceConfigPatch, PatchConfigRequest,
-                PortForwardPatch, ProxyNetworkPatch, VpnPortalClientPatch,
+                AclPatch, ConfigPatchAction, ExitNodePatch, InstanceConfigPatch,
+                PatchConfigRequest, PortForwardPatch, ProxyNetworkPatch, VpnPortalClientPatch,
             },
             instance::{InstanceIdentifier, instance_identifier},
             manage::{
@@ -69,6 +69,7 @@ fn hot_patch_base(config: &NetworkConfig) -> anyhow::Result<NetworkConfig> {
     // (address and private key) decides between patch and recreate.
     config.vpn_portal_config = None;
     config.managed_credentials.clear();
+    config.exit_nodes.clear();
     if config.dhcp.unwrap_or_default() {
         config.virtual_ipv4 = None;
         config.network_length = None;
@@ -371,6 +372,23 @@ fn web_source_runtime_patch(
         (Some(_), None) | (None, Some(_)) => return Ok(None),
         (None, None) => {}
     }
+    let current_exit_nodes = current.gen_config()?.get_exit_nodes();
+    let desired_exit_nodes = desired.gen_config()?.get_exit_nodes();
+    if current_exit_nodes != desired_exit_nodes {
+        // Clear then add preserves the configured priority order, including
+        // removals to an empty set. Core commits TOML and updates live routing.
+        patch.exit_nodes.push(ExitNodePatch {
+            action: ConfigPatchAction::Clear as i32,
+            node: None,
+        });
+        patch
+            .exit_nodes
+            .extend(desired_exit_nodes.into_iter().map(|node| ExitNodePatch {
+                action: ConfigPatchAction::Add as i32,
+                node: Some(node.into()),
+            }));
+    }
+
     let current_managed_credentials = normalized_managed_credentials(current)?;
     let desired_managed_credentials = normalized_managed_credentials(desired)?;
     if current_managed_credentials != desired_managed_credentials {
@@ -545,6 +563,30 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn exit_nodes_patch_preserves_order_and_supports_empty_set() {
+        let mut current = config_with_port_forwards(vec![]);
+        current.exit_nodes = vec!["10.144.0.2".into(), "fd00::2".into()];
+        let mut desired = current.clone();
+        desired.exit_nodes.reverse();
+        let patch = web_source_runtime_patch(&current, &desired)
+            .unwrap()
+            .unwrap();
+        assert_eq!(patch.exit_nodes.len(), 3);
+        assert_eq!(patch.exit_nodes[0].action, ConfigPatchAction::Clear as i32);
+        assert_eq!(
+            std::net::IpAddr::from(patch.exit_nodes[1].node.clone().unwrap()).to_string(),
+            "fd00::2"
+        );
+        desired.exit_nodes.clear();
+        let patch = web_source_runtime_patch(&current, &desired)
+            .unwrap()
+            .unwrap();
+        assert_eq!(patch.exit_nodes.len(), 1);
+        assert_eq!(patch.exit_nodes[0].action, ConfigPatchAction::Clear as i32);
+        assert!(patch.exit_nodes[0].node.is_none());
+    }
 
     fn config_with_port_forwards(port_forwards: Vec<PortForwardConfig>) -> NetworkConfig {
         NetworkConfig {

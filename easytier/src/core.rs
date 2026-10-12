@@ -1545,10 +1545,7 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
         )
         .await
         .inspect(|_| {
-            log::info!(
-                server = config_server_url_s,
-                "Web client started successfully...",
-            );
+            log::info!("Web client started successfully...");
 
             log::info!("Official config website: https://easytier.cn/web");
         })?;

@@ -103,10 +103,28 @@ async fn connect_config_server(
 }
 
 /// Normalized config-server endpoint and authentication token.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConfigServerEndpoint {
     connect_url: Url,
     token: String,
+}
+
+impl std::fmt::Debug for ConfigServerEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut endpoint = self.connect_url.clone();
+        if let Some(position) = endpoint.path().rfind('/') {
+            let path = format!("{}<redacted>", &endpoint.path()[..=position]);
+            endpoint.set_path(&path);
+        }
+        endpoint.set_query(None);
+        endpoint.set_fragment(None);
+        let _ = endpoint.set_password(None);
+        let _ = endpoint.set_username("");
+        f.debug_struct("ConfigServerEndpoint")
+            .field("connect_url", &endpoint)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl ConfigServerEndpoint {
@@ -327,7 +345,8 @@ async fn web_client_routine(
         };
 
         connected.store(true, Ordering::Release);
-        tracing::info!(?connection, "connected to config server");
+        // A WebSocket transport URL can contain the device access token.
+        tracing::info!("connected to config server");
         let mut session = WebClientSession::new(connection, controller.clone());
         let support_encryption = match time::timeout(FEATURE_TIMEOUT, session.get_feature()).await {
             Ok(Ok(feature)) => feature.support_encryption,
@@ -709,6 +728,18 @@ mod tests {
     #[test]
     fn endpoint_rejects_an_empty_token() {
         assert!(ConfigServerEndpoint::parse("udp://example.com", |_| true).is_err());
+    }
+
+    #[test]
+    fn endpoint_debug_never_contains_device_token() {
+        let token = "device-secret-never-log";
+        for scheme in ["udp", "wss"] {
+            let input = format!("{scheme}://example.com/config/{token}");
+            let endpoint = ConfigServerEndpoint::parse(&input, |_| true).unwrap();
+            let debug = format!("{endpoint:?}");
+            assert!(!debug.contains(token));
+            assert!(debug.contains("redacted"));
+        }
     }
 
     #[test]

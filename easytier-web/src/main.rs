@@ -92,6 +92,10 @@ struct Cli {
     )]
     config_server_protocol: String,
 
+    /// Public configuration-server URL, without the device token. A path prefix is allowed.
+    #[arg(long, env = "ET_ADVERTISED_CONFIG_SERVER_URL", value_parser = parse_advertised_config_server_url)]
+    advertised_config_server_url: Option<String>,
+
     #[arg(
         long,
         short='a',
@@ -298,6 +302,50 @@ async fn get_dual_stack_listener(
     Ok((v6_listener, v4_listener))
 }
 
+fn parse_advertised_config_server_url(value: &str) -> Result<String, String> {
+    let url = url::Url::parse(value)
+        .map_err(|_| "Expected a complete configuration-server URL".to_string())?;
+    if !matches!(url.scheme(), "udp" | "tcp" | "ws" | "wss")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("Use udp/tcp/ws/wss with a host and optional path prefix, without credentials, query or fragment".into());
+    }
+    Ok(url.to_string())
+}
+
+#[cfg(test)]
+mod entry_url_tests {
+    use super::parse_advertised_config_server_url;
+
+    #[test]
+    fn advertised_entry_keeps_ipv6_and_websocket_path_prefix() {
+        assert_eq!(
+            parse_advertised_config_server_url("udp://[2001:db8::1]:22020").unwrap(),
+            "udp://[2001:db8::1]:22020"
+        );
+        assert_eq!(
+            parse_advertised_config_server_url("wss://vpn.example.com/config/managed/").unwrap(),
+            "wss://vpn.example.com/config/managed/"
+        );
+        for invalid in [
+            "vpn.example.com",
+            "https://vpn.example.com",
+            "udp://user:secret@vpn.example.com:22020",
+            "udp://vpn.example.com:22020?secret=value",
+            "ws://vpn.example.com/#secret",
+        ] {
+            assert!(
+                parse_advertised_config_server_url(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     let locale = sys_locale::get_locale().unwrap_or_else(|| String::from("en-US"));
@@ -472,6 +520,7 @@ async fn main() {
         webhook_config,
         cli.config_server_protocol.clone(),
         cli.config_server_port,
+        cli.advertised_config_server_url,
     )
     .await
     .unwrap()

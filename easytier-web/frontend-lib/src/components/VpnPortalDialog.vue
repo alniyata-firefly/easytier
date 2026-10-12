@@ -4,7 +4,8 @@ import { useI18n } from 'vue-i18n'
 import { Button, Dialog, InputNumber, InputText, MultiSelect, Tag } from 'primevue'
 import QRCode from 'qrcode'
 import { v4 as uuidv4 } from 'uuid'
-import type { RemoteClient } from '../modules/api'
+import { CounterRate, counter, formatQuantity, normalizeMetrics } from '../modules/runtimeDisplay'
+import type { RuntimeMetric, RemoteClient } from '../modules/api'
 import { PeriodicTask } from '../modules/utils'
 import {
   normalizeVpnPortalEndpoint, suggestVpnPortalAddress, validVpnPortalAddress,
@@ -20,6 +21,17 @@ const props = defineProps<{
 const emit = defineEmits(['close'])
 const { t } = useI18n()
 const info = ref<VpnPortalInfo>()
+const metrics = ref<RuntimeMetric[]>([])
+const metricsError = ref('')
+const rates = ref(new Map<string, number | undefined>())
+const samples = new Map<string, CounterRate>()
+const clientMetric = (name: string, direction: 'rx' | 'tx') => {
+  const rows = metrics.value.filter(metric => metric.name === `vpn_portal_client_bytes_${direction}` && metric.labels?.vpn_portal_client === name)
+  if (!rows.length) return undefined
+  let sum = 0n
+  for (const row of rows) { const value = counter(row.value); if (value === undefined) return undefined; sum += value }
+  return sum
+}
 const config = ref<NetworkConfig>()
 const loading = ref(true)
 const busy = ref(false)
@@ -42,13 +54,14 @@ let disposed = false
 
 const clients = computed(() => info.value?.clients ?? [])
 const available = computed(() => info.value?.vpn_type === 'wireguard' && !!info.value.listener)
+const legacyPortal = computed(() => !!info.value?.client_config && !info.value.listener)
 const groupOptions = computed(() => config.value?.acl?.acl_v1?.group?.declares.map(group => group.group_name) ?? [])
 const usedIps = computed(() => vpnPortalUsedIps(props.instance, clients.value))
 const clientName = computed(() => name.value.trim() || defaultName.value)
 const validName = computed(() => /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(clientName.value)
   && !clients.value.some(client => client.name === clientName.value))
 const validAddress = computed(() => validVpnPortalAddress(address.value.trim(), prefix.value, usedIps.value))
-const canAdd = computed(() => available.value && !props.readonly && validName.value && validAddress.value
+const canAdd = computed(() => available.value && !loadError.value && !props.readonly && validName.value && validAddress.value
   && clients.value.length < 64 && !busy.value)
 const selectedClient = computed(() => clients.value.find(client => client.name === selectedName.value))
 const automaticEndpoint = computed(() => vpnPortalEndpoint(info.value?.listener ?? '', props.instance.detail?.my_node_info))
@@ -68,13 +81,28 @@ async function refresh() {
     if (disposed || version !== refreshVersion) return
     info.value = portal
     config.value = network
+    if (props.api.get_stats) {
+      try {
+        const value = await props.api.get_stats(props.instance.instance_id)
+        if (disposed || version !== refreshVersion) return
+        metrics.value = normalizeMetrics(value); metricsError.value = ''
+        const now = performance.now(), next = new Map<string, number | undefined>()
+        for (const client of clients.value) for (const direction of ['rx', 'tx'] as const) {
+          const key = `${client.name}:${direction}`, sample = samples.get(key) ?? new CounterRate()
+          samples.set(key, sample)
+          next.set(key, sample.sample(clientMetric(client.name, direction), now, props.instance.instance_id))
+        }
+        rates.value = next
+        for (const key of samples.keys()) if (!next.has(key)) samples.delete(key)
+      } catch { if (!disposed && version === refreshVersion) { metrics.value = []; samples.clear(); rates.value.clear(); metricsError.value = t('web.adaptation.stats_unavailable') } }
+    }
   } catch (cause) {
     if (!disposed && version === refreshVersion) throw cause
   }
 }
 
 const refreshTask = new PeriodicTask(async () => {
-  if (busy.value) return
+  if (busy.value || document.hidden) return
   try {
     await refresh()
     loadError.value = ''
@@ -218,13 +246,15 @@ function downloadConfig() {
     <div class="flex flex-col gap-4">
       <p v-if="loading" class="py-6 text-center">{{ t('web.device_management.loading_network_status') }}</p>
       <p v-if="error || loadError" role="alert" class="text-red-500">{{ error || loadError }}</p>
-      <p v-if="!loading && !available">{{ t('vpn_portal_not_configured') }}</p>
+      <p v-if="!loading && !loadError && legacyPortal" role="status">{{ t('web.adaptation.legacy_portal') }}</p>
+      <p v-else-if="!loading && !loadError && !available">{{ t('vpn_portal_not_configured') }}</p>
       <template v-if="available">
         <div class="flex items-center justify-between gap-3">
           <span class="text-sm text-surface-500">{{ t('vpn_portal_devices_help') }}</span>
           <Button v-if="!readonly" icon="pi pi-plus" :label="t('vpn_portal_add_client')"
-            :disabled="busy || clients.length >= 64 || adding" @click="addDevice" />
+            :disabled="busy || !!loadError || clients.length >= 64 || adding" @click="addDevice" />
         </div>
+<p v-if="metricsError" class="text-sm text-amber-600">{{ metricsError }}</p>
         <p v-if="clients.length === 0 && !adding" class="py-6 text-center text-surface-500">{{ t('vpn_portal_no_clients') }}</p>
         <div v-for="client in clients" :key="client.name" class="rounded border border-surface-200 dark:border-surface-700 p-3">
           <div class="flex flex-wrap items-center justify-between gap-3">
@@ -234,45 +264,48 @@ function downloadConfig() {
               <Tag class="ml-2" :severity="stateSeverity(client.state)" :value="t(stateKey(client.state))" />
             </div>
             <div class="flex gap-2">
-              <Button size="small" severity="secondary" :label="t('vpn_portal_connect_device')" :disabled="busy"
+              <Button size="small" severity="secondary" :label="t('vpn_portal_connect_device')" :disabled="busy || !!loadError"
                 @click="selectedName = client.name; adding = false" />
               <Button v-if="!readonly" icon="pi pi-trash" severity="danger" text
-                :aria-label="t('vpn_portal_remove_client')" :disabled="busy" @click="deletingName = client.name" />
+                :aria-label="t('vpn_portal_remove_client')" :disabled="busy || !!loadError" @click="deletingName = client.name" />
             </div>
+          </div>
+          <div class="text-xs text-surface-500 mt-2">↓ {{ formatQuantity(clientMetric(client.name, 'rx'), true) }} · ↑ {{ formatQuantity(clientMetric(client.name, 'tx'), true) }}
+            <span v-for="direction in (['rx', 'tx'] as const)" :key="direction" class="ml-3">{{ direction === 'rx' ? '↓' : '↑' }} {{ rates.get(`${client.name}:${direction}`) == null ? '—' : `${formatQuantity(Math.round(rates.get(`${client.name}:${direction}`)!), true)}/s` }}</span>
           </div>
           <p v-if="client.error" class="mt-2 text-sm text-red-500">{{ client.error }}</p>
           <div v-if="deletingName === client.name" class="mt-3 flex flex-wrap items-center gap-2">
             <span class="text-sm">{{ t('vpn_portal_remove_confirm') }}</span>
-            <Button size="small" severity="danger" :label="t('vpn_portal_remove_client')" :disabled="busy"
+            <Button size="small" severity="danger" :label="t('vpn_portal_remove_client')" :disabled="busy || !!loadError"
               @click="removeDevice(client.name)" />
-            <Button size="small" text :label="t('web.common.cancel')" :disabled="busy" @click="deletingName = ''" />
+            <Button size="small" text :label="t('web.common.cancel')" :disabled="busy || !!loadError" @click="deletingName = ''" />
           </div>
         </div>
 
         <form v-if="adding" class="flex flex-col gap-3 rounded border border-surface-200 dark:border-surface-700 p-4"
           @submit.prevent="saveDevice">
           <label for="vpn_portal_client_name">{{ t('vpn_portal_client_name') }}</label>
-          <InputText id="vpn_portal_client_name" v-model="name" :placeholder="defaultName" :disabled="busy" />
+          <InputText id="vpn_portal_client_name" v-model="name" :placeholder="defaultName" :disabled="busy || !!loadError" />
           <small v-if="!validName" class="text-red-500">{{ t('vpn_portal_invalid_name') }}</small>
           <label for="vpn_portal_client_address">{{ t('vpn_portal_client_address') }}</label>
-          <InputText id="vpn_portal_client_address" v-model="address" placeholder="10.126.126.10" :disabled="busy" />
+          <InputText id="vpn_portal_client_address" v-model="address" placeholder="10.126.126.10" :disabled="busy || !!loadError" />
           <small class="text-surface-500">{{ t('vpn_portal_address_help') }}</small>
           <small v-if="address && !validAddress" class="text-red-500">{{ t('vpn_portal_invalid_address') }}</small>
           <details :open="prefix === undefined">
             <summary class="cursor-pointer text-sm">{{ t('vpn_portal_advanced') }}</summary>
             <div class="mt-3 flex flex-col gap-2">
               <label for="vpn_portal_client_prefix">{{ t('vpn_portal_client_prefix') }}</label>
-              <InputNumber input-id="vpn_portal_client_prefix" v-model="prefix" :min="0" :max="30" :disabled="busy" />
+              <InputNumber input-id="vpn_portal_client_prefix" v-model="prefix" :min="0" :max="30" :disabled="busy || !!loadError" />
               <template v-if="groupOptions.length">
                 <label for="vpn_portal_client_groups">{{ t('vpn_portal_client_groups') }}</label>
                 <MultiSelect input-id="vpn_portal_client_groups" v-model="groups" :options="groupOptions"
-                  :placeholder="t('vpn_portal_client_groups_placeholder')" appendTo="self" filter fluid :disabled="busy" />
+                  :placeholder="t('vpn_portal_client_groups_placeholder')" appendTo="self" filter fluid :disabled="busy || !!loadError" />
               </template>
             </div>
           </details>
           <div class="flex gap-2">
             <Button type="submit" :label="t('vpn_portal_generate_config')" :disabled="!canAdd" :loading="busy" />
-            <Button text :label="t('web.common.cancel')" :disabled="busy" @click="adding = false" />
+            <Button text :label="t('web.common.cancel')" :disabled="busy || !!loadError" @click="adding = false" />
           </div>
         </form>
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import { useVisiblePolling } from '../modules/polling';
 import { Button, Message, Skeleton } from 'primevue';
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { Utils } from 'easytier-frontend-lib';
 import ApiClient, { type Summary, type CentralNetworkSummary } from '../modules/api';
@@ -23,11 +24,10 @@ const loadSummary = async () => {
     ]);
     loadError.value = results.some(result => result.status === 'rejected');
     refreshing.value = false;
+    return !loadError.value;
 };
 watch(() => props.centralEnabled, () => loadSummary());
-const periodFunc = new Utils.PeriodicTask(loadSummary, 2000);
-onMounted(() => periodFunc.start());
-onUnmounted(() => periodFunc.stop());
+useVisiblePolling(loadSummary, 2000);
 
 const devicePreview = computed(() => [...(devices.value ?? [])]
     .sort((a, b) => ((a.alias || a.hostname) ?? '').localeCompare((b.alias || b.hostname) ?? '')).slice(0, 5));
@@ -45,7 +45,7 @@ const stats = computed(() => [
     <div class="console-page">
         <header class="page-heading">
             <div><h1>{{ t('web.main.dashboard') }}</h1></div>
-            <Button icon="pi pi-refresh" :label="t('web.console.refresh')" severity="secondary" outlined :loading="refreshing" @click="loadSummary" />
+            <Button icon="pi pi-refresh" :label="t('web.console.refresh')" severity="secondary" outlined :loading="refreshing" @click="api?.clear_snapshots(); loadSummary()" />
         </header>
         <Message v-if="loadError" severity="warn" :closable="false">{{ t('web.console.load_failed') }}</Message>
         <section class="console-panel summary-strip" :aria-label="t('web.main.dashboard')">

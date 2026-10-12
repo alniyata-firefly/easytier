@@ -170,6 +170,10 @@ impl Db {
         (user_id, machine_id): (UserIdInDb, Uuid),
         block: bool,
     ) -> Result<bool, DbErr> {
+        // Keep credential invalidation and registry removal in one commit.
+        // Registration uses the shared read fence, so an old token cannot
+        // recreate this device between these operations.
+        let _auth_guard = self.device_auth_gate.write().await;
         let machine_id_value = machine_id.to_string();
         let mut transaction = self
             .db
@@ -192,6 +196,11 @@ impl Db {
             transaction.commit().await.map_err(sqlx_db_error)?;
             return Ok(false);
         };
+
+        sqlx::query("UPDATE device_access_tokens SET revoked_at=?,auth_generation=auth_generation+1 WHERE user_id=? AND machine_id=? AND revoked_at IS NULL")
+            .bind(chrono::Utc::now().to_rfc3339_opts(::chrono::SecondsFormat::Millis,true))
+            .bind(user_id).bind(&machine_id_value)
+            .execute(&mut *transaction).await.map_err(sqlx_db_error)?;
 
         if block {
             sqlx::query(
@@ -270,6 +279,77 @@ mod tests {
     use sea_orm::{EntityTrait, Set};
 
     use super::{Db, DeviceHeartbeatRecord, entity::blocked_devices};
+
+    #[tokio::test]
+    async fn deletion_and_credential_revocation_are_atomic_on_failure_and_concurrent_enrollment() {
+        let db = Db::memory_db().await;
+        let owner = db.auto_create_user("atomic-delete-owner").await.unwrap().id;
+        let machine_id = uuid::Uuid::new_v4();
+        let token = db
+            .create_device_access_token(owner, "delete-device", None, None)
+            .await
+            .unwrap();
+        let record = DeviceHeartbeatRecord {
+            user_id: owner,
+            machine_id,
+            hostname: "device".into(),
+            easytier_version: "2.7".into(),
+            device_os: "{}".into(),
+            client_url: String::new(),
+        };
+        db.authenticate_device_access_token(&token.token, record.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("CREATE TRIGGER fail_device_delete BEFORE DELETE ON devices BEGIN SELECT RAISE(ABORT, 'deliberate deletion failure'); END;")
+            .execute(&db.inner()).await.unwrap();
+        assert!(
+            db.delete_device_with_optional_block((owner, machine_id), true)
+                .await
+                .is_err()
+        );
+        // The token update and block insert preceded the failing DELETE, so
+        // these checks demonstrate rollback of the entire transaction.
+        assert!(db.get_device((owner, machine_id)).await.unwrap().is_some());
+        assert!(!db.is_device_blocked((owner, machine_id)).await.unwrap());
+        let info = db
+            .get_device_access_token(owner, &token.info.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.auth_generation, 1);
+        assert!(info.revoked_at.is_none());
+        assert!(
+            db.resolve_device_access_token(&token.token, machine_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        sqlx::query("DROP TRIGGER fail_device_delete")
+            .execute(&db.inner())
+            .await
+            .unwrap();
+        let (registered, deleted) = tokio::join!(
+            db.authenticate_device_access_token(&token.token, record),
+            db.delete_device_with_optional_block((owner, machine_id), false)
+        );
+        registered.unwrap();
+        assert!(deleted.unwrap());
+        assert!(db.get_device((owner, machine_id)).await.unwrap().is_none());
+        assert!(
+            db.resolve_device_access_token(&token.token, machine_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let info = db
+            .get_device_access_token(owner, &token.info.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.auth_generation, 2);
+        assert!(info.revoked_at.is_some());
+    }
 
     async fn insert_blocked_device(
         db: &Db,

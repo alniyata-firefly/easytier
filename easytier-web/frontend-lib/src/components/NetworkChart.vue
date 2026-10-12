@@ -53,29 +53,30 @@ ChartJS.register(
 interface Props {
   uploadRate: string
   downloadRate: string
+  sampleTime?: number
 }
 
 const props = defineProps<Props>()
 
 const chartCanvas = ref<HTMLCanvasElement>()
 let chart: ChartJS | null = null
-let updateTimer: number | null = null
 
 // 存储历史数据，最多保存30个数据点（1分钟历史）
 const maxDataPoints = 120
-const uploadHistory: number[] = []
-const downloadHistory: number[] = []
+const uploadHistory: (number | null)[] = []
+const downloadHistory: (number | null)[] = []
 const timeLabels: string[] = []
 
-const currentUpload = ref('0')
-const currentDownload = ref('0')
+const currentUpload = ref('—')
+const currentDownload = ref('—')
 
 // 将带单位的速率字符串转换为字节数
-function parseRateToBytes(rateStr: string): number {
-  if (!rateStr || rateStr === '0') return 0
+function parseRateToBytes(rateStr: string): number | null {
+  if (rateStr === '0') return 0
+  if (!rateStr || rateStr === '—') return null
 
   const match = rateStr.match(/([0-9.]+)\s*([KMGT]?i?B)/i)
-  if (!match) return 0
+  if (!match) return null
 
   const value = parseFloat(match[1])
   const unit = match[2].toUpperCase()
@@ -96,12 +97,13 @@ function parseRateToBytes(rateStr: string): number {
 }
 
 // 格式化字节为可读格式
-function formatBytes(bytes: number): string {
+function formatBytes(bytes: number | null): string {
+  if (bytes == null || !Number.isFinite(bytes)) return '—'
   if (bytes < 1) return bytes.toFixed(1) + ' B'
 
   const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  const sizes = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB']
+  const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k)))
 
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
 }
@@ -119,8 +121,8 @@ function updateData() {
   downloadHistory.push(downloadBytes)
 
   // 生成时间标签
-  const now = new Date()
-  const timeStr = now.toLocaleTimeString('zh-CN', {
+  const now = new Date(props.sampleTime || Date.now())
+  const timeStr = now.toLocaleTimeString(navigator.language, {
     hour12: false,
     hour: '2-digit',
     minute: '2-digit',
@@ -238,42 +240,18 @@ function initChart() {
 }
 
 // 监听props变化
-watch([() => props.uploadRate, () => props.downloadRate], () => {
+watch([() => props.uploadRate, () => props.downloadRate, () => props.sampleTime], () => {
   updateData()
 }, { immediate: true })
 
 onMounted(async () => {
-  // add initial point
-  const now = new Date();
-  for (let i = 0; i < maxDataPoints; i++) {
-    let date = new Date(now.getTime() - (maxDataPoints - i) * 2000)
-    const timeStr = date.toLocaleTimeString(navigator.language, {
-      hour12: false,
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit'
-    })
-    uploadHistory.push(0)
-    downloadHistory.push(0)
-    timeLabels.push(timeStr)
-  }
-
   await nextTick()
   initChart()
-  updateData()
-
-  // 启动定时器，每2秒更新一次图表
-  updateTimer = window.setInterval(() => {
-    updateData()
-  }, 2000)
 })
 
 onUnmounted(() => {
   if (chart) {
     chart.destroy()
-  }
-  if (updateTimer) {
-    clearInterval(updateTimer)
   }
 })
 </script>

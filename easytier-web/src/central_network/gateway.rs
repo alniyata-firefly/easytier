@@ -119,6 +119,10 @@ impl GatewayRuntimeSpec {
 pub(crate) trait GatewayRuntime: Send + Sync {
     async fn start(&self) -> anyhow::Result<()>;
     async fn stop(&self);
+    async fn replace_credentials(
+        &self,
+        credentials: &[ManagedCredentialConfig],
+    ) -> anyhow::Result<()>;
     fn peer_manager(&self) -> Option<Arc<PeerManagerCore>>;
 
     async fn observe_network(&self) -> Option<GatewayNetworkObservation> {
@@ -141,6 +145,39 @@ impl GatewayRuntime for NativeGatewayRuntime {
 
     async fn stop(&self) {
         self.0.stop().await;
+    }
+
+    async fn replace_credentials(
+        &self,
+        credentials: &[ManagedCredentialConfig],
+    ) -> anyhow::Result<()> {
+        // The Core patch validates/reserves the complete set, commits its shared
+        // TOML snapshot, installs it, then notifies existing authenticated peers.
+        // This Gateway is reconstructed from durable central intent on restart.
+        easytier_core::management::apply_config_patch(
+            &self.0,
+            easytier::proto::api::config::InstanceConfigPatch {
+                managed_credentials: Some(easytier::proto::api::manage::ManagedCredentialSet {
+                    entries: credentials
+                        .iter()
+                        .map(
+                            |credential| easytier::proto::api::manage::ManagedCredentialConfig {
+                                credential_id: credential.credential_id.clone(),
+                                credential_secret: credential.credential_secret.clone(),
+                                groups: credential.groups.clone(),
+                                allow_relay: credential.allow_relay,
+                                allowed_proxy_cidrs: credential.allowed_proxy_cidrs.clone(),
+                                expiry_unix: credential.expiry_unix,
+                                reusable: Some(credential.reusable),
+                            },
+                        )
+                        .collect(),
+                }),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
     }
 
     fn peer_manager(&self) -> Option<Arc<PeerManagerCore>> {
@@ -168,6 +205,9 @@ impl GatewayRuntimeFactory for NativeGatewayRuntimeFactory {
 
         let mut flags = config.get_flags();
         flags.no_tun = true;
+        // The Gateway accepts through the Web's shared config listener and
+        // owns no public socket to map. Never acquire host UPnP leases here.
+        flags.disable_upnp = true;
         flags.disable_relay_data = !spec.relay_data;
         flags.bind_device = false;
         config.set_flags(flags);
@@ -203,6 +243,19 @@ struct PublishedRuntime {
 struct State {
     by_key: HashMap<GatewayRuntimeKey, PublishedRuntime>,
     mesh_name_to_key: HashMap<String, GatewayRuntimeKey>,
+    last_errors: HashMap<GatewayRuntimeKey, String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GatewayDeploymentStatus {
+    pub state: String,
+    pub running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -261,57 +314,92 @@ impl NetworkInstanceManager {
         }
 
         let spec = GatewayRuntimeSpec::from_intent(intent, self.config.relay_data);
-        {
-            let state = self.state.write().await;
-            if state
+        let existing = {
+            let state = self.state.read().await;
+            state
                 .by_key
                 .get(&key)
-                .is_some_and(|published| published.spec == spec)
-            {
+                .map(|published| (published.spec.clone(), published.runtime.clone()))
+        };
+        if let Some((current, runtime)) = &existing {
+            if *current == spec {
+                self.state.write().await.last_errors.remove(&key);
+                return;
+            }
+            let mut current_identity = current.clone();
+            current_identity.credentials.clear();
+            let mut desired_identity = spec.clone();
+            desired_identity.credentials.clear();
+            if current_identity == desired_identity {
+                match runtime.replace_credentials(&spec.credentials).await {
+                    Ok(()) => {
+                        let mut state = self.state.write().await;
+                        if let Some(published) = state.by_key.get_mut(&key) {
+                            published.spec = spec;
+                        }
+                        state.last_errors.remove(&key);
+                    }
+                    Err(error) => {
+                        // Never stop an otherwise healthy mesh because a
+                        // credential patch failed. The desired intent is kept
+                        // and reconciliation retries it.
+                        tracing::error!(user_id = key.user_id, network_id = %key.network_id,
+                            "failed to hot-update Gateway credentials: {error:#}");
+                        self.record_error(key, "Gateway credential update failed; retry pending")
+                            .await;
+                    }
+                }
                 return;
             }
         }
 
-        self.remove_locked(key).await;
-        let mesh_owner = {
-            let state = self.state.read().await;
-            state.mesh_name_to_key.get(&spec.mesh_name).copied()
-        };
-        if let Some(owner) = mesh_owner {
-            tracing::error!(
-                user_id = key.user_id,
-                network_id = %key.network_id,
-                mesh_name = %spec.mesh_name,
-                owner_user_id = owner.user_id,
-                owner_network_id = %owner.network_id,
-                "Gateway mesh name is already owned"
-            );
+        let mesh_owner = self
+            .state
+            .read()
+            .await
+            .mesh_name_to_key
+            .get(&spec.mesh_name)
+            .copied();
+        if mesh_owner.is_some_and(|owner| owner != key) {
+            self.record_error(key, "Gateway mesh name is already owned")
+                .await;
             return;
         }
-
+        // This runtime has no listeners or TUN of its own. Build and start the
+        // candidate before switching the shared listener's immutable ownership
+        // index; failed replacements leave the old network usable.
         let candidate = match self.factory.build(&spec) {
             Ok(candidate) => candidate,
             Err(error) => {
-                tracing::error!(
-                    user_id = key.user_id,
-                    network_id = %key.network_id,
-                    "failed to build Gateway runtime: {error:#}"
-                );
+                tracing::error!(user_id = key.user_id, network_id = %key.network_id,
+                    "failed to build Gateway runtime: {error:#}");
+                self.record_error(
+                    key,
+                    "Gateway runtime validation/build failed; previous runtime retained",
+                )
+                .await;
                 return;
             }
         };
         if let Err(error) = candidate.start().await {
             candidate.stop().await;
-            tracing::error!(
-                user_id = key.user_id,
-                network_id = %key.network_id,
-                "failed to start Gateway runtime: {error:#}"
-            );
+            tracing::error!(user_id = key.user_id, network_id = %key.network_id,
+                "failed to start Gateway runtime: {error:#}");
+            self.record_error(
+                key,
+                "Gateway runtime startup failed; previous runtime retained",
+            )
+            .await;
             return;
         }
-
-        {
+        let retired = {
             let mut state = self.state.write().await;
+            let retired = state.by_key.remove(&key);
+            if let Some(retired) = &retired {
+                if state.mesh_name_to_key.get(&retired.spec.mesh_name) == Some(&key) {
+                    state.mesh_name_to_key.remove(&retired.spec.mesh_name);
+                }
+            }
             state.mesh_name_to_key.insert(spec.mesh_name.clone(), key);
             state.by_key.insert(
                 key,
@@ -322,9 +410,62 @@ impl NetworkInstanceManager {
                     admissions: Arc::new(RwLock::new(())),
                 },
             );
+            state.last_errors.remove(&key);
+            retired
+        };
+        if let Some(retired) = retired {
+            retired.retiring.cancel();
+            let _admissions = retired.admissions.write().await;
+            retired.runtime.stop().await;
         }
     }
 
+    async fn record_error(&self, key: GatewayRuntimeKey, message: &str) {
+        self.state
+            .write()
+            .await
+            .last_errors
+            .insert(key, message.to_owned());
+    }
+
+    pub async fn deployment_status(
+        &self,
+        user_id: i32,
+        network_id: Uuid,
+    ) -> GatewayDeploymentStatus {
+        let key = GatewayRuntimeKey {
+            user_id,
+            network_id,
+        };
+        let state = self.state.read().await;
+        let published = state.by_key.get(&key);
+        let running = published.is_some();
+        let peer_id = published
+            .and_then(|published| published.runtime.peer_manager())
+            .map(|manager| manager.my_peer_id());
+        let peer_url = self.config.peer_url.parse::<url::Url>().ok().map(|url| {
+            // Runtime diagnostics never need a credential-bearing path or
+            // userinfo. The effective connector URL remains unchanged.
+            easytier_core::connectivity::manual::redacted_endpoint_url(&url).to_string()
+        });
+        let last_error = state.last_errors.get(&key).cloned();
+        GatewayDeploymentStatus {
+            state: if last_error.is_some() {
+                "failed"
+            } else if running {
+                "applied"
+            } else {
+                "pending"
+            }
+            .to_owned(),
+            running,
+            peer_id,
+            peer_url,
+            last_error,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) async fn network_ids(&self) -> Vec<(i32, Uuid)> {
         self.state
             .read()
@@ -332,6 +473,18 @@ impl NetworkInstanceManager {
             .by_key
             .keys()
             .map(|key| (key.user_id, key.network_id))
+            .collect()
+    }
+
+    pub(crate) async fn tracked_network_ids(&self) -> Vec<(i32, Uuid)> {
+        let state = self.state.read().await;
+        state
+            .by_key
+            .keys()
+            .chain(state.last_errors.keys())
+            .map(|key| (key.user_id, key.network_id))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
             .collect()
     }
 
@@ -348,6 +501,7 @@ impl NetworkInstanceManager {
         let retired = {
             let mut state = self.state.write().await;
             let retired = state.by_key.remove(&key);
+            state.last_errors.remove(&key);
             if let Some(retired) = retired.as_ref()
                 && state.mesh_name_to_key.get(&retired.spec.mesh_name) == Some(&key)
             {
@@ -477,12 +631,16 @@ mod tests {
         fail_next: Mutex<bool>,
         fail_start_next: Mutex<bool>,
         stopped: Arc<Mutex<Vec<Uuid>>>,
+        patched: Arc<Mutex<Vec<Vec<ManagedCredentialConfig>>>>,
+        fail_patch: Arc<Mutex<bool>>,
     }
 
     struct FakeRuntime {
         id: Uuid,
         fail_start: bool,
         stopped: Arc<Mutex<Vec<Uuid>>>,
+        patched: Arc<Mutex<Vec<Vec<ManagedCredentialConfig>>>>,
+        fail_patch: Arc<Mutex<bool>>,
     }
 
     #[async_trait]
@@ -496,6 +654,17 @@ mod tests {
 
         async fn stop(&self) {
             self.stopped.lock().unwrap().push(self.id);
+        }
+
+        async fn replace_credentials(
+            &self,
+            credentials: &[ManagedCredentialConfig],
+        ) -> anyhow::Result<()> {
+            if std::mem::take(&mut *self.fail_patch.lock().unwrap()) {
+                anyhow::bail!("injected credential patch failure");
+            }
+            self.patched.lock().unwrap().push(credentials.to_vec());
+            Ok(())
         }
 
         fn peer_manager(&self) -> Option<Arc<easytier_core::peers::peer_manager::PeerManagerCore>> {
@@ -517,6 +686,8 @@ mod tests {
                 id: spec.network_id,
                 fail_start: std::mem::take(&mut *self.fail_start_next.lock().unwrap()),
                 stopped: self.stopped.clone(),
+                patched: self.patched.clone(),
+                fail_patch: self.fail_patch.clone(),
             }))
         }
     }
@@ -654,7 +825,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_replacement_retires_old_runtime_and_records_error() {
+    async fn failed_replacement_preserves_old_runtime_and_records_error() {
         let factory = Arc::new(FakeFactory::default());
         let manager = manager(factory.clone());
         let id = Uuid::new_v4();
@@ -663,13 +834,16 @@ mod tests {
         *factory.fail_next.lock().unwrap() = true;
         manager.reconcile(&gateway_intent(id, "desired")).await;
 
-        assert_eq!(manager.network_id_for_mesh("stable").await, None);
+        assert_eq!(manager.network_id_for_mesh("stable").await, Some(id));
         assert_eq!(manager.network_id_for_mesh("desired").await, None);
-        assert_eq!(factory.stopped.lock().unwrap().as_slice(), &[id]);
+        assert!(factory.stopped.lock().unwrap().is_empty());
+        let status = manager.deployment_status(7, id).await;
+        assert_eq!(status.state, "failed");
+        assert!(status.running);
     }
 
     #[tokio::test]
-    async fn failed_start_retires_old_runtime() {
+    async fn failed_start_preserves_old_runtime() {
         let factory = Arc::new(FakeFactory::default());
         let manager = manager(factory.clone());
         let id = Uuid::new_v4();
@@ -678,13 +852,14 @@ mod tests {
         *factory.fail_start_next.lock().unwrap() = true;
         manager.reconcile(&gateway_intent(id, "desired")).await;
 
-        assert_eq!(manager.network_id_for_mesh("stable").await, None);
+        assert_eq!(manager.network_id_for_mesh("stable").await, Some(id));
         assert_eq!(manager.network_id_for_mesh("desired").await, None);
-        assert_eq!(factory.stopped.lock().unwrap().as_slice(), &[id, id]);
+        // Only the failed candidate was stopped, not the original runtime.
+        assert_eq!(factory.stopped.lock().unwrap().as_slice(), &[id]);
     }
 
     #[tokio::test]
-    async fn mesh_name_conflict_retires_old_runtime() {
+    async fn mesh_name_conflict_preserves_old_runtime() {
         let factory = Arc::new(FakeFactory::default());
         let manager = manager(factory.clone());
         let first_id = Uuid::new_v4();
@@ -698,12 +873,12 @@ mod tests {
             .reconcile(&gateway_intent(first_id, "occupied"))
             .await;
 
-        assert_eq!(manager.network_id_for_mesh("stable").await, None);
+        assert_eq!(manager.network_id_for_mesh("stable").await, Some(first_id));
         assert_eq!(
             manager.network_id_for_mesh("occupied").await,
             Some(second_id)
         );
-        assert_eq!(factory.stopped.lock().unwrap().as_slice(), &[first_id]);
+        assert!(factory.stopped.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -733,6 +908,136 @@ mod tests {
         assert_eq!(credential.allowed_proxy_cidrs, vec!["10.0.0.0/8"]);
         assert_eq!(credential.expiry_unix, 1);
         assert!(!credential.reusable);
+    }
+
+    #[tokio::test]
+    async fn credential_updates_are_hot_and_failures_are_retried_without_stopping_mesh() {
+        let factory = Arc::new(FakeFactory::default());
+        let manager = manager(factory.clone());
+        let mut intent = gateway_intent(Uuid::new_v4(), "mesh");
+        manager.reconcile(&intent).await;
+        intent.credentials.push(NetworkCredentialIntent {
+            id: "phone".into(),
+            secret: "key".into(),
+            expiry_unix: 100,
+            grant: CredentialGrant {
+                acl_groups: vec!["mobile".into()],
+                allow_relay: false,
+                allowed_proxy_cidrs: vec![],
+                reusable: false,
+            },
+        });
+        *factory.fail_patch.lock().unwrap() = true;
+        manager.reconcile(&intent).await;
+        assert_eq!(
+            manager.deployment_status(7, intent.id).await.state,
+            "failed"
+        );
+        assert_eq!(factory.built.lock().unwrap().len(), 1);
+        assert!(factory.stopped.lock().unwrap().is_empty());
+        manager.reconcile(&intent).await;
+        assert_eq!(
+            manager.deployment_status(7, intent.id).await.state,
+            "applied"
+        );
+        assert_eq!(factory.patched.lock().unwrap().len(), 1);
+        intent.credentials.clear();
+        manager.reconcile(&intent).await;
+        assert!(factory.patched.lock().unwrap().last().unwrap().is_empty());
+        assert_eq!(factory.built.lock().unwrap().len(), 1);
+        assert!(factory.stopped.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_credential_patch_updates_shared_config_without_changing_peer_identity() {
+        let config = TomlConfigLoader::default();
+        config.set_network_identity(NetworkIdentity::new(
+            "native-hot-update".into(),
+            "secret".into(),
+        ));
+        config.set_listeners(vec![]);
+        let mut flags = config.get_flags();
+        flags.no_tun = true;
+        config.set_flags(flags);
+        let native = create_native_instance(config).unwrap();
+        let runtime = NativeGatewayRuntime(native.clone());
+        runtime.start().await.unwrap();
+        let peer_id = native.peer_manager().my_peer_id();
+        let credential = ManagedCredentialConfig {
+            credential_id: "phone".into(),
+            credential_secret: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+            groups: vec!["mobile".into()],
+            allow_relay: false,
+            allowed_proxy_cidrs: vec!["10.0.0.0/8".into()],
+            expiry_unix: chrono::Utc::now().timestamp() + 3600,
+            reusable: false,
+        };
+        runtime
+            .replace_credentials(std::slice::from_ref(&credential))
+            .await
+            .unwrap();
+        assert_eq!(native.peer_manager().my_peer_id(), peer_id);
+        assert_eq!(
+            native.toml_config().unwrap().get_managed_credentials(),
+            vec![credential]
+        );
+        assert_eq!(native.credential_snapshots().len(), 1);
+        runtime.replace_credentials(&[]).await.unwrap();
+        assert_eq!(native.peer_manager().my_peer_id(), peer_id);
+        assert!(
+            native
+                .toml_config()
+                .unwrap()
+                .get_managed_credentials()
+                .is_empty()
+        );
+        assert!(native.credential_snapshots().is_empty());
+        runtime.stop().await;
+    }
+
+    #[tokio::test]
+    async fn failed_native_replacement_keeps_actual_gateway_topology_identity() {
+        let manager = NetworkInstanceManager::new(GatewayConfig {
+            peer_url: "tcp://localhost:22020".into(),
+            relay_data: false,
+        });
+        let mut intent = gateway_intent(Uuid::new_v4(), "native-topology");
+        assert!(
+            manager
+                .deployment_status(intent.user_id, intent.id)
+                .await
+                .peer_id
+                .is_none()
+        );
+        manager.reconcile(&intent).await;
+        let initial = manager.deployment_status(intent.user_id, intent.id).await;
+        assert!(initial.peer_id.is_some_and(|id| id > 0));
+        intent.network_name = "replacement-mesh".into();
+        intent.credentials.push(NetworkCredentialIntent {
+            id: "invalid".into(),
+            secret: "invalid-base64-key".into(),
+            expiry_unix: i64::MAX,
+            grant: CredentialGrant {
+                acl_groups: vec![],
+                allow_relay: false,
+                allowed_proxy_cidrs: vec![],
+                reusable: false,
+            },
+        });
+        manager.reconcile(&intent).await;
+        let failed = manager.deployment_status(intent.user_id, intent.id).await;
+        assert_eq!(failed.state, "failed");
+        assert!(failed.running);
+        assert_eq!(failed.peer_id, initial.peer_id);
+        assert_eq!(failed.peer_url.as_deref(), Some("tcp://localhost:22020"));
+        manager.remove(intent.user_id, intent.id).await;
+        assert!(
+            manager
+                .deployment_status(intent.user_id, intent.id)
+                .await
+                .peer_id
+                .is_none()
+        );
     }
 
     #[test]

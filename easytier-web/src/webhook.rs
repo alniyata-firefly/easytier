@@ -245,7 +245,7 @@ impl Drop for AdaptiveValidatePermit {
 }
 
 /// Webhook configuration for external integrations.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WebhookConfig {
     pub webhook_url: Option<String>,
     pub webhook_secret: Option<String>,
@@ -261,6 +261,9 @@ pub struct WebhookConfig {
 /// An in-process consumer of the same management callbacks as an HTTP webhook.
 #[async_trait::async_trait]
 pub trait WebhookHandler: fmt::Debug + Send + Sync {
+    fn uses_local_device_tokens(&self) -> bool {
+        false
+    }
     async fn validate_token(
         &self,
         request: &ValidateTokenRequest,
@@ -300,6 +303,12 @@ impl WebhookConfig {
         self.handler.is_some() || self.has_external_endpoint()
     }
 
+    pub fn uses_local_device_tokens(&self) -> bool {
+        self.handler
+            .as_ref()
+            .is_some_and(|handler| handler.uses_local_device_tokens())
+    }
+
     pub fn has_external_endpoint(&self) -> bool {
         self.webhook_url
             .as_deref()
@@ -319,7 +328,7 @@ impl WebhookConfig {
 
 // --- Request/Response types ---
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct ValidateTokenRequest {
     pub token: String,
     pub machine_id: String,
@@ -356,7 +365,7 @@ pub struct ManagedNetworkConfig {
     pub network_config: serde_json::Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct NodeConnectedRequest {
     pub machine_id: String,
     pub token: String,
@@ -370,7 +379,7 @@ pub struct NodeConnectedRequest {
     pub binding_version: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct NodeDisconnectedRequest {
     pub machine_id: String,
     pub token: String,
@@ -561,6 +570,36 @@ impl WebhookConfig {
 }
 
 pub type SharedWebhookConfig = Arc<WebhookConfig>;
+
+impl fmt::Debug for WebhookConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebhookConfig")
+            .field(
+                "external_endpoint_configured",
+                &self.has_external_endpoint(),
+            )
+            .field("local_device_tokens", &self.uses_local_device_tokens())
+            .field("internal_auth_configured", &self.has_internal_auth())
+            .field("web_instance_id", &self.web_instance_id)
+            .finish_non_exhaustive()
+    }
+}
+
+macro_rules! redacted_request_debug {
+    ($ty:ty) => {
+        impl fmt::Debug for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct(stringify!($ty))
+                    .field("machine_id", &self.machine_id)
+                    .field("token", &"[REDACTED]")
+                    .finish_non_exhaustive()
+            }
+        }
+    };
+}
+redacted_request_debug!(ValidateTokenRequest);
+redacted_request_debug!(NodeConnectedRequest);
+redacted_request_debug!(NodeDisconnectedRequest);
 
 #[cfg(test)]
 mod tests {

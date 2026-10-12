@@ -16,11 +16,13 @@ const cycleThemeMode = () => {
 };
 
 import { I18nUtils } from 'easytier-frontend-lib'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { Button, Drawer, Menu, OverlayBadge, Popover, TieredMenu, useToast } from 'primevue';
 import { useRoute, useRouter } from 'vue-router';
 import { useDialog } from 'primevue/usedialog';
 import ChangePassword from './ChangePassword.vue';
+import DeviceAccessTokens from './DeviceAccessTokens.vue';
+import { useVisiblePolling } from '../modules/polling';
 import Icon from '../assets/easytier.png'
 import { useI18n } from 'vue-i18n'
 import ApiClient, { type BlockedDevice, type CentralNetworkSummary } from '../modules/api';
@@ -30,7 +32,7 @@ const { t } = useI18n()
 const router = useRouter();
 const toast = useToast();
 const route = useRoute();
-const api = new ApiClient(getApiBase(), () => router.push({ name: 'login' }));
+const api = new ApiClient(getApiBase(), () => { api.clear_snapshots(); router.push({ name: 'login' }); });
 const dialog = useDialog();
 const userMenu = ref();
 const userMenuItems = computed(() => [
@@ -77,7 +79,7 @@ const loadBlockedDevices = async () => {
         // Notifications are best-effort.
     }
 };
-let networkTimer: number | undefined;
+
 const loadNavigation = async () => {
     if (!enrollInfo.value) {
         try {
@@ -89,17 +91,11 @@ const loadNavigation = async () => {
     }
     await Promise.all([loadNetworks(), loadBlockedDevices()]);
 };
-onMounted(() => {
-    loadNavigation();
-    networkTimer = window.setInterval(loadNavigation, 10_000);
-});
-onUnmounted(() => window.clearInterval(networkTimer));
+useVisiblePolling(loadNavigation, 10_000);
 
 // Device enrollment info: the config-server command devices run to join
 // this console. Also identifies whether central management is available.
-const enrollBell = ref();
 const enrollInfo = ref<import('../modules/api').ConsoleInfo | null>(null);
-const enrollLoading = ref(false);
 const centralEnabled = computed(() => enrollInfo.value?.webhook_auth === false);
 watch([() => enrollInfo.value?.webhook_auth, () => route.name], ([external, name]) => {
     if (external && (name === 'networkList' || name === 'networkDetail')) {
@@ -107,35 +103,8 @@ watch([() => enrollInfo.value?.webhook_auth, () => route.name], ([external, name
     }
 });
 
-const enrollCommand = computed(() => {
-    if (!enrollInfo.value) return '';
-    const host = new URL(getApiBase(), window.location.href).hostname;
-    const { config_server_protocol: proto, config_server_port: port, username } = enrollInfo.value;
-    return `easytier-core --config-server ${proto}://${host}:${port}/${username}`;
-});
-
-const toggleEnrollBell = async (event: Event) => {
-    enrollBell.value.toggle(event);
-    if (!enrollInfo.value && !enrollLoading.value) {
-        enrollLoading.value = true;
-        try {
-            enrollInfo.value = await api.get_console_info();
-        } catch (e) {
-            console.error(e);
-        } finally {
-            enrollLoading.value = false;
-        }
-    }
-};
-
-const copyEnrollCommand = async () => {
-    try {
-        await navigator.clipboard.writeText(enrollCommand.value);
-        toast.add({ severity: 'success', summary: t('web.common.confirm'), life: 1500 });
-    } catch (e) {
-        console.error(e);
-    }
-};
+const tokensVisible = ref(false);
+const toggleEnrollBell = () => { tokensVisible.value = true; };
 
 const blockedAttemptCount = computed(() =>
     blockedDevices.value.filter(device => device.attempt_count > 0).length);
@@ -269,28 +238,11 @@ watch(() => route.fullPath, () => { forceShowSideBar.value = false; });
                     <i class="pi pi-angle-right topbar-brand" aria-hidden="true"></i><span>{{ pageTitle }}</span>
                 </div>
                 <div class="flex items-center gap-2">
-                    <Button icon="pi pi-objects-column" :label="t('web.console.enroll_title')"
+                    <Button v-if="centralEnabled" icon="pi pi-objects-column" :label="t('web.console.enroll_title')"
                         severity="secondary" outlined size="small" class="enroll-button"
                         :aria-label="t('web.console.enroll_title')"
                         @click="toggleEnrollBell" />
-                    <Popover ref="enrollBell" appendTo="body" style="min-width: 34rem">
-                        <div class="flex flex-col gap-2">
-                            <span class="font-semibold">{{ t('web.console.enroll_title') }}</span>
-                            <p class="text-sm muted m-0">{{ t('web.console.enroll_hint') }}</p>
-                            <div v-if="enrollLoading" class="text-sm muted">{{ t('web.common.loading') }}</div>
-                            <template v-else-if="enrollInfo">
-                                <div class="flex items-center gap-2">
-                                    <code class="mono-value flex-1 p-2 rounded"
-                                        style="background: var(--console-ground); word-break: break-all">{{ enrollCommand }}</code>
-                                    <Button icon="pi pi-copy" severity="secondary" outlined size="small"
-                                        :aria-label="t('web.console.enroll_copy')" @click="copyEnrollCommand" />
-                                </div>
-                                <p class="text-xs muted m-0">
-                                    {{ enrollInfo.webhook_auth ? t('web.console.enroll_webhook_note') : t('web.console.enroll_token_note') }}
-                                </p>
-                            </template>
-                        </div>
-                    </Popover>
+                    <DeviceAccessTokens :api="api" v-model:visible="tokensVisible" />
                     <OverlayBadge v-if="centralEnabled" :value="blockedAttemptCount > 0 ? String(blockedAttemptCount) : undefined">
                         <Button icon="pi pi-bell" text severity="secondary" :aria-label="t('web.console.blocked_devices')" @click="toggleBlockBell" />
                     </OverlayBadge>

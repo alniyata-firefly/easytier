@@ -335,7 +335,7 @@ async fn prepare_reconcile_round(
     req: HeartbeatRequest,
 ) -> RoundStatus<ReconcileRound> {
     let Some(machine_id) = req.machine_id.map(uuid::Uuid::from) else {
-        tracing::warn!(?req, "Machine id is not set, ignore");
+        tracing::warn!("Machine id is not set, ignore");
         return RoundStatus::Skip;
     };
     if !SessionRpcService::runtime_heartbeat_is_current(session_data, &req).await {
@@ -343,23 +343,15 @@ async fn prepare_reconcile_round(
         return RoundStatus::Skip;
     }
 
-    let user_id = match storage
-        .db
-        .get_user_id_by_token(req.user_token.clone())
-        .await
-    {
-        Ok(Some(user_id)) => user_id,
-        Ok(None) => {
-            tracing::info!(
-                machine_id = ?req.machine_id,
-                "user not found by heartbeat token"
-            );
+    let Some(session) = session_data.upgrade() else {
+        return RoundStatus::Stop;
+    };
+    let user_id = {
+        let data = session.read().await;
+        let Some(token) = data.storage_token.as_ref() else {
             return RoundStatus::Skip;
-        }
-        Err(e) => {
-            tracing::error!("Failed to get user id by token, error: {:?}", e);
-            return RoundStatus::Skip;
-        }
+        };
+        token.user_id
     };
 
     let (
@@ -868,6 +860,11 @@ async fn begin_managed_runtime_mutation(
     round: &ReconcileRound,
     mutation_fence: &mut RuntimeMutationFence,
 ) -> bool {
+    let Some(_auth_guard) =
+        SessionRpcService::runtime_authentication_guard(session_data, &round.req).await
+    else {
+        return false;
+    };
     let Some(data) = session_data.upgrade() else {
         return false;
     };
@@ -1227,6 +1224,22 @@ async fn mark_config_revision_applied_if_current(
     outcome: &ReconcileOutcome,
     mutation_fence: &RuntimeMutationFence,
 ) -> RoundStatus<()> {
+    let Some(_auth_guard) =
+        SessionRpcService::runtime_authentication_guard(session_data, &round.req).await
+    else {
+        return RoundStatus::Skip;
+    };
+    if let Some(session) = session_data.upgrade() {
+        let data = session.read().await;
+        if SessionRpcService::runtime_heartbeat_is_current_locked(&data, &round.req) {
+            let mut runtime = data.managed_runtime();
+            if runtime.runtime_config_epoch == round.runtime_config_epoch {
+                runtime.last_reconciliation_error = outcome.has_failed.then(|| {
+                    "One or more managed network operations failed; retry pending".to_owned()
+                });
+            }
+        }
+    }
     if outcome.managed_revision_failed
         || (!round.should_apply_runtime_revision && !mutation_fence.started)
     {
@@ -1300,6 +1313,117 @@ mod tests {
     use easytier::proto::api::manage::{NetworkingMethod, PortForwardConfig};
 
     use super::*;
+
+    #[tokio::test]
+    async fn credential_mutation_fences_old_runtime_rounds_before_session_stop() {
+        for rotate in [false, true] {
+            let db = crate::db::Db::memory_db().await;
+            let owner = db.auto_create_user("runtime-owner").await.unwrap().id;
+            let machine_id = uuid::Uuid::new_v4();
+            let issued = db
+                .create_device_access_token(owner, "device", None, None)
+                .await
+                .unwrap();
+            let identity = db
+                .authenticate_device_access_token(
+                    &issued.token,
+                    crate::db::DeviceHeartbeatRecord {
+                        user_id: owner,
+                        machine_id,
+                        hostname: "device".into(),
+                        easytier_version: "2.7".into(),
+                        device_os: "{}".into(),
+                        client_url: String::new(),
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let storage = crate::client_manager::storage::Storage::new(db.clone());
+            let req = HeartbeatRequest {
+                user_token: issued.token.clone(),
+                machine_id: Some(machine_id.into()),
+                ..Default::default()
+            };
+            let client_url: url::Url = "udp://127.0.0.1:10000".parse().unwrap();
+            let mut data = SessionData::new(
+                storage.weak_ref(),
+                client_url.clone(),
+                None,
+                std::sync::Arc::new(crate::FeatureFlags::default()),
+                std::sync::Arc::new(
+                    crate::webhook::WebhookConfig::new(None, None, None, None, None).with_handler(
+                        std::sync::Arc::new(crate::central_network::device_auth::DeviceAuth::new(
+                            db.clone(),
+                            false,
+                        )),
+                    ),
+                ),
+            );
+            let token = crate::client_manager::storage::StorageToken {
+                token: issued.token.clone(),
+                client_url,
+                machine_id,
+                user_id: owner,
+            };
+            storage.update_session_client(token.clone(), 1, true, 0);
+            data.storage_token = Some(token);
+            data.req = Some(req.clone());
+            data.device_token_identity = Some(identity);
+            data.auth_state = super::super::SessionAuthState::Authorized;
+            data.managed_runtime().applied_config_revision = Some("old-applied".into());
+            let session = std::sync::Arc::new(RwLock::new(data));
+            let weak = std::sync::Arc::downgrade(&session);
+            db.set_managed_config_revision((owner, machine_id), "new-target")
+                .await
+                .unwrap();
+            let round = ReconcileRound {
+                req,
+                machine_id,
+                user_id: owner,
+                running_inst_ids: HashSet::new(),
+                local_configs: Vec::new(),
+                delete_instance_ids: HashSet::new(),
+                target_config_revision: Some("new-target".into()),
+                should_apply_runtime_revision: true,
+                scope: ReconcileScope::Full,
+                runtime_config_epoch: 0,
+                runtime_config_cache_epoch: 0,
+            };
+            if rotate {
+                db.rotate_device_access_token(owner, &issued.info.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            } else {
+                db.revoke_device_access_token(owner, &issued.info.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            // Deliberately leave the cached session authorized to reproduce the
+            // interval between DB commit and stopping its management transport.
+            let mut fence = RuntimeMutationFence::default();
+            assert!(!begin_managed_runtime_mutation(&weak, &round, &mut fence).await);
+            assert!(matches!(
+                mark_config_revision_applied_if_current(
+                    &weak,
+                    &storage.weak_ref().upgrade().unwrap(),
+                    &round,
+                    &ReconcileOutcome::default(),
+                    &fence
+                )
+                .await,
+                RoundStatus::Skip
+            ));
+            let data = session.read().await;
+            assert_eq!(
+                data.managed_runtime().applied_config_revision.as_deref(),
+                Some("old-applied")
+            );
+            assert!(data.managed_runtime().last_reconciliation_error.is_none());
+        }
+    }
 
     fn config_with_port_forwards(port_forwards: Vec<PortForwardConfig>) -> NetworkConfig {
         NetworkConfig {

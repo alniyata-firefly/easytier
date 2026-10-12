@@ -1,6 +1,7 @@
 mod auth;
 pub(crate) mod captcha;
 mod central_network;
+mod device_access_tokens;
 mod network;
 pub(crate) mod oidc;
 mod rpc;
@@ -50,6 +51,7 @@ pub struct RestfulServer {
     webhook_config: SharedWebhookConfig,
     config_server_protocol: String,
     config_server_port: u16,
+    advertised_config_server_url: Option<String>,
     db: Db,
     oidc_config: oidc::OidcConfig,
     web_router: Option<Router>,
@@ -71,6 +73,8 @@ struct ConsoleInfoConfig {
     config_server_protocol: String,
     config_server_port: u16,
     webhook_auth: bool,
+    advertised_config_server_url: Option<String>,
+    registration_enabled: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -79,6 +83,8 @@ struct GetConsoleInfoJsonResp {
     config_server_protocol: String,
     config_server_port: u16,
     webhook_auth: bool,
+    advertised_config_server_url: Option<String>,
+    registration_enabled: bool,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -143,6 +149,15 @@ pub fn convert_db_error(e: DbErr) -> HttpHandleError {
 }
 
 impl RestfulServer {
+    async fn handle_auth_config(
+        Extension(flags): Extension<Arc<FeatureFlags>>,
+        Extension(oidc): Extension<oidc::OidcConfig>,
+    ) -> Json<serde_json::Value> {
+        Json(
+            serde_json::json!({"registration_enabled": !flags.disable_registration,"oidc_enabled": oidc.enabled}),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         bind_addr: SocketAddr,
@@ -155,6 +170,7 @@ impl RestfulServer {
         webhook_config: SharedWebhookConfig,
         config_server_protocol: String,
         config_server_port: u16,
+        advertised_config_server_url: Option<String>,
     ) -> anyhow::Result<Self> {
         assert!(client_mgr.is_running());
 
@@ -166,6 +182,7 @@ impl RestfulServer {
             webhook_config,
             config_server_protocol,
             config_server_port,
+            advertised_config_server_url,
             db,
             oidc_config,
             web_router,
@@ -223,6 +240,8 @@ impl RestfulServer {
             config_server_protocol: config.config_server_protocol,
             config_server_port: config.config_server_port,
             webhook_auth: config.webhook_auth,
+            advertised_config_server_url: config.advertised_config_server_url,
+            registration_enabled: config.registration_enabled,
         }
         .into())
     }
@@ -347,9 +366,11 @@ impl RestfulServer {
             .merge(central_routes)
             .merge(NetworkApi::build_route())
             .merge(rpc::router())
+            .merge(device_access_tokens::router())
             .route_layer(login_required!(Backend))
             .merge(auth::router().layer(Extension(self.feature_flags.clone())))
             .merge(oidc::router())
+            .route("/auth/config", get(Self::handle_auth_config))
             .with_state(self.client_mgr.clone())
             .route(
                 "/api/v1/generate-config",
@@ -362,7 +383,10 @@ impl RestfulServer {
                 config_server_protocol: self.config_server_protocol.clone(),
                 config_server_port: self.config_server_port,
                 webhook_auth: self.webhook_config.has_external_endpoint(),
+                advertised_config_server_url: self.advertised_config_server_url,
+                registration_enabled: !self.feature_flags.disable_registration,
             }))
+            .layer(Extension(self.feature_flags.clone()))
             .layer(MessagesManagerLayer)
             .layer(auth_layer)
             .layer(tower_http::cors::CorsLayer::very_permissive())

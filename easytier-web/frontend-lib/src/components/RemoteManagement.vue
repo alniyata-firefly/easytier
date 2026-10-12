@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, Ref, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import * as Api from '../modules/api';
 import * as Utils from '../modules/utils';
+import { normalizeNetworkRuntime } from '../modules/runtimeDisplay';
 import * as NetworkTypes from '../types/network';
 import { type MenuItem } from 'primevue/menuitem';
 
@@ -300,7 +301,7 @@ const loadCurrentNetworkInfo = async () => {
         curNetworkInfo.value = null;
     }
 
-    let network_info = await props.api.get_network_info(selected);
+    let network_info = normalizeNetworkRuntime(await props.api.get_network_info(selected));
     if (selectedInstanceId.value?.uuid !== selected) {
         return;
     }

@@ -181,12 +181,21 @@ service PublicIpv6AddrRpc {
 
 message GetIpListRequest {}
 
+// Interface prefixes reported by the host. Missing prefixes are unknown and
+// must not be replaced with an assumed /24 or /64 by management clients.
+message InterfaceNetwork {
+  string name = 1;
+  common.IpAddr address = 2;
+  optional uint32 prefix_length = 3;
+}
+
 message GetIpListResponse {
   common.Ipv4Addr public_ipv4 = 1;
   repeated common.Ipv4Addr interface_ipv4s = 2;
   common.Ipv6Addr public_ipv6 = 3;
   repeated common.Ipv6Addr interface_ipv6s = 4;
   repeated common.Url listeners = 5;
+  repeated InterfaceNetwork interface_networks = 6;
 }
 
 message SendUdpHolePunchPacketRequest {

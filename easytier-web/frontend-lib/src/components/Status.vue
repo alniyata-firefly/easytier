@@ -3,9 +3,11 @@ import { useTimeAgo } from '@vueuse/core'
 import { NetworkInstance, type NetworkConfig, type TunnelInfo, type NodeInfo, type PeerRoutePair } from '../types/network'
 import type { RemoteClient } from '../modules/api'
 import { useI18n } from 'vue-i18n';
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { ipv4InetToString, ipv4ToString, ipv6ToString } from '../modules/utils';
-import { latencyMs, lossRate, numericValue, peerConns } from '../modules/statusDisplay';
+import * as RuntimeDisplay from '../modules/runtimeDisplay';
+import { CounterRate } from '../modules/runtimeDisplay';
+import { latencyMs, lossRate, peerConns } from '../modules/statusDisplay';
 import { Badge, DataTable, Column, Tag, Chip, Button, Dialog, Timeline, Divider, Card, } from 'primevue';
 import NetworkChart from './NetworkChart.vue';
 import VpnPortalDialog from './VpnPortalDialog.vue';
@@ -43,26 +45,16 @@ function routeCost(info: any) {
   return '?'
 }
 
-function resolveObjPath(path: string, obj: any = globalThis, separator = '.') {
-  const properties = path.split(separator)
-  return properties.reduce((prev, curr) => prev?.[curr], obj)
-}
-
-function statsCommon(info: any, field: string): number | undefined {
-  if (!info.peer)
-    return undefined
-
-  let sum = 0
-  let hasValue = false
-  for (const conn of peerConns(info)) {
-    const value = numericValue(resolveObjPath(field, conn))
-    if (value === undefined)
-      continue
-
+function statsCommon(info: PeerRoutePair, field: 'tx_bytes' | 'rx_bytes'): bigint | undefined {
+  const conns = peerConns(info)
+  if (!conns.length) return undefined
+  let sum = 0n
+  for (const conn of conns) {
+    const value = RuntimeDisplay.counter(conn.stats?.[field])
+    if (value === undefined) return undefined
     sum += value
-    hasValue = true
   }
-  return hasValue ? sum : undefined
+  return sum
 }
 
 function humanFileSize(bytes: number, si = false, dp = 1) {
@@ -86,13 +78,11 @@ function humanFileSize(bytes: number, si = false, dp = 1) {
 }
 
 function txBytes(info: PeerRoutePair) {
-  const tx = statsCommon(info, 'stats.tx_bytes')
-  return tx ? humanFileSize(tx) : ''
+  return RuntimeDisplay.formatQuantity(statsCommon(info, 'tx_bytes'), true)
 }
 
 function rxBytes(info: PeerRoutePair) {
-  const rx = statsCommon(info, 'stats.rx_bytes')
-  return rx ? humanFileSize(rx) : ''
+  return RuntimeDisplay.formatQuantity(statsCommon(info, 'rx_bytes'), true)
 }
 
 function version(info: PeerRoutePair) {
@@ -257,27 +247,6 @@ const myNodeInfoChips = computed(() => {
   return chips
 })
 
-function globalSumCommon(field: string) {
-  let sum = 0
-  if (!peerRouteInfos.value)
-    return sum
-
-  for (const info of peerRouteInfos.value) {
-    const tx = statsCommon(info, field)
-    if (tx)
-      sum += tx
-  }
-  return sum
-}
-
-function txGlobalSum() {
-  return globalSumCommon('stats.tx_bytes')
-}
-
-function rxGlobalSum() {
-  return globalSumCommon('stats.rx_bytes')
-}
-
 function natType(info: PeerRoutePair): string {
   const udpNatType = info.route?.stun_info?.udp_nat_type;
   if (udpNatType !== undefined)
@@ -301,32 +270,30 @@ const peerCount = computed(() => {
   return peerRouteInfos.value.length
 })
 
-// calculate tx/rx rate every 2 seconds
-let rateIntervalId = 0
-const rateInterval = 2000
-let prevTxSum = 0
-let prevRxSum = 0
-const txRate = ref('0')
-const rxRate = ref('0')
-
-// 控制节点详细信息chips的显示/隐藏
+const txCounter = new CounterRate(), rxCounter = new CounterRate()
+const txRate = ref('—'), rxRate = ref('—'), sampleTime = ref(0)
 const showNodeDetails = ref(false)
-
-onMounted(() => {
-  rateIntervalId = window.setInterval(() => {
-    const curTxSum = txGlobalSum()
-    txRate.value = humanFileSize((curTxSum - prevTxSum) / (rateInterval / 1000))
-    prevTxSum = curTxSum
-
-    const curRxSum = rxGlobalSum()
-    rxRate.value = humanFileSize((curRxSum - prevRxSum) / (rateInterval / 1000))
-    prevRxSum = curRxSum
-  }, rateInterval)
-})
-
-onUnmounted(() => {
-  clearInterval(rateIntervalId)
-})
+// Sample on a new runtime response, not a wall timer that reuses stale counters.
+watch(() => props.curNetworkInst?.detail, detail => {
+  const scope = `${props.curNetworkInst?.instance_id ?? ''}:${detail?.my_node_info?.peer_id ?? ''}:${(detail?.peers ?? []).flatMap(peer => peer.conns ?? []).map(conn => conn.conn_id).sort().join(',')}`
+  const values = (field: 'tx_bytes' | 'rx_bytes') => {
+    const conns = detail?.peers?.flatMap(peer => peer.conns ?? []) ?? []
+    if (!conns.length) return undefined
+    let sum = 0n
+    for (const conn of conns) {
+      const value = RuntimeDisplay.counter(conn.stats?.[field])
+      if (value === undefined) return undefined
+      sum += value
+    }
+    return sum
+  }
+  const time = performance.now()
+  sampleTime.value = Date.now()
+  const tx = txCounter.sample(values('tx_bytes'), time, scope)
+  const rx = rxCounter.sample(values('rx_bytes'), time, scope)
+  txRate.value = tx === undefined ? '—' : humanFileSize(tx)
+  rxRate.value = rx === undefined ? '—' : humanFileSize(rx)
+}, { immediate: true })
 
 const dialogVisible = ref(false)
 const dialogContent = ref<any>('')
@@ -412,7 +379,7 @@ function showEventLogs() {
             <div class="gap-4">
               <!-- 网络流量图表 -->
               <div class="w-full">
-                <NetworkChart :upload-rate="txRate" :download-rate="rxRate" />
+                <NetworkChart :upload-rate="txRate" :download-rate="rxRate" :sample-time="sampleTime" />
               </div>
             </div>
 

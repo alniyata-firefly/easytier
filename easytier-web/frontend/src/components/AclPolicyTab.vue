@@ -27,11 +27,15 @@ const memberName = (member_id: string) => {
     return member ? (member.hostname_override || member.alias || member.hostname || member.device_id.slice(0, 8)) : member_id.slice(0, 8);
 };
 
+let policyRequest = 0;
 const loadPolicy = async () => {
+    const generation = ++policyRequest;
+    const networkId = props.networkId;
     loading.value = true;
     loadError.value = '';
     try {
-        const info = await props.api.get_network_acl_policy(props.networkId);
+        const info = await props.api.get_network_acl_policy(networkId);
+        if (generation !== policyRequest || networkId !== props.networkId) return;
         policy.value = info.policy;
         dirty.value = false;
     } catch (e) {
@@ -102,9 +106,22 @@ function blankEditor() {
         tcp: { enabled: false, entries: [] as PortEntry[], stateful: true },
         udp: { enabled: false, entries: [] as PortEntry[] },
         icmp: { enabled: false },
-        otherProtocols: [] as AclProtocolTarget[],
+        icmpv6: { enabled: false },
+        any: { enabled: false },
     };
 }
+
+const groupInput = ref('');
+const addedGroups = ref<string[]>([]);
+const groupOptions = computed(() => [...new Set([...addedGroups.value, ...policy.value.rules.flatMap(rule => [...rule.sources, ...rule.destinations].flatMap(selector => selector.type === 'group' ? [selector.name] : []))])].map(name => ({ label: name, value: `group:${name}` })));
+const addSourceGroup = () => {
+    const name = groupInput.value.trim();
+    if (!name || name.length > 64) return;
+    if (!addedGroups.value.includes(name)) addedGroups.value.push(name);
+    const value = `group:${name}`;
+    if (!editor.value.sourceValues.includes(value)) editor.value.sourceValues.push(value);
+    groupInput.value = '';
+};
 
 const sourceOptions = computed(() => [
     { label: t('web.acl.all_members'), value: 'all' },
@@ -112,14 +129,13 @@ const sourceOptions = computed(() => [
         label: `${memberName(m.member_id)}${m.virtual_ipv4 ? ` (${m.virtual_ipv4})` : ''}`,
         value: `member:${m.member_id}`,
     })),
-    ...[...new Set(policy.value.rules.flatMap(rule => rule.sources
-        .filter(source => source.type === 'group')
-        .map(source => source.name)))].map(name => ({ label: name, value: `group:${name}` })),
+    ...groupOptions.value,
 ]);
 
 const targetOptions = computed(() => {
     const base = [
         { label: t('web.acl.all_members'), value: 'all' },
+        ...groupOptions.value,
         ...(props.members ?? []).map(m => ({
             label: `${memberName(m.member_id)}${m.virtual_ipv4 ? ` (${m.virtual_ipv4})` : ''}`,
             value: `member:${m.member_id}`,
@@ -155,7 +171,8 @@ const openEditRule = (index: number) => {
         },
         udp: { enabled: rule.protocols.some(p => p.protocol === 'udp'), entries: portEntries(rule.protocols.find(p => p.protocol === 'udp')) },
         icmp: { enabled: rule.protocols.some(p => p.protocol === 'icmp') },
-        otherProtocols: rule.protocols.filter(p => p.protocol === 'icmpv6' || p.protocol === 'any'),
+        icmpv6: { enabled: rule.protocols.some(p => p.protocol === 'icmpv6') },
+        any: { enabled: rule.protocols.some(p => p.protocol === 'any') },
     };
     editorVisible.value = true;
 };
@@ -224,7 +241,8 @@ const saveRule = () => {
         protocols.push({ protocol: 'udp', ports, stateful: false });
     }
     if (e.icmp.enabled) protocols.push({ protocol: 'icmp', ports: [], stateful: false });
-    protocols.push(...e.otherProtocols);
+    if (e.icmpv6.enabled) protocols.push({ protocol: 'icmpv6', ports: [], stateful: false });
+    if (e.any.enabled) protocols.push({ protocol: 'any', ports: [], stateful: false });
     if (protocols.length === 0) { editorError.value = t('web.acl.error_protocol'); return; }
 
     const sources = e.sourceValues.map(parseSelector);
@@ -392,6 +410,7 @@ const defaultActionOptions = [
                     <MultiSelect v-model="editor.sourceValues" :options="sourceOptions" optionLabel="label"
                         optionValue="value" filter :maxSelectedLabels="6" :placeholder="t('web.acl.source_placeholder')"
                         class="w-full" />
+                    <div class="flex gap-2"><InputText v-model="groupInput" :placeholder="t('web.adaptation.acl_group_name')" :aria-label="t('web.adaptation.acl_group_name')" @keydown.enter.prevent="addSourceGroup" /><Button icon="pi pi-plus" :label="t('web.adaptation.add_acl_group')" severity="secondary" :disabled="!groupInput.trim()" @click="addSourceGroup" /></div>
                 </div>
 
                 <div class="flex flex-col gap-1">
@@ -414,6 +433,8 @@ const defaultActionOptions = [
                         <label class="flex items-center gap-2">
                             <input type="checkbox" v-model="editor.icmp.enabled" /> ICMP
                         </label>
+                        <label class="flex items-center gap-2"><input type="checkbox" v-model="editor.icmpv6.enabled" /> ICMPv6</label>
+                        <label class="flex items-center gap-2"><input type="checkbox" v-model="editor.any.enabled" /> {{ t('web.adaptation.any_protocol') }}</label>
                     </div>
 
                     <div v-for="proto of (['tcp', 'udp'] as const)" v-show="editor[proto].enabled" :key="proto"

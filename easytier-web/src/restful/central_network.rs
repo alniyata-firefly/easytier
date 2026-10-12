@@ -14,7 +14,7 @@ use crate::central_network::{
     service::{
         AddMembersReq, CentralNetworkService, CentralNetworkServiceError, GenerateCredentialReq,
         MemberInfo, MembersView, NetworkCredentialInfo, NetworkDetail, NetworkSettings,
-        NetworkSummary, UpdateMemberReq, UpdateNetworkReq,
+        NetworkSummary, UpdateCredentialReq, UpdateMemberReq, UpdateNetworkReq,
     },
 };
 
@@ -275,6 +275,19 @@ impl CentralNetworkApi {
             .map_err(convert_error)
     }
 
+    async fn update_credential(
+        auth: AuthSession,
+        Extension(service): Service,
+        Path((network_id, credential_id)): Path<(Uuid, String)>,
+        Json(request): Json<UpdateCredentialReq>,
+    ) -> Result<Json<NetworkCredentialInfo>, HttpHandleError> {
+        service
+            .update_credential(user_id(&auth)?, network_id, &credential_id, request)
+            .await
+            .map(Json)
+            .map_err(convert_error)
+    }
+
     async fn revoke_credential(
         auth: AuthSession,
         Extension(service): Service,
@@ -333,7 +346,7 @@ impl CentralNetworkApi {
             )
             .route(
                 "/api/v1/networks/{network-id}/credentials/{credential-id}",
-                delete(Self::revoke_credential),
+                delete(Self::revoke_credential).patch(Self::update_credential),
             )
     }
 }
