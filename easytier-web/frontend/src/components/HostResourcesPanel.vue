@@ -4,25 +4,31 @@ import { useI18n } from 'vue-i18n';
 import { Message } from 'primevue';
 import { ObservabilityDisplay, RuntimeDisplay } from 'easytier-frontend-lib';
 
-const props = defineProps<{ resources?: ObservabilityDisplay.HostResources; supported?: boolean; loading: boolean; error?: string }>();
+const props = defineProps<{ resources?: ObservabilityDisplay.HostResources; supported?: boolean; loading: boolean; error?: string;
+    title?: string; processLabel?: string; unavailableLabel?: string; unsupportedLabel?: string; now?: number; hideStaleValues?: boolean }>();
 const { t } = useI18n();
-const memory = computed(() => ObservabilityDisplay.usedMemory(props.resources?.memory_total_bytes, props.resources?.memory_available_bytes));
-const cpu = computed(() => ObservabilityDisplay.percentage(props.resources?.cpu_usage_percent));
-const resourcesStale = computed(() => !!props.resources && ObservabilityDisplay.staleSample(props.resources.sampled_at_unix_ms, Date.now(), 15000));
-const disksStale = computed(() => !!props.resources?.disks?.length && ObservabilityDisplay.staleSample(props.resources.disks_sampled_at_unix_ms, Date.now(), 90000));
+const resourcesStale = computed(() => !!props.resources && ObservabilityDisplay.staleSample(props.resources.sampled_at_unix_ms, props.now ?? Date.now(), 15000));
+const disksStale = computed(() => !!props.resources?.disks?.length && ObservabilityDisplay.staleSample(props.resources.disks_sampled_at_unix_ms, props.now ?? Date.now(), 90000));
+const unavailable = (component: string, stale: boolean) => props.hideStaleValues && (stale || props.resources?.collection_errors?.includes(component));
+const memoryTotal = computed(() => unavailable('memory', resourcesStale.value) ? undefined : props.resources?.memory_total_bytes);
+const memory = computed(() => unavailable('memory', resourcesStale.value) ? undefined : ObservabilityDisplay.usedMemory(props.resources?.memory_total_bytes, props.resources?.memory_available_bytes));
+const cpu = computed(() => unavailable('cpu', resourcesStale.value) ? undefined : ObservabilityDisplay.percentage(props.resources?.cpu_usage_percent));
+const rss = computed(() => unavailable('process_rss', resourcesStale.value) ? undefined : props.resources?.process_rss_bytes);
 const sampleLabel = (value: unknown) => { const time = ObservabilityDisplay.sampleTimestamp(value); return time ? new Date(time).toLocaleTimeString() : '—'; };
-const disks = computed(() => (props.resources?.disks ?? []).map(disk => ({ ...disk, usage: ObservabilityDisplay.usedMemory(disk.total_bytes, disk.available_bytes) })));
-const errors = computed(() => (props.resources?.collection_errors ?? []).map(key => t(`web.observability.component_${key}`)).join(' · '));
+const disks = computed(() => (props.resources?.disks ?? []).map(disk => ({ ...disk,
+    total_bytes: unavailable('disks', disksStale.value) ? undefined : disk.total_bytes,
+    usage: unavailable('disks', disksStale.value) ? undefined : ObservabilityDisplay.usedMemory(disk.total_bytes, disk.available_bytes) })));
+const errors = computed(() => (props.resources?.collection_errors ?? []).map(key => key === 'process_rss' && props.processLabel ? props.processLabel : t(`web.observability.component_${key}`)).join(' · '));
 </script>
 
 <template>
-    <section class="host-resources-panel" :aria-label="t('web.observability.host_resources')" data-testid="host-resources">
+    <section class="host-resources-panel" :aria-label="title ?? t('web.observability.host_resources')" data-testid="host-resources">
         <div class="observability-heading">
-            <h3>{{ t('web.observability.host_resources') }}</h3>
+            <h3>{{ title ?? t('web.observability.host_resources') }}</h3>
             <span v-if="resources" class="text-xs muted">{{ sampleLabel(resources.sampled_at_unix_ms) }}</span>
         </div>
-        <Message v-if="error" severity="warn" :closable="false">{{ t('web.observability.resources_unavailable') }}</Message>
-        <Message v-else-if="!loading && !resources" severity="secondary" :closable="false">{{ t(supported === false ? 'web.observability.resources_unsupported' : supported === true ? 'web.observability.resources_unavailable' : 'web.observability.resources_old_core') }}</Message>
+        <Message v-if="error" severity="warn" :closable="false">{{ unavailableLabel ?? t('web.observability.resources_unavailable') }}</Message>
+        <Message v-else-if="!loading && !resources" severity="secondary" :closable="false">{{ supported === false && unsupportedLabel ? unsupportedLabel : supported === true && unavailableLabel ? unavailableLabel : t(supported === false ? 'web.observability.resources_unsupported' : supported === true ? 'web.observability.resources_unavailable' : 'web.observability.resources_old_core') }}</Message>
         <template v-else>
             <div class="resource-cards" :aria-busy="loading" :class="{ 'resource-stale': resourcesStale }">
                 <article class="resource-card" data-testid="host-cpu">
@@ -31,11 +37,11 @@ const errors = computed(() => (props.resources?.collection_errors ?? []).map(key
                 </article>
                 <article class="resource-card" data-testid="host-memory">
                     <span>{{ t('web.observability.memory_used') }}</span><strong>{{ RuntimeDisplay.formatQuantity(memory?.used, true) }}</strong>
-                    <small>{{ t('web.observability.total') }} {{ RuntimeDisplay.formatQuantity(resources?.memory_total_bytes, true) }}</small>
+                    <small>{{ t('web.observability.total') }} {{ RuntimeDisplay.formatQuantity(memoryTotal, true) }}</small>
                     <div class="resource-meter" aria-hidden="true"><i :style="{ width: `${memory?.percent ?? 0}%` }" /></div>
                 </article>
                 <article class="resource-card" data-testid="host-rss">
-                    <span>{{ t('web.observability.core_rss') }}</span><strong>{{ RuntimeDisplay.formatQuantity(resources?.process_rss_bytes, true) }}</strong>
+                    <span>{{ processLabel ?? t('web.observability.core_rss') }}</span><strong>{{ RuntimeDisplay.formatQuantity(rss, true) }}</strong>
                 </article>
             </div>
             <p v-if="resourcesStale" class="text-xs resource-status">{{ t('web.observability.resources_stale') }}</p>

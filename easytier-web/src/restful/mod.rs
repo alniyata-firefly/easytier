@@ -6,6 +6,7 @@ mod network;
 pub(crate) mod observability;
 pub(crate) mod oidc;
 mod rpc;
+mod server_resources;
 mod users;
 
 use std::{net::SocketAddr, sync::Arc};
@@ -372,6 +373,7 @@ impl RestfulServer {
             .merge(rpc::router())
             .merge(device_access_tokens::router())
             .merge(observability::router())
+            .merge(server_resources::router())
             .route_layer(login_required!(Backend))
             .merge(auth::router().layer(Extension(self.feature_flags.clone())))
             .merge(oidc::router())

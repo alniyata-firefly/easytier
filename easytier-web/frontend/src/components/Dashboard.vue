@@ -5,6 +5,7 @@ import { computed, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { Utils } from 'easytier-frontend-lib';
 import ApiClient, { type Summary, type CentralNetworkSummary } from '../modules/api';
+import ServerResourcesPanel from './ServerResourcesPanel.vue';
 
 const props = defineProps<{ api: ApiClient; centralEnabled: boolean }>();
 const { t } = useI18n();
@@ -13,6 +14,7 @@ const devices = ref<Utils.DeviceInfo[]>();
 const networks = ref<CentralNetworkSummary[]>();
 const loadError = ref(false);
 const refreshing = ref(false);
+const serverResources = ref<InstanceType<typeof ServerResourcesPanel>>();
 
 const loadSummary = async () => {
     if (refreshing.value) return;
@@ -28,6 +30,7 @@ const loadSummary = async () => {
 };
 watch(() => props.centralEnabled, () => loadSummary());
 useVisiblePolling(loadSummary, 2000);
+const refreshDashboard = () => { props.api.clear_snapshots(); void loadSummary(); void serverResources.value?.refresh(); };
 
 const devicePreview = computed(() => [...(devices.value ?? [])]
     .sort((a, b) => ((a.alias || a.hostname) ?? '').localeCompare((b.alias || b.hostname) ?? '')).slice(0, 5));
@@ -45,7 +48,7 @@ const stats = computed(() => [
     <div class="console-page">
         <header class="page-heading">
             <div><h1>{{ t('web.main.dashboard') }}</h1></div>
-            <Button icon="pi pi-refresh" :label="t('web.console.refresh')" severity="secondary" outlined :loading="refreshing" @click="api?.clear_snapshots(); loadSummary()" />
+            <Button icon="pi pi-refresh" :label="t('web.console.refresh')" severity="secondary" outlined :loading="refreshing" @click="refreshDashboard" />
         </header>
         <Message v-if="loadError" severity="warn" :closable="false">{{ t('web.console.load_failed') }}</Message>
         <section class="console-panel summary-strip" :aria-label="t('web.main.dashboard')">
@@ -58,6 +61,7 @@ const stats = computed(() => [
                 <p class="summary-note">{{ t(`web.console.${stat.note}`) }}</p>
             </div>
         </section>
+        <ServerResourcesPanel ref="serverResources" :api="api" />
         <div class="overview-columns">
             <section class="console-panel">
                 <header class="section-heading"><h2>{{ t('web.main.device_list') }}</h2>
@@ -89,6 +93,6 @@ const stats = computed(() => [
                 </RouterLink>
             </section>
         </div>
-        <p class="page-footnote"><i class="pi pi-sync" aria-hidden="true"></i>{{ t('web.console.automatic_refresh') }}</p>
+        <p class="page-footnote"><i class="pi pi-sync" aria-hidden="true"></i>{{ t('web.observability.dashboard_auto_refresh') }}</p>
     </div>
 </template>

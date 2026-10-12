@@ -350,6 +350,11 @@ event:
 
 web:
   observability:
+    server_resources: Server resources
+    web_rss: Web resident memory
+    server_resources_unavailable: Server resources are temporarily unavailable.
+    server_resources_unsupported: Server resource collection is unavailable on this platform.
+    dashboard_auto_refresh: Updates automatically
     host_resources: Host resources
     cpu: CPU usage
     memory_used: Memory used

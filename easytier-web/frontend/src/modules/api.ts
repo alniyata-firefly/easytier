@@ -160,6 +160,7 @@ export interface NodeAclRuleStat {
 
 export interface MetricSnapshot { name: string; value?: number | string; labels?: Record<string, string>; }
 export interface NodeStatsSnapshot { metrics: MetricSnapshot[]; host_resources?: ObservabilityDisplay.HostResources; host_resources_supported?: boolean; }
+export interface ServerResourcesSnapshot { host_resources_supported: boolean; host_resources?: ObservabilityDisplay.HostResources; }
 export interface ObservabilityCapabilities { history_available: boolean; collector_enabled: boolean; min_step_seconds: number; max_range_seconds: number; max_points_per_series: number; metrics: Array<{ id: string; unit: string }>; }
 export interface MetricHistory { available: boolean; metric: string; unit: string; start: number; end: number; step: number; series: ObservabilityDisplay.HistorySeries[]; }
 
@@ -289,7 +290,7 @@ export class ApiClient {
                 if (response.status == 401 && this.authFailedCb) {
                     this.clear_snapshots();
                     this.authFailedCb();
-                } else {
+                } else if (!(response.status === 403 && response.config.url === '/server/resources')) {
                     // 请求已发出，但是服务器响应的状态码不在2xx范围
                     console.error('API request failed:', response.status);
                 }
@@ -590,6 +591,12 @@ export class ApiClient {
     }
     public async get_node_stats(machine_id: string, inst_id: string): Promise<MetricSnapshot[]> {
         return (await this.get_node_stats_snapshot(machine_id, inst_id)).metrics;
+    }
+    public async get_server_resources(): Promise<ServerResourcesSnapshot> {
+        const response = await this.client.get<any, ServerResourcesSnapshot>('/server/resources', { timeout: 10000 });
+        if (typeof response.host_resources_supported !== 'boolean') throw new Error('Invalid server resources response');
+        return { host_resources_supported: response.host_resources_supported,
+            host_resources: ObservabilityDisplay.normalizeHostResources(response.host_resources) };
     }
     public async get_node_stats_snapshot(machine_id: string, inst_id: string): Promise<NodeStatsSnapshot> {
         const response = await this.client.post<any, Partial<NodeStatsSnapshot>>(`/machines/${machine_id}/proxy-rpc`, {

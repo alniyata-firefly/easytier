@@ -43,7 +43,7 @@ function fixture() {
         online_member_count: 1, member_count: 2, network_secret: 'test-secret', peer_urls: i === 0 ? [] : ['tcp://192.0.2.1:11010'],
     }));
     const members = [{ member_id: id(101), device_id: id(1), hostname: 'Amsterdam gateway', hostname_override: null, virtual_ipv4: '10.126.126.1', online: true, running: true, version: '2.4.5', error_msg: null, runtime_virtual_ipv4: '10.126.126.1' }];
-    return { machines, networks, members, memberConfig: {}, aclPolicy: { default_action: 'allow', rules: [] }, credentials: [], temporaryPeers: [], nodeRoutes: [], nodePeers: [], nodeAclStats: [], loggerConfig: { level: 'INFO' }, writes: [], requests: [], failures: new Set(), gatewayDelay: 0, gatewayEnabled: true, tokens: [], nodeInfo: { peer_id: 1, ip_list: {} }, nodeStats: [], historyEnabled: false, historyQueries: [] };
+    return { machines, networks, members, memberConfig: {}, aclPolicy: { default_action: 'allow', rules: [] }, credentials: [], temporaryPeers: [], nodeRoutes: [], nodePeers: [], nodeAclStats: [], loggerConfig: { level: 'INFO' }, writes: [], requests: [], failures: new Set(), gatewayDelay: 0, gatewayEnabled: true, tokens: [], nodeInfo: { peer_id: 1, ip_list: {} }, nodeStats: [], historyEnabled: false, historyQueries: [], serverResourcesStatus: 403, serverResources: undefined, serverResourcesSupported: true };
 }
 
 async function open(t, route = '/h', options = {}, configure = () => {}) {
@@ -66,6 +66,10 @@ async function open(t, route = '/h', options = {}, configure = () => {}) {
     }
     const page = await context.newPage();
     page.setDefaultTimeout(10000);
+    if (state.clockPaused) {
+        await page.clock.install();
+        await page.clock.pauseAt(new Date());
+    }
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     t.after(() => assert.deepEqual(errors, [], 'no uncaught browser errors'));
@@ -83,6 +87,10 @@ async function open(t, route = '/h', options = {}, configure = () => {}) {
         if (state.failures.has(path)) return route.fulfill({ status: 503, json: { message: 'Test unavailable' } });
         let result = {};
         if (path === '/summary') result = { device_count: state.machines.length };
+        else if (path === '/server/resources') {
+            if (state.serverResourcesStatus !== 200) return route.fulfill({ status: state.serverResourcesStatus, json: { message: state.serverResourcesStatus === 403 ? 'Server resource monitoring requires administrator permission' : 'Server resources temporarily unavailable' } });
+            result = { host_resources_supported: state.serverResourcesSupported, host_resources: state.serverResources };
+        }
         else if (path === '/console-info') result = { username: 'test-user', config_server_protocol: 'udp', config_server_port: 22020, webhook_auth: state.externalConsole ?? false, advertised_config_server_url: state.advertisedEntry, registration_enabled: state.registrationEnabled ?? true };
         else if (path === '/auth/config') result = { registration_enabled: state.registrationEnabled ?? true };
         else if (path === '/observability/capabilities') result = { history_available: state.historyEnabled, collector_enabled: state.historyEnabled, min_step_seconds: 15, max_range_seconds: 2678400, max_points_per_series: 2000, metrics: [
@@ -166,6 +174,119 @@ async function open(t, route = '/h', options = {}, configure = () => {}) {
 async function refresh(page) {
     await page.getByRole('button', { name: 'Refresh', exact: true }).click();
 }
+
+function serverResourcesFixture(overrides = {}) {
+    return {
+        sampled_at_unix_ms: String(Date.now()), cpu_usage_percent: 0,
+        memory_total_bytes: '34359738368', memory_available_bytes: '8589934592',
+        process_rss_bytes: '268435456', disks_sampled_at_unix_ms: String(Date.now()),
+        disks: [{ mount_point: '/', total_bytes: '18446744073709551615', available_bytes: '9223372036854775808' }],
+        ...overrides,
+    };
+}
+
+const serverRequests = state => state.requests.filter(request => request.path === '/server/resources').length;
+async function resourceResponse(page, action) {
+    const response = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/api/v1/server/resources'));
+    await action();
+    return response;
+}
+async function visibility(page, hidden) {
+    await page.evaluate(hidden => {
+        Object.defineProperty(document, 'hidden', { configurable: true, value: hidden });
+        document.dispatchEvent(new Event('visibilitychange'));
+    }, hidden);
+}
+
+test('server resources render on an empty dashboard with exact uint64 units and known zero CPU', async t => {
+    const { page, state } = await open(t, '/h', {}, state => {
+        state.machines = []; state.networks = []; state.members = [];
+        state.serverResourcesStatus = 200; state.serverResources = serverResourcesFixture();
+    });
+    const panel = page.getByTestId('server-resources');
+    await panel.getByRole('heading', { name: 'Server resources', exact: true }).waitFor();
+    await panel.getByTestId('host-cpu').getByText('0.0%', { exact: true }).waitFor();
+    await panel.getByTestId('host-memory').getByText('24 GiB', { exact: true }).waitFor();
+    await panel.getByTestId('host-memory').getByText('Total 32 GiB', { exact: true }).waitFor();
+    await panel.getByTestId('host-rss').getByText('Web resident memory', { exact: true }).waitFor();
+    await panel.getByTestId('host-rss').getByText('256 MiB', { exact: true }).waitFor();
+    await panel.getByTestId('host-disks').getByText('7.99 EiB / 15.99 EiB', { exact: true }).waitFor();
+    await page.waitForFunction(() => [...document.querySelectorAll('.summary-value')].every(element => element.textContent.trim() === '0'));
+    assert.equal(await page.locator('.summary-value').count(), 4);
+    assert.ok(serverRequests(state) > 0, 'resources come from the Web server endpoint');
+    assert.equal(state.writes.filter(request => request.path.endsWith('/proxy-rpc')).length, 0, 'no managed Core is needed to monitor Web');
+    assert.equal(await panel.getByText('Core process memory', { exact: true }).count(), 0, 'Web RSS is labeled independently');
+    if (screenshotDir) await page.screenshot({ path: `${screenshotDir}/server-resources-empty-dashboard.png`, animations: 'disabled' });
+});
+
+test('server resource polling pauses in the background and refreshes when visible', async t => {
+    const { page, state } = await open(t, '/h', {}, state => {
+        state.clockPaused = true; state.serverResourcesStatus = 200;
+        state.serverResources = serverResourcesFixture({ cpu_usage_percent: 12.5 });
+    });
+    const panel = page.getByTestId('server-resources');
+    await panel.getByTestId('host-cpu').getByText('12.5%', { exact: true }).waitFor();
+    await visibility(page, true);
+    const count = serverRequests(state);
+    await page.clock.runFor(25000);
+    assert.equal(serverRequests(state), count, 'hidden tabs do not poll server resources');
+    const resumedTime = String(await page.evaluate(() => Date.now()));
+    state.serverResources = serverResourcesFixture({ cpu_usage_percent: 43.5, sampled_at_unix_ms: resumedTime, disks_sampled_at_unix_ms: resumedTime });
+    await resourceResponse(page, () => visibility(page, false));
+    await panel.getByTestId('host-cpu').getByText('43.5%', { exact: true }).waitFor();
+    assert.ok(serverRequests(state) > count, 'visibility resumes with an immediate fresh server sample');
+});
+
+test('a forbidden server resource endpoint hides its panel without breaking the dashboard', async t => {
+    const { page, state } = await open(t, '/h', {}, state => { state.clockPaused = true; state.serverResourcesStatus = 403; });
+    await page.getByText('Amsterdam gateway', { exact: true }).waitFor();
+    assert.ok(serverRequests(state) > 0, 'server permissions were checked');
+    await page.getByTestId('server-resources').waitFor({ state: 'hidden' });
+    const count = serverRequests(state);
+    await page.clock.runFor(25000);
+    assert.equal(serverRequests(state), count, 'a forbidden panel stops repeatedly requesting server data');
+    assert.deepEqual(await page.locator('.summary-value').allTextContents().then(values => values.map(value => value.trim())), ['6', '0', '3', '1']);
+    assert.equal(await page.getByText('Unable to refresh data.', { exact: false }).count(), 0, 'global resource permission is independent of device summary');
+    state.machines.pop();
+    await refresh(page);
+    await page.waitForFunction(() => document.querySelector('.summary-value')?.textContent.trim() === '5');
+    await page.getByTestId('server-resources').waitFor({ state: 'hidden' });
+});
+
+test('server resource failures preserve unknown readings and recover independently of device summaries', async t => {
+    const { page, state } = await open(t, '/h', {}, state => {
+        state.clockPaused = true; state.serverResourcesStatus = 503;
+    });
+    const panel = page.getByTestId('server-resources');
+    await panel.getByRole('heading', { name: 'Server resources', exact: true }).waitFor();
+    await panel.getByText('Server resources are temporarily unavailable.', { exact: true }).waitFor();
+    assert.equal(await panel.locator('.resource-card strong').count(), 0, 'initial API failure does not fabricate zero resource readings');
+    assert.equal(await page.getByText('Unable to refresh data.', { exact: false }).count(), 0);
+    state.serverResourcesStatus = 200; state.serverResources = serverResourcesFixture({ cpu_usage_percent: 22.5 });
+    await visibility(page, true);
+    await resourceResponse(page, () => visibility(page, false));
+    await panel.getByTestId('host-cpu').getByText('22.5%', { exact: true }).waitFor();
+    state.serverResourcesStatus = 503;
+    await visibility(page, true);
+    await resourceResponse(page, () => visibility(page, false));
+    await panel.getByText('Server resources are temporarily unavailable.', { exact: true }).waitFor();
+    assert.equal(await panel.getByText('22.5%', { exact: true }).count(), 0, 'failed refresh is not presented as a current successful reading');
+    assert.equal(await panel.locator('.resource-card strong').count(), 0);
+    state.serverResourcesStatus = 200;
+    state.serverResources = serverResourcesFixture({ cpu_usage_percent: undefined, memory_available_bytes: undefined, process_rss_bytes: undefined, collection_errors: ['cpu', 'memory', 'process_rss'] });
+    await visibility(page, true);
+    await resourceResponse(page, () => visibility(page, false));
+    await panel.getByTestId('host-cpu').getByText('—', { exact: true }).waitFor();
+    await panel.getByTestId('host-memory').getByText('—', { exact: true }).waitFor();
+    await panel.getByTestId('host-rss').getByText('—', { exact: true }).waitFor();
+    assert.equal(await panel.getByText('0.0%', { exact: true }).count(), 0);
+    state.serverResources = serverResourcesFixture({ cpu_usage_percent: 31.5 });
+    await visibility(page, true);
+    await resourceResponse(page, () => visibility(page, false));
+    await panel.getByTestId('host-cpu').getByText('31.5%', { exact: true }).waitFor();
+    await panel.getByTestId('host-rss').getByText('256 MiB', { exact: true }).waitFor();
+    assert.deepEqual(await page.locator('.summary-value').allTextContents().then(values => values.map(value => value.trim())), ['6', '0', '3', '1']);
+});
 
 test('overview uses real counts and recovers from partial refresh failures', async t => {
     const { page, state } = await open(t);

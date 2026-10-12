@@ -123,3 +123,9 @@ ET_RUN_DATAPLANE=1 ET_WG_BIN=/path/to/wg \
 客户端已有固定监听端口和公网映射地址。静态 NAT 示例：公网 UDP 32020 转发到客户端 UDP 22020；监听填写 `udp://0.0.0.0:22020`，映射地址填写 `udp://公网地址:32020`。当前未增加主动连接的固定源端口设置。
 
 官方存储文档：[单机版](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/)、[HTTP 服务发现](https://docs.victoriametrics.com/victoriametrics/sd_configs/#http_sd_configs)。
+
+## Web 服务端自身资源
+
+首页的服务端资源卡片使用 `GET /api/v1/server/resources`，直接在 Web 进程中读取本机 CPU、内存、服务进程 RSS 和文件系统空间，不借用任何受管 Core 节点的数据，也不依赖 Gateway、在线设备或网络实例。采样复用 Linux 原生进程级单例：资源缓存 5 秒，磁盘缓存 60 秒，按请求触发，不增加后台采集定时器。
+
+此接口需要登录且当前用户属于数据库实际的 `admins` 管理组；按用户 ID 单独查组关系，普通用户返回 `403 / server_resources_forbidden`，首页隐藏该卡片，其余功能正常。组权限撤销后立即生效，设备令牌、只读采集 Bearer 或 internal 管理令牌不能替代此接口的管理员登录会话。返回 `{host_resources_supported, host_resources?}`，嵌套字段与节点资源接口一致，64 位整数使用字符串。未知值不补零，第一次 CPU 样本尚无时间间隔时不提供 CPU 百分比，不支持的平台明确返回不支持。

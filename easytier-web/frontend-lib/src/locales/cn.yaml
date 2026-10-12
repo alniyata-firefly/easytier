@@ -350,6 +350,11 @@ event:
 
 web:
   observability:
+    server_resources: 服务端资源
+    web_rss: Web 进程内存
+    server_resources_unavailable: 服务端资源暂时不可用。
+    server_resources_unsupported: 当前服务端平台暂不支持资源采集。
+    dashboard_auto_refresh: 自动刷新
     host_resources: 主机资源
     cpu: CPU 使用率
     memory_used: 内存已用

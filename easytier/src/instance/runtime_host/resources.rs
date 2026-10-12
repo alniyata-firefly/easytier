@@ -41,7 +41,7 @@ struct ResourceCollector {
 
 static COLLECTOR: OnceLock<ResourceCollector> = OnceLock::new();
 
-pub(super) async fn snapshot() -> Option<HostResourcesSnapshot> {
+pub(crate) async fn snapshot() -> Option<HostResourcesSnapshot> {
     COLLECTOR
         .get_or_init(ResourceCollector::default)
         .snapshot()
