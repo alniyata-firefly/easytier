@@ -408,15 +408,11 @@ impl ClientManager {
                 .await;
             return Ok(());
         }
-        let device_id = machine_id.to_string();
-        let tokens = self.storage.db().list_device_access_tokens(user_id).await?;
-        let tokens = tokens
-            .into_iter()
-            .filter(|token| {
-                token.machine_id.as_deref() == Some(device_id.as_str())
-                    && token.revoked_at.is_some()
-            })
-            .collect::<Vec<_>>();
+        let tokens = self
+            .storage
+            .db()
+            .list_revoked_device_access_tokens_for_machine(user_id, machine_id)
+            .await?;
         for token in &tokens {
             self.disconnect_sessions_by_device_token(user_id, &token.id, token.auth_generation)
                 .await;

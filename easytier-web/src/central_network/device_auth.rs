@@ -345,6 +345,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoke_device_access_worker_disconnects_and_physically_deletes_captured_credentials() {
+        let db = Db::memory_db().await;
+        let owner = db.auto_create_user("worker-owner").await.unwrap().id;
+        let other = db.auto_create_user("worker-other").await.unwrap().id;
+        let machine_id = Uuid::new_v4();
+        let elsewhere = Uuid::new_v4();
+        let issued = db
+            .create_device_access_token(owner, "live credential", Some(machine_id), None)
+            .await
+            .unwrap();
+        let other_machine = db
+            .create_device_access_token(owner, "other machine", Some(elsewhere), None)
+            .await
+            .unwrap();
+        let other_owner = db
+            .create_device_access_token(other, "other owner", Some(machine_id), None)
+            .await
+            .unwrap();
+        let (manager, url) = start_config_server(db.clone()).await;
+        let client = WebClient::new(
+            runtime_udp_tunnel_dialer(url),
+            issued.token.clone(),
+            machine_id,
+            "worker-device",
+            false,
+            Arc::new(native_instance_manager()),
+            None,
+        );
+        wait_until(|| async {
+            manager
+                .get_session_by_machine_id(owner, &machine_id)
+                .is_some()
+        })
+        .await;
+        let session = manager
+            .get_session_by_machine_id(owner, &machine_id)
+            .unwrap();
+        assert!(session.management_access_valid().await);
+
+        manager
+            .revoke_device_access(owner, machine_id)
+            .await
+            .unwrap();
+        assert!(!session.is_running());
+        assert!(!session.management_access_valid().await);
+        assert!(manager.list_sessions().await.is_empty());
+        assert!(
+            db.get_device_access_token(owner, &issued.info.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.device_access_token_hash(owner, &issued.info.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(db.get_device((owner, machine_id)).await.unwrap().is_some());
+        assert!(
+            db.resolve_device_access_token(&issued.token, machine_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.resolve_device_access_token(&other_machine.token, elsewhere)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.resolve_device_access_token(&other_owner.token, machine_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        drop(client);
+    }
+
+    #[tokio::test]
     async fn deleting_old_credentials_does_not_retire_a_freshly_enrolled_session() {
         let db = Db::memory_db().await;
         let owner = db.auto_create_user("reenrollment-owner").await.unwrap().id;
@@ -402,6 +483,13 @@ mod tests {
         let new_session = manager
             .get_session_by_machine_id(owner, &machine_id)
             .unwrap();
+        assert!(
+            db.device_access_token_hash(owner, &old.info.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "revoked metadata must remain until the retirement worker runs"
+        );
         manager
             .retire_revoked_device_sessions(owner, machine_id)
             .await
@@ -409,6 +497,26 @@ mod tests {
         assert!(new_session.management_access_valid().await);
         assert!(new_session.is_running());
         assert!(!old_session.is_running());
+        assert!(
+            db.get_device_access_token(owner, &old.info.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "the actual retirement worker deletes the old credential tombstone"
+        );
+        assert!(
+            db.device_access_token_hash(owner, &old.info.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.resolve_device_access_token(&fresh.token, machine_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "fresh enrollment stays authorized after old credential retirement"
+        );
         assert!(
             manager
                 .get_session_by_machine_id(owner, &machine_id)

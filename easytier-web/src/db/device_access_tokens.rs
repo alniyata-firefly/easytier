@@ -189,6 +189,26 @@ impl Db {
         .collect()
     }
 
+    /// Internal retirement snapshot. Public lists hide revoked credentials,
+    /// but workers still need their IDs and generations until disconnection.
+    pub(crate) async fn list_revoked_device_access_tokens_for_machine(
+        &self,
+        user_id: UserIdInDb,
+        machine_id: Uuid,
+    ) -> Result<Vec<DeviceAccessTokenInfo>, DbErr> {
+        sqlx::query(
+            "SELECT * FROM device_access_tokens WHERE user_id=? AND machine_id=? AND revoked_at IS NOT NULL ORDER BY created_at DESC,id",
+        )
+        .bind(user_id)
+        .bind(machine_id.to_string())
+        .fetch_all(&self.db)
+        .await
+        .map_err(sqlx_db_error)?
+        .iter()
+        .map(row_info)
+        .collect()
+    }
+
     pub(crate) async fn rotate_device_access_token(
         &self,
         user_id: UserIdInDb,
@@ -292,13 +312,8 @@ impl Db {
         let _guard = self.device_auth_gate.write().await;
         sqlx::query("UPDATE device_access_tokens SET revoked_at=?,auth_generation=auth_generation+1 WHERE user_id=? AND machine_id=? AND revoked_at IS NULL")
             .bind(now_string()).bind(user_id).bind(machine_id.to_string()).execute(&self.db).await.map_err(sqlx_db_error)?;
-        let machine = machine_id.to_string();
-        Ok(self
-            .list_device_access_tokens(user_id)
-            .await?
-            .into_iter()
-            .filter(|info| info.machine_id.as_deref() == Some(machine.as_str()))
-            .collect())
+        self.list_revoked_device_access_tokens_for_machine(user_id, machine_id)
+            .await
     }
 
     pub(crate) async fn device_access_token_hash(
@@ -549,6 +564,83 @@ mod tests {
         assert_eq!(rotated.info.id, other_token.info.id);
         assert_eq!(rotated.info.auth_generation, 2);
         assert_eq!(db.list_device_access_tokens(other).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn revoke_all_captures_revoked_machine_ids_without_exposing_them_in_public_lists() {
+        let db = Db::memory_db().await;
+        let owner = db.auto_create_user("capture-owner").await.unwrap().id;
+        let other = db.auto_create_user("capture-other").await.unwrap().id;
+        let machine = Uuid::new_v4();
+        let elsewhere = Uuid::new_v4();
+        let already_revoked = db
+            .create_device_access_token(owner, "pending retirement", Some(machine), None)
+            .await
+            .unwrap();
+        db.revoke_device_access_token(owner, &already_revoked.info.id)
+            .await
+            .unwrap();
+        let active = db
+            .create_device_access_token(owner, "current credential", Some(machine), None)
+            .await
+            .unwrap();
+        let other_machine = db
+            .create_device_access_token(owner, "other machine", Some(elsewhere), None)
+            .await
+            .unwrap();
+        let other_owner = db
+            .create_device_access_token(other, "other owner", Some(machine), None)
+            .await
+            .unwrap();
+
+        let captured = db
+            .revoke_all_device_access_tokens(owner, machine)
+            .await
+            .unwrap();
+        let mut actual_ids = captured
+            .iter()
+            .map(|token| token.id.clone())
+            .collect::<Vec<_>>();
+        actual_ids.sort();
+        let mut expected_ids = vec![already_revoked.info.id.clone(), active.info.id.clone()];
+        expected_ids.sort();
+        assert_eq!(actual_ids, expected_ids);
+        assert!(captured.iter().all(|token| token.revoked_at.is_some()));
+        assert_eq!(
+            captured
+                .iter()
+                .find(|token| token.id == active.info.id)
+                .unwrap()
+                .auth_generation,
+            active.info.auth_generation + 1
+        );
+        let listed = db.list_device_access_tokens(owner).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, other_machine.info.id);
+        assert!(
+            db.device_access_token_hash(owner, &active.info.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.resolve_device_access_token(&active.token, machine)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.resolve_device_access_token(&other_machine.token, elsewhere)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.resolve_device_access_token(&other_owner.token, machine)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
