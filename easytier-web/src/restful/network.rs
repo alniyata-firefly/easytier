@@ -91,6 +91,25 @@ fn convert_error(e: RemoteClientError<DbErr>) -> (StatusCode, Json<Error>) {
     }
 }
 
+async fn direct_edit_source(
+    client_mgr: &crate::client_manager::ClientManager,
+    user_id: UserIdInDb,
+    machine_id: uuid::Uuid,
+    instance_id: uuid::Uuid,
+) -> Result<RuntimeConfigSource, HttpHandleError> {
+    // Opening a local instance in Web does not transfer its ownership to Web.
+    // The existing RPC also falls back to persisted metadata for offline edits.
+    // Only a genuinely new instance receives the normal Web-owned source.
+    match client_mgr
+        .handle_get_network_config_with_source((user_id, machine_id), instance_id)
+        .await
+    {
+        Ok((_, source)) => Ok(source),
+        Err(RemoteClientError::NotFound(_)) => Ok(RuntimeConfigSource::Web),
+        Err(error) => Err(convert_error(error)),
+    }
+}
+
 async fn ensure_management_access(
     client_mgr: &crate::client_manager::ClientManager,
     user_id: UserIdInDb,
@@ -321,6 +340,7 @@ impl NetworkApi {
             payload.config.network_name.as_deref(),
         )
         .await?;
+        let source = direct_edit_source(&client_mgr, user_id, machine_id, instance_id).await?;
         client_mgr
             .invalidate_applied_config_revision(user_id, machine_id)
             .await;
@@ -329,7 +349,7 @@ impl NetworkApi {
                 (user_id, machine_id),
                 payload.config,
                 payload.save,
-                RuntimeConfigSource::Web,
+                source,
             )
             .await;
         client_mgr
@@ -666,6 +686,7 @@ impl NetworkApi {
             payload.config.network_name.as_deref(),
         )
         .await?;
+        let source = direct_edit_source(&client_mgr, user_id, machine_id, inst_id).await?;
         client_mgr
             .invalidate_applied_config_revision(user_id, machine_id)
             .await;
@@ -674,7 +695,7 @@ impl NetworkApi {
                 (user_id, machine_id),
                 inst_id,
                 payload.config,
-                RuntimeConfigSource::Web,
+                source,
             )
             .await;
         client_mgr
@@ -923,6 +944,77 @@ impl NetworkApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn offline_direct_edit_manager(db: crate::db::Db) -> crate::client_manager::ClientManager {
+        crate::client_manager::ClientManager::new(
+            db,
+            None,
+            crate::client_manager::HeartbeatPolicy::default(),
+            Arc::new(crate::FeatureFlags::default()),
+            Arc::new(crate::webhook::WebhookConfig::new(
+                None, None, None, None, None,
+            )),
+        )
+    }
+
+    #[tokio::test]
+    async fn direct_edits_preserve_existing_sources_and_default_only_new_instances_to_web() {
+        use easytier_core::management::remote_client::Storage as _;
+
+        let db = crate::db::Db::memory_db().await;
+        let owner = db.auto_create_user("direct-edit-owner").await.unwrap().id;
+        let other = db.auto_create_user("direct-edit-other").await.unwrap().id;
+        let machine = uuid::Uuid::new_v4();
+        let manager = offline_direct_edit_manager(db.clone());
+        for source in [RuntimeConfigSource::User, RuntimeConfigSource::Web] {
+            let id = uuid::Uuid::new_v4();
+            db.insert_or_update_user_network_config(
+                (owner, machine),
+                id,
+                NetworkConfig {
+                    instance_id: Some(id.to_string()),
+                    ..Default::default()
+                },
+                source,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                direct_edit_source(&manager, owner, machine, id)
+                    .await
+                    .unwrap(),
+                source,
+                "offline edits retain the actual persisted runtime owner"
+            );
+            assert_eq!(
+                direct_edit_source(&manager, other, machine, id)
+                    .await
+                    .unwrap(),
+                RuntimeConfigSource::Web,
+                "an instance belonging to another owner is not an existing local instance"
+            );
+        }
+        assert_eq!(
+            direct_edit_source(&manager, owner, machine, uuid::Uuid::new_v4())
+                .await
+                .unwrap(),
+            RuntimeConfigSource::Web
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_edits_propagate_lookup_failures_instead_of_claiming_a_new_web_instance() {
+        let db = crate::db::Db::memory_db().await;
+        let owner = db.auto_create_user("direct-edit-failure").await.unwrap().id;
+        let manager = offline_direct_edit_manager(db.clone());
+        db.inner().close().await;
+
+        let (status, _) =
+            direct_edit_source(&manager, owner, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+                .await
+                .unwrap_err();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     #[test]
     fn public_device_heartbeat_does_not_disclose_management_token() {
