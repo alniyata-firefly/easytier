@@ -381,10 +381,18 @@ impl ClientManager {
             .db()
             .revoke_all_device_access_tokens(user_id, machine_id)
             .await?;
-        for token in tokens {
+        for token in &tokens {
             self.disconnect_sessions_by_device_token(user_id, &token.id, token.auth_generation)
                 .await;
         }
+        let disconnected_ids = tokens
+            .iter()
+            .map(|token| token.id.clone())
+            .collect::<Vec<_>>();
+        self.storage
+            .db()
+            .delete_revoked_device_access_tokens(user_id, machine_id, &disconnected_ids)
+            .await?;
         Ok(())
     }
 
@@ -402,12 +410,25 @@ impl ClientManager {
         }
         let device_id = machine_id.to_string();
         let tokens = self.storage.db().list_device_access_tokens(user_id).await?;
-        for token in tokens.into_iter().filter(|token| {
-            token.machine_id.as_deref() == Some(device_id.as_str()) && token.revoked_at.is_some()
-        }) {
+        let tokens = tokens
+            .into_iter()
+            .filter(|token| {
+                token.machine_id.as_deref() == Some(device_id.as_str())
+                    && token.revoked_at.is_some()
+            })
+            .collect::<Vec<_>>();
+        for token in &tokens {
             self.disconnect_sessions_by_device_token(user_id, &token.id, token.auth_generation)
                 .await;
         }
+        let disconnected_ids = tokens
+            .iter()
+            .map(|token| token.id.clone())
+            .collect::<Vec<_>>();
+        self.storage
+            .db()
+            .delete_revoked_device_access_tokens(user_id, machine_id, &disconnected_ids)
+            .await?;
         Ok(())
     }
 

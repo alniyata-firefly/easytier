@@ -126,10 +126,14 @@ test('native HTTP authentication, device credentials, Core configuration and met
         const revoked = await owner.delete(`/api/v1/device-access-tokens/${issued.info.id}`,200);
         assert.equal(revoked.status,'revoked');
         await waitFor(async()=>!(await currentSession()),'online revocation closes management session');
+        assert.equal((await owner.get('/api/v1/device-access-tokens')).tokens.some(token=>token.id===issued.info.id),false,'revocation removes the useless credential-list record');
+        assert.equal(sqlite(database,"print(json.dumps(db.execute('SELECT COUNT(*) FROM device_access_tokens WHERE id=?',(sys.argv[2],)).fetchone()[0]))",[issued.info.id]),0,'revocation physically removes the invalid token row after disconnection');
+        assert.equal(sqlite(database,"print(json.dumps(db.execute('SELECT COUNT(*) FROM devices WHERE user_id=? AND machine_id=?',(sys.argv[2],sys.argv[3])).fetchone()[0]))",[ownerId,machineId]),1,'revoke keeps the registered device');
+        assert.equal(sqlite(database,"print(json.dumps(db.execute('SELECT COUNT(*) FROM user_running_network_configs WHERE user_id=? AND device_id=? AND network_instance_id=?',(sys.argv[2],sys.argv[3],sys.argv[4])).fetchone()[0]))",[ownerId,machineId,instanceId]),1,'revoke keeps the saved network configuration');
         await delay(3000); assert.equal(await currentSession(),undefined);
         await owner.get(metricsPath,[403,404]);
         await stopCore(core); core = undefined;
-        check('online revoke prevents the still-running Core from reconnecting');
+        check('online revoke removes the token record, preserves device configuration and prevents old-token reconnect');
 
         const replacement = await owner.post('/api/v1/device-access-tokens',{label:'replacement',machine_id:machineId});
         const activeTickets = (await owner.get('/api/v1/device-access-tokens')).tokens
@@ -142,7 +146,8 @@ test('native HTTP authentication, device credentials, Core configuration and met
         await delay(3000);
         assert.equal(sqlite(database,"print(json.dumps(db.execute('SELECT COUNT(*) FROM devices WHERE user_id=? AND machine_id=?',(sys.argv[2],sys.argv[3])).fetchone()[0]))",[ownerId,machineId]),0);
         const deletedToken = (await owner.get('/api/v1/device-access-tokens')).tokens.find(token=>token.id===replacement.info.id);
-        assert.equal(deletedToken.status,'revoked');
+        assert.equal(deletedToken,undefined,'device cleanup leaves no revoked credential rows in its list');
+        assert.equal(sqlite(database,"print(json.dumps(db.execute('SELECT COUNT(*) FROM device_access_tokens WHERE id=?',(sys.argv[2],)).fetchone()[0]))",[replacement.info.id]),0,'device cleanup deletes credential tombstones after pending sessions disconnect');
         assert.equal(await currentSession(),undefined);
         await stopCore(core); core = undefined;
         check('device deletion atomically revokes credentials and old Core cannot register again');

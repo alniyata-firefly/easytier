@@ -106,12 +106,14 @@ async function open(t, route = '/h', options = {}, configure = () => {}) {
         }
         else if (path === '/device-access-tokens') {
             if (method === 'POST') {
-                const info = { id: `token-${state.tokens.length}`, label: payload.label, machine_id: payload.machine_id || null, created_at: new Date().toISOString(), revoked_at: null };
+                const tokenId = state.nextTokenId ?? 0;
+                state.nextTokenId = tokenId + 1;
+                const info = { id: `token-${tokenId}`, label: payload.label, machine_id: payload.machine_id || null, created_at: new Date().toISOString(), revoked_at: null };
                 state.tokens.push(info); result = { token: 'fixture-device-token', info };
             } else result = { tokens: state.tokens };
         } else if (path.startsWith('/device-access-tokens/')) {
             const info = state.tokens.find(token => token.id === path.split('/')[2]);
-            if (method === 'DELETE') { info.revoked_at = new Date().toISOString(); result = {}; }
+            if (method === 'DELETE') { state.tokens = state.tokens.filter(token => token !== info); result = {}; }
             else result = { token: 'fixture-rotated-token', info };
         }
         else if (path === '/machines') result = { machines: state.machines };
@@ -320,10 +322,46 @@ test('device tokens are issued once, rotated, revoked, and use the advertised en
     await dialog.getByText("easytier-core --config-server 'udp://[2001:db8::5]:22020/config/fixture-rotated-token'", { exact: true }).waitFor();
     assert.equal(await dialog.getByText(/fixture-device-token/).count(), 0);
     await dialog.getByRole('button', { name: 'Revoke', exact: true }).click();
-    await dialog.getByText('Revoked', { exact: true }).waitFor();
+    await dialog.getByText('No device access tokens.', { exact: true }).waitFor();
+    assert.equal(state.tokens.length, 0);
+    assert.equal(await dialog.getByText('Phone', { exact: true }).count(), 0);
+    assert.equal(await dialog.getByText('Revoked', { exact: true }).count(), 0);
+    assert.equal(await dialog.getByText(/fixture-rotated-token/).count(), 0);
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
     await page.getByRole('button', { name: 'Device Enrollment', exact: true }).click();
     assert.equal(await page.getByText(/fixture-rotated-token/).count(), 0);
+});
+
+test('device token lists exclude legacy revoked records instead of keeping an audit row', async t => {
+    const { page } = await open(t, '/h', {}, state => {
+        state.tokens = [
+            { id: 'legacy-time', label: 'Old revoked device', revoked_at: '2026-10-01T00:00:00Z' },
+            { id: 'legacy-status', label: 'Old status device', status: 'revoked' },
+            { id: 'current', label: 'Current device', machine_id: id(1) },
+        ];
+    });
+    await page.getByRole('button', { name: 'Device Enrollment', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Device access tokens', exact: true });
+    await dialog.getByText('Current device', { exact: true }).waitFor();
+    assert.equal(await dialog.getByText('Old revoked device', { exact: true }).count(), 0);
+    assert.equal(await dialog.getByText('Old status device', { exact: true }).count(), 0);
+    assert.equal(await dialog.getByRole('button', { name: 'Revoke', exact: true }).count(), 1);
+});
+
+test('successful token revocation removes its row and secret even when the following list refresh fails', async t => {
+    const { page, state } = await open(t);
+    await page.getByRole('button', { name: 'Device Enrollment', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Device access tokens', exact: true });
+    await dialog.getByLabel('Device label', { exact: true }).fill('Phone');
+    await dialog.getByRole('button', { name: 'Issue device token', exact: true }).click();
+    await dialog.getByText(/fixture-device-token/).waitFor();
+    state.failures.add('/device-access-tokens');
+    await dialog.getByRole('button', { name: 'Revoke', exact: true }).click();
+    await dialog.getByText('Test unavailable', { exact: true }).waitFor();
+    assert.equal(state.tokens.length, 0);
+    assert.equal(await dialog.getByText('Phone', { exact: true }).count(), 0);
+    assert.equal(await dialog.getByText(/fixture-device-token/).count(), 0);
+    await dialog.getByText('No device access tokens.', { exact: true }).waitFor();
 });
 
 for (const [apiHost, hostname] of [
@@ -1041,6 +1079,20 @@ test('device token commands disappear when another tab changes the credential ge
     state.tokens[0].auth_generation = 2;
     await page.evaluate(() => { const channel = new BroadcastChannel('easytier-device-access-tokens'); channel.postMessage('changed'); channel.close(); });
     await dialog.getByText(/fixture-device-token/).waitFor({ state: 'detached' });
+});
+
+test('device token rows and one-time commands disappear after another tab revokes and deletes the record', async t => {
+    const { page, state } = await open(t);
+    await page.getByRole('button', { name: 'Device Enrollment', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Device access tokens', exact: true });
+    await dialog.getByLabel('Device label', { exact: true }).fill('Phone');
+    await dialog.getByRole('button', { name: 'Issue device token', exact: true }).click();
+    await dialog.getByText(/fixture-device-token/).waitFor();
+    state.tokens = [];
+    await page.evaluate(() => { const channel = new BroadcastChannel('easytier-device-access-tokens'); channel.postMessage('changed'); channel.close(); });
+    await dialog.getByText('No device access tokens.', { exact: true }).waitFor();
+    assert.equal(await dialog.getByText('Phone', { exact: true }).count(), 0);
+    assert.equal(await dialog.getByText(/fixture-device-token/).count(), 0);
 });
 
 test('credential editing persists grant fields and keeps linked device credentials single-use', async t => {

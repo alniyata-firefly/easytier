@@ -438,6 +438,25 @@ impl HistoryQuery {
         }
         Ok(())
     }
+
+    fn storage_range(&self) -> Option<(u64, u64)> {
+        if self.step == 0 || self.start > self.end {
+            return None;
+        }
+        // VictoriaMetrics' result cache normalizes range queries onto an
+        // absolute step grid, which can otherwise move the first sample
+        // outside the requested range. Query only complete grid points inside
+        // that range; keep strict response validation against the original
+        // user bounds. Checked addition also handles very large step values.
+        let remainder = self.start % self.step;
+        let start = if remainder == 0 {
+            self.start
+        } else {
+            self.start.checked_add(self.step.checked_sub(remainder)?)?
+        };
+        let end = self.end.checked_sub(self.end % self.step)?;
+        (start <= end).then_some((start, end))
+    }
 }
 
 #[derive(Serialize)]
@@ -455,6 +474,20 @@ struct HistoryResponse {
     end: u64,
     step: u64,
     series: Vec<HistorySeries>,
+}
+
+impl HistoryResponse {
+    fn new(query: &HistoryQuery, series: Vec<HistorySeries>) -> Self {
+        Self {
+            available: true,
+            metric: query.metric,
+            unit: query.metric.unit(),
+            start: query.start,
+            end: query.end,
+            step: query.step,
+            series,
+        }
+    }
 }
 
 fn api_error(status: StatusCode, message: &str, code: &str) -> HttpHandleError {
@@ -523,6 +556,9 @@ async fn query_history(
         ));
     };
     query.validate(chrono::Utc::now().timestamp().max(0) as u64)?;
+    let Some((storage_start, storage_end)) = query.storage_range() else {
+        return Ok(HistoryResponse::new(query, Vec::new()));
+    };
     let _permit = observability.query_permits.try_acquire().map_err(|_| {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -537,8 +573,8 @@ async fn query_history(
     ));
     url.query_pairs_mut().extend_pairs([
         ("query", query.metric.expression(scope)),
-        ("start", query.start.to_string()),
-        ("end", query.end.to_string()),
+        ("start", storage_start.to_string()),
+        ("end", storage_end.to_string()),
         ("step", query.step.to_string()),
     ]);
     let mut request = observability.client.get(url);
@@ -580,15 +616,7 @@ async fn query_history(
         )
     })??;
     let series = parse_matrix(&body, query, scope)?;
-    Ok(HistoryResponse {
-        available: true,
-        metric: query.metric,
-        unit: query.metric.unit(),
-        start: query.start,
-        end: query.end,
-        step: query.step,
-        series,
-    })
+    Ok(HistoryResponse::new(query, series))
 }
 
 fn storage_http_error(error: reqwest::Error) -> HttpHandleError {
@@ -1467,6 +1495,186 @@ mod tests {
         assert!(parse_matrix(empty, &query(), &scope()).unwrap().is_empty());
     }
 
+    #[test]
+    fn storage_range_aligns_inward_and_checks_large_integer_arithmetic() {
+        let reported_failure = HistoryQuery {
+            start: 1_791_801_812,
+            end: 1_791_805_412,
+            step: 15,
+            ..query()
+        };
+        assert_eq!(
+            reported_failure.storage_range(),
+            Some((1_791_801_825, 1_791_805_410))
+        );
+        assert_eq!(
+            HistoryQuery {
+                start: 100,
+                end: 104,
+                ..query()
+            }
+            .storage_range(),
+            None
+        );
+        assert_eq!(
+            HistoryQuery {
+                start: 101,
+                end: 105,
+                ..query()
+            }
+            .storage_range(),
+            Some((105, 105))
+        );
+        assert_eq!(
+            HistoryQuery {
+                start: 105,
+                end: 106,
+                ..query()
+            }
+            .storage_range(),
+            Some((105, 105))
+        );
+        assert_eq!(
+            HistoryQuery {
+                start: 105,
+                end: 150,
+                ..query()
+            }
+            .storage_range(),
+            Some((105, 150))
+        );
+        assert_eq!(HistoryQuery { step: 0, ..query() }.storage_range(), None);
+        assert_eq!(
+            HistoryQuery {
+                start: u64::MAX - 1,
+                end: u64::MAX,
+                step: 16,
+                ..query()
+            }
+            .storage_range(),
+            None
+        );
+        assert_eq!(
+            HistoryQuery {
+                start: 1,
+                end: u64::MAX,
+                step: u64::MAX,
+                ..query()
+            }
+            .storage_range(),
+            Some((u64::MAX, u64::MAX))
+        );
+        assert_eq!(
+            HistoryQuery {
+                start: 1,
+                end: u64::MAX - 1,
+                step: u64::MAX,
+                ..query()
+            }
+            .storage_range(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_storage_query_uses_inward_grid_and_preserves_requested_metadata() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let observed = Arc::new(std::sync::Mutex::new(Vec::<(u64, u64, u64)>::new()));
+        let observer = observed.clone();
+        let app = Router::new().route(
+            "/api/v1/query_range",
+            get(move |Query(parameters): Query<BTreeMap<String, String>>| {
+                let observer = observer.clone();
+                async move {
+                    let start = parameters["start"].parse::<u64>().unwrap();
+                    let end = parameters["end"].parse::<u64>().unwrap();
+                    let step = parameters["step"].parse::<u64>().unwrap();
+                    assert!(
+                        !parameters.contains_key("nocache"),
+                        "result caching must remain enabled"
+                    );
+                    observer.lock().unwrap().push((start, end, step));
+                    // Model the observed cached VM behavior: it rounds the
+                    // storage range down to its absolute step grid.
+                    let first = start - start % step;
+                    let last = end - end % step;
+                    let values = if first == last {
+                        serde_json::json!([[first, "1"]])
+                    } else {
+                        serde_json::json!([[first, "1"], [last, "2"]])
+                    };
+                    (
+                        [(header::CONTENT_TYPE, "application/json")],
+                        matrix(scope().labels(), values),
+                    )
+                }
+            }),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let config =
+            Observability::from_options(history_options(&format!("http://{addr}"))).unwrap();
+        let now = chrono::Utc::now().timestamp() as u64;
+        let end = now - now % 15 - 13;
+        let hour = HistoryQuery {
+            start: end - 3600,
+            end,
+            step: 15,
+            ..query()
+        };
+        assert_eq!(hour.start % 15, 2);
+        let response = query_history(&config, &hour, &scope()).await.unwrap();
+        let grid = hour.storage_range().unwrap();
+        assert_eq!(*observed.lock().unwrap(), [(grid.0, grid.1, 15)]);
+        assert_eq!(
+            (response.start, response.end, response.step),
+            (hour.start, hour.end, hour.step)
+        );
+        assert_eq!(response.series[0].values.first().unwrap().0, grid.0 as f64);
+        assert_eq!(response.series[0].values.last().unwrap().0, grid.1 as f64);
+        // The response guard is still strict, including cache-shaped values
+        // that would precede the original requested window.
+        assert!(
+            parse_matrix(
+                &matrix(scope().labels(), serde_json::json!([[hour.start - 2, "1"]])),
+                &hour,
+                &scope()
+            )
+            .is_err()
+        );
+
+        let empty_window = HistoryQuery {
+            start: 100,
+            end: 104,
+            step: 15,
+            ..query()
+        };
+        let response = query_history(&config, &empty_window, &scope())
+            .await
+            .unwrap();
+        assert!(response.available && response.series.is_empty());
+        assert_eq!((response.start, response.end), (100, 104));
+        assert_eq!(
+            observed.lock().unwrap().len(),
+            1,
+            "a window without grid points must not contact storage"
+        );
+        let single_point = HistoryQuery {
+            start: 100,
+            end: 106,
+            step: 15,
+            ..query()
+        };
+        let response = query_history(&config, &single_point, &scope())
+            .await
+            .unwrap();
+        assert_eq!(response.series[0].values, [(105., Some(1.))]);
+        assert_eq!((response.start, response.end), (100, 106));
+        task.abort();
+    }
+
     #[tokio::test]
     async fn history_requires_persisted_owner_and_survives_offline_then_denies_deletion() {
         let db = Db::memory_db().await;
@@ -1839,5 +2047,70 @@ mod tests {
             confirmed_gap,
             "failed disk reads and offline targets must create gaps, not zeros or stale positive rates"
         );
+
+        // Reproduce an hour of historical samples with VM's result cache
+        // enabled. Its unaligned range normalization must not make the Web's
+        // strict original-bound check reject otherwise legitimate history.
+        let history_scope = MetricScope {
+            network_id: Uuid::from_u128(5),
+            ..scope()
+        };
+        let history_end = timestamp - timestamp % 15 + 2;
+        let history_query = HistoryQuery {
+            metric: HistoryMetric::TrafficTxBytes,
+            start: history_end - 3600,
+            end: history_end,
+            step: 15,
+        };
+        let mut history_input = String::new();
+        let first_sample = history_query.start - history_query.start % 15 - 60;
+        let last_sample = history_query.end - history_query.end % 15;
+        for (index, at) in (first_sample..=last_sample).step_by(15).enumerate() {
+            history_input += &sample(
+                "traffic_bytes_tx",
+                &history_scope,
+                "",
+                (index * 100) as f64,
+                at,
+            );
+            history_input += &sample("up", &history_scope, "", 1., at);
+        }
+        assert!(
+            client
+                .post(format!("{base}/api/v1/import/prometheus"))
+                .body(history_input)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        assert!(
+            client
+                .get(format!("{base}/internal/force_flush"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        let history = query_history(&config, &history_query, &history_scope)
+            .await
+            .unwrap();
+        assert_eq!(
+            (history.start, history.end),
+            (history_query.start, history_query.end)
+        );
+        assert_eq!(history.series.len(), 1);
+        let (aligned_start, aligned_end) = history_query.storage_range().unwrap();
+        assert_eq!(
+            history.series[0].values.first().unwrap().0,
+            aligned_start as f64
+        );
+        assert_eq!(
+            history.series[0].values.last().unwrap().0,
+            aligned_end as f64
+        );
+        assert!(history.series[0].values.iter().all(|(at, _)| *at >= history_query.start as f64 && *at <= history_query.end as f64));
     }
 }

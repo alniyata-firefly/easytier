@@ -175,6 +175,11 @@ async fn revoke(
     manager
         .disconnect_sessions_by_device_token(owner, &id, info.auth_generation)
         .await;
+    service
+        .db
+        .delete_revoked_device_access_token(owner, &id)
+        .await
+        .map_err(convert_db_error)?;
     Ok(Json(info))
 }
 

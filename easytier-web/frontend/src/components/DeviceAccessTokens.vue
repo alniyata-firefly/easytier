@@ -37,14 +37,14 @@ const command = computed(() => {
     try { return info.value && secret.value ? enrollmentCommand(info.value, secret.value) : ''; }
     catch { return ''; }
 });
-const status = (token: DeviceAccessToken) => token.revoked_at ? 'revoked'
-    : token.expires_at && Date.parse(token.expires_at) <= Date.now() ? 'expired'
+const isRevoked = (token: DeviceAccessToken) => !!token.revoked_at || token.status === 'revoked';
+const status = (token: DeviceAccessToken) => token.expires_at && Date.parse(token.expires_at) <= Date.now() ? 'expired'
     : token.machine_id ? 'bound' : 'unbound';
-const canUse = (token: DeviceAccessToken) => !['revoked', 'expired'].includes(status(token));
+const canUse = (token: DeviceAccessToken) => !isRevoked(token) && status(token) !== 'expired';
 const load = async () => {
     const request = ++loadGeneration, view = generation;
     const server = await props.api.get_console_info();
-    const records = server.webhook_auth ? [] : await props.api.list_device_access_tokens();
+    const records = server.webhook_auth ? [] : (await props.api.list_device_access_tokens()).filter(record => !isRevoked(record));
     if (request !== loadGeneration || view !== generation || !props.visible) return;
     info.value = server;
     tokens.value = records;
@@ -84,6 +84,13 @@ const create = () => action(() => props.api.create_device_access_token({
     label: label.value.trim(), machine_id: machineId.value.trim() || undefined,
     expires_in_seconds: ttl.value ?? undefined,
 }));
+const revoke = (id: string) => {
+    const view = generation;
+    return action(async () => {
+        await props.api.revoke_device_access_token(id);
+        if (view === generation && props.visible) tokens.value = tokens.value.filter(token => token.id !== id);
+    });
+};
 const copy = async () => toast.add({ severity: await RuntimeDisplay.copyText(command.value) ? 'success' : 'error',
     summary: t('web.console.enroll_copy'), life: 2500 });
 </script>
@@ -114,8 +121,9 @@ const copy = async () => toast.add({ severity: await RuntimeDisplay.copyText(com
                 <Column :header="t('web.network_detail.expires_at')"><template #body="{ data }">{{ data.expires_at || t('web.adaptation.no_expiry') }}</template></Column>
                 <Column :header="t('web.console.manage')"><template #body="{ data }"><div class="flex gap-2">
                     <Button size="small" severity="secondary" :label="t('web.adaptation.rotate_token')" :disabled="busy || !canUse(data)" @click="action(() => api.rotate_device_access_token(data.id))" />
-                    <Button size="small" severity="danger" :label="t('web.adaptation.revoke_token')" :disabled="busy || !!data.revoked_at" @click="action(() => api.revoke_device_access_token(data.id))" />
+                    <Button size="small" severity="danger" :label="t('web.adaptation.revoke_token')" :disabled="busy" @click="revoke(data.id)" />
                 </div></template></Column>
+                <template #empty>{{ t('web.adaptation.tokens_empty') }}</template>
             </DataTable>
         </template>
     </Dialog>

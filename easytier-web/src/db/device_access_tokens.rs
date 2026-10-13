@@ -178,7 +178,7 @@ impl Db {
         user_id: UserIdInDb,
     ) -> Result<Vec<DeviceAccessTokenInfo>, DbErr> {
         sqlx::query(
-            "SELECT * FROM device_access_tokens WHERE user_id = ? ORDER BY created_at DESC,id",
+            "SELECT * FROM device_access_tokens WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC,id",
         )
         .bind(user_id)
         .fetch_all(&self.db)
@@ -222,6 +222,66 @@ impl Db {
         sqlx::query("UPDATE device_access_tokens SET revoked_at = ?, auth_generation = auth_generation + 1 WHERE id = ? AND user_id = ? AND revoked_at IS NULL")
             .bind(now_string()).bind(id).bind(user_id).execute(&self.db).await.map_err(sqlx_db_error)?;
         self.get_device_access_token(user_id, id).await
+    }
+
+    /// Called only after every session using this revoked credential has been
+    /// retired. Keeping the tombstone until then preserves the token hash and
+    /// generation needed to fence authentication and disconnect pending peers.
+    pub(crate) async fn delete_revoked_device_access_token(
+        &self,
+        user_id: UserIdInDb,
+        id: &str,
+    ) -> Result<bool, DbErr> {
+        let _guard = self.device_auth_gate.write().await;
+        let deleted = sqlx::query(
+            "DELETE FROM device_access_tokens WHERE user_id=? AND id=? AND revoked_at IS NOT NULL",
+        )
+        .bind(user_id)
+        .bind(id)
+        .execute(&self.db)
+        .await
+        .map_err(sqlx_db_error)?
+        .rows_affected();
+        Ok(deleted > 0)
+    }
+
+    /// Deletes the immutable revoked records captured by one device-retirement
+    /// operation. A new credential revoked concurrently must keep its metadata
+    /// until its own disconnect finishes, even when it belongs to this machine.
+    pub(crate) async fn delete_revoked_device_access_tokens(
+        &self,
+        user_id: UserIdInDb,
+        machine_id: Uuid,
+        disconnected_token_ids: &[String],
+    ) -> Result<u64, DbErr> {
+        if disconnected_token_ids.is_empty() {
+            return Ok(0);
+        }
+        let _guard = self.device_auth_gate.write().await;
+        let mut deleted = 0;
+        // Keep parameter counts bounded on older SQLite builds as well.
+        for chunk in disconnected_token_ids.chunks(256) {
+            let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                "DELETE FROM device_access_tokens WHERE revoked_at IS NOT NULL AND user_id=",
+            );
+            query
+                .push_bind(user_id)
+                .push(" AND machine_id=")
+                .push_bind(machine_id.to_string())
+                .push(" AND id IN (");
+            let mut ids = query.separated(",");
+            for id in chunk {
+                ids.push_bind(id);
+            }
+            ids.push_unseparated(")");
+            deleted += query
+                .build()
+                .execute(&self.db)
+                .await
+                .map_err(sqlx_db_error)?
+                .rows_affected();
+        }
+        Ok(deleted)
     }
 
     pub(crate) async fn revoke_all_device_access_tokens(
@@ -349,6 +409,8 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use easytier::{common::config::ConfigSource, proto::api::manage::NetworkConfig};
+    use easytier_core::management::remote_client::Storage as _;
     fn record(machine_id: Uuid) -> DeviceHeartbeatRecord {
         DeviceHeartbeatRecord {
             user_id: 0,
@@ -358,6 +420,233 @@ mod tests {
             device_os: "{}".into(),
             client_url: String::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn deleted_revoked_token_stays_invalid_and_preserves_device_configuration() {
+        let db = Db::memory_db().await;
+        let owner = db
+            .auto_create_user("remove-revoked-owner")
+            .await
+            .unwrap()
+            .id;
+        let other = db
+            .auto_create_user("remove-revoked-other")
+            .await
+            .unwrap()
+            .id;
+        let machine = Uuid::new_v4();
+        let issued = db
+            .create_device_access_token(owner, "remove", None, None)
+            .await
+            .unwrap();
+        let identity = db
+            .authenticate_device_access_token(&issued.token, record(machine))
+            .await
+            .unwrap()
+            .unwrap();
+        let network = Uuid::new_v4();
+        db.insert_or_update_user_network_config(
+            (owner, machine),
+            network,
+            NetworkConfig {
+                network_name: Some("kept configuration".into()),
+                ..Default::default()
+            },
+            ConfigSource::User,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !db.delete_revoked_device_access_token(owner, &issued.info.id)
+                .await
+                .unwrap(),
+            "effective credentials cannot be deleted directly"
+        );
+        let revoked = db
+            .revoke_device_access_token(owner, &issued.info.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(revoked.auth_generation, identity.auth_generation + 1);
+        assert!(
+            db.list_device_access_tokens(owner)
+                .await
+                .unwrap()
+                .is_empty(),
+            "revoked credentials are hidden while pending sessions are retired"
+        );
+        assert!(
+            db.device_access_token_hash(owner, &issued.info.id)
+                .await
+                .unwrap()
+                .is_some(),
+            "retirement still has the digest needed to disconnect pending sessions"
+        );
+        assert!(
+            !db.delete_revoked_device_access_token(other, &issued.info.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.get_device_access_token(owner, &issued.info.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.delete_revoked_device_access_token(owner, &issued.info.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.delete_revoked_device_access_token(owner, &issued.info.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.list_device_access_tokens(owner)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.device_access_token_hash(owner, &issued.info.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.resolve_device_access_token(&issued.token, machine)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.authenticate_device_access_token(&issued.token, record(machine))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(db.get_device((owner, machine)).await.unwrap().is_some());
+        assert!(
+            db.get_network_config((owner, machine), &network.to_string())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Rotation remains an update to the one effective credential, not a
+        // deletion or historical row left behind by this cleanup.
+        let other_token = db
+            .create_device_access_token(other, "other", None, None)
+            .await
+            .unwrap();
+        let rotated = db
+            .rotate_device_access_token(other, &other_token.info.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rotated.info.id, other_token.info.id);
+        assert_eq!(rotated.info.auth_generation, 2);
+        assert_eq!(db.list_device_access_tokens(other).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bulk_revoked_cleanup_only_deletes_the_disconnected_owner_machine_snapshot() {
+        let db = Db::memory_db().await;
+        let owner = db.auto_create_user("bulk-cleanup-owner").await.unwrap().id;
+        let other = db.auto_create_user("bulk-cleanup-other").await.unwrap().id;
+        let machine = Uuid::new_v4();
+        let elsewhere = Uuid::new_v4();
+        let first = db
+            .create_device_access_token(owner, "disconnected", Some(machine), None)
+            .await
+            .unwrap();
+        db.revoke_device_access_token(owner, &first.info.id)
+            .await
+            .unwrap();
+        // A credential revoked after the caller captured its disconnect list
+        // must not lose its digest before that independent retirement finishes.
+        let late = db
+            .create_device_access_token(owner, "late revoke", Some(machine), None)
+            .await
+            .unwrap();
+        db.revoke_device_access_token(owner, &late.info.id)
+            .await
+            .unwrap();
+        let active = db
+            .create_device_access_token(owner, "new active", Some(machine), None)
+            .await
+            .unwrap();
+        let other_machine = db
+            .create_device_access_token(owner, "other machine", Some(elsewhere), None)
+            .await
+            .unwrap();
+        db.revoke_device_access_token(owner, &other_machine.info.id)
+            .await
+            .unwrap();
+        let other_owner = db
+            .create_device_access_token(other, "other owner", Some(machine), None)
+            .await
+            .unwrap();
+        db.revoke_device_access_token(other, &other_owner.info.id)
+            .await
+            .unwrap();
+        let ids = vec![
+            first.info.id.clone(),
+            active.info.id.clone(),
+            other_machine.info.id.clone(),
+            other_owner.info.id.clone(),
+        ];
+        assert_eq!(
+            db.delete_revoked_device_access_tokens(owner, machine, &ids)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            db.get_device_access_token(owner, &first.info.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for (id, token_owner) in [
+            (&late.info.id, owner),
+            (&active.info.id, owner),
+            (&other_machine.info.id, owner),
+            (&other_owner.info.id, other),
+        ] {
+            assert!(
+                db.get_device_access_token(token_owner, id)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            db.delete_revoked_device_access_tokens(owner, machine, &[late.info.id])
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            db.resolve_device_access_token(&late.token, machine)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.resolve_device_access_token(&active.token, machine)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            db.delete_revoked_device_access_tokens(owner, machine, &[])
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
