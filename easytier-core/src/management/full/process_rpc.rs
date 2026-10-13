@@ -277,12 +277,16 @@ where
             }
             self.ensure_overwritable(instance_id, &control, remote_managed)
                 .await?;
+            let existing_config = self.instances.config(instance_id);
+            if let Some(existing_config) = existing_config.as_ref() {
+                // NetworkConfig has no independent instance-name field. Its
+                // generated name is the network label, which can be shared by
+                // multiple local instances; keep this UUID's existing name.
+                config.set_inst_name(existing_config.get_inst_name());
+            }
             config.set_network_config_source(requested_source.or(existing_source));
             replacing = true;
-            restore_instance = self
-                .instances
-                .config(instance_id)
-                .map(|config| (config, control.clone()));
+            restore_instance = existing_config.map(|config| (config, control.clone()));
             control
         } else if let Some(config_dir) = self.instances.config_dir() {
             config.set_network_config_source(requested_source);

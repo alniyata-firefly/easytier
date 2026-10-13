@@ -2261,6 +2261,232 @@ virtual_ip = "10.82.0.2/24"
             .unwrap();
     }
 
+    #[cfg(feature = "management")]
+    #[tokio::test]
+    async fn process_management_rpc_preserves_independent_instance_names_during_updates() {
+        use std::{
+            collections::HashMap,
+            path::{Path, PathBuf},
+            sync::{Mutex as StdMutex, atomic::AtomicBool},
+        };
+
+        use crate::{
+            config::toml::{ConfigSource, NetworkIdentity, TomlConfig},
+            instance::manager::InstanceFactory,
+            management::{
+                ConfigFileControl, ConfigFilePermission, ConfigFileStorage, InstanceManager,
+                ProcessManagementRpc, config_source_to_rpc,
+            },
+        };
+        use easytier_proto::{
+            api::manage::{
+                ListNetworkInstanceMetaRequest, NetworkConfig, NetworkingMethod,
+                RunNetworkInstanceRequest, WebClientService,
+            },
+            rpc_types::controller::BaseController,
+        };
+
+        struct ManagementTestFactory(Arc<CoreProcessRuntime>);
+
+        impl InstanceFactory for ManagementTestFactory {
+            type Instance = CoreInstance<TestHost>;
+            type CreateContext = ();
+            type Error = anyhow::Error;
+
+            fn create(
+                &self,
+                config: TomlConfig,
+                (): Self::CreateContext,
+            ) -> Result<Arc<Self::Instance>, Self::Error> {
+                let (packet_sink, _packet_receiver) = tokio::sync::mpsc::channel(16);
+                CoreInstance::from_toml(
+                    config,
+                    adapters_with_process_runtime(None, Arc::new(packet_sink), self.0.clone()),
+                )
+            }
+        }
+
+        impl crate::management::ProcessRuntimeProvider for ManagementTestFactory {
+            fn process_runtime(&self) -> Arc<CoreProcessRuntime> {
+                self.0.clone()
+            }
+        }
+
+        #[derive(Default)]
+        struct MemoryStorage {
+            files: StdMutex<HashMap<PathBuf, Vec<u8>>>,
+            readonly: AtomicBool,
+        }
+
+        #[async_trait]
+        impl ConfigFileStorage for MemoryStorage {
+            async fn inspect(&self, path: &Path) -> ConfigFileControl {
+                let permission = if self.readonly.load(Ordering::Relaxed) {
+                    ConfigFilePermission::from(ConfigFilePermission::READ_ONLY)
+                } else {
+                    ConfigFilePermission::default()
+                };
+                ConfigFileControl::new(Some(path.to_owned()), permission)
+            }
+
+            async fn read(&self, path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+                Ok(self.files.lock().unwrap().get(path).cloned())
+            }
+
+            async fn write(&self, path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+                self.files
+                    .lock()
+                    .unwrap()
+                    .insert(path.to_owned(), contents.to_vec());
+                Ok(())
+            }
+
+            async fn remove(&self, path: &Path) -> anyhow::Result<()> {
+                self.files.lock().unwrap().remove(path);
+                Ok(())
+            }
+        }
+
+        let instances = Arc::new(InstanceManager::new(
+            ManagementTestFactory(CoreProcessRuntime::new()),
+            Some(tokio::runtime::Handle::current()),
+        ));
+        let storage = Arc::new(MemoryStorage::default());
+        let originals = [
+            (uuid::Uuid::new_v4(), "main", "fixture-main-secret"),
+            (uuid::Uuid::new_v4(), "outbound", "fixture-outbound-secret"),
+        ];
+        for (id, name, secret) in originals {
+            let config = TomlConfig::default();
+            config.set_id(id);
+            config.set_inst_name(name.to_owned());
+            config.set_network_identity(NetworkIdentity::new(
+                "shared-network".to_owned(),
+                secret.to_owned(),
+            ));
+            config.set_network_config_source(Some(ConfigSource::User));
+            config.set_listeners(Vec::new());
+            let path = PathBuf::from(format!("{name}.toml"));
+            storage
+                .write(&path, config.dump().as_bytes())
+                .await
+                .unwrap();
+            instances
+                .run_network_instance(
+                    config,
+                    ConfigFileControl::new(
+                        Some(path),
+                        ConfigFilePermission::from(ConfigFilePermission::NO_DELETE),
+                    ),
+                )
+                .unwrap();
+        }
+        let rpc = ProcessManagementRpc::<ManagementTestFactory>::new(
+            instances.clone(),
+            Arc::new(()),
+            storage.clone(),
+        );
+        let update = |id: uuid::Uuid, network: &str, secret: &str| RunNetworkInstanceRequest {
+            config: Some(NetworkConfig {
+                instance_id: Some(id.to_string()),
+                network_name: Some(network.to_owned()),
+                network_secret: Some(secret.to_owned()),
+                hostname: Some(format!("saved-{id}")),
+                networking_method: Some(NetworkingMethod::Standalone.into()),
+                ..Default::default()
+            }),
+            overwrite: true,
+            source: config_source_to_rpc(ConfigSource::User),
+            ..Default::default()
+        };
+
+        // Exercise the actual NetworkConfig -> gen_config -> process RPC path.
+        // First update both same-label instances, then change a network label.
+        for (id, _, secret) in originals {
+            rpc.run_network_instance(
+                BaseController::default(),
+                update(id, "shared-network", secret),
+            )
+            .await
+            .unwrap();
+        }
+        rpc.run_network_instance(
+            BaseController::default(),
+            update(originals[0].0, "changed-network-label", originals[0].2),
+        )
+        .await
+        .unwrap();
+        let metas = rpc
+            .list_network_instance_meta(
+                BaseController::default(),
+                ListNetworkInstanceMetaRequest {
+                    inst_ids: originals.iter().map(|(id, _, _)| (*id).into()).collect(),
+                },
+            )
+            .await
+            .unwrap()
+            .metas;
+        for (id, name, secret) in originals {
+            let meta = metas.iter().find(|m| m.inst_id == Some(id.into())).unwrap();
+            assert_eq!(meta.instance_name, name);
+            assert_eq!(meta.source, config_source_to_rpc(ConfigSource::User));
+            assert_eq!(
+                meta.config_permission,
+                u32::from(ConfigFilePermission::NO_DELETE)
+            );
+            let bytes = storage
+                .read(&PathBuf::from(format!("{name}.toml")))
+                .await
+                .unwrap()
+                .unwrap();
+            let persisted = TomlConfig::new_from_str(std::str::from_utf8(&bytes).unwrap()).unwrap();
+            assert_eq!(persisted.get_inst_name(), name);
+            assert_eq!(persisted.get_id(), id);
+            assert_eq!(
+                persisted.get_network_identity().network_secret.as_deref(),
+                Some(secret)
+            );
+        }
+
+        let first = originals[0].0;
+        let before = instances.config(first).unwrap().dump();
+        let files_before = storage.files.lock().unwrap().clone();
+        storage.readonly.store(true, Ordering::Relaxed);
+        assert!(
+            rpc.run_network_instance(
+                BaseController::default(),
+                update(first, "blocked-label", originals[0].2),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(instances.config(first).unwrap().dump(), before);
+        assert_eq!(*storage.files.lock().unwrap(), files_before);
+        storage.readonly.store(false, Ordering::Relaxed);
+
+        let new_id = uuid::Uuid::new_v4();
+        let mut new_request = update(new_id, "new-instance-label", "fixture-new-secret");
+        new_request.source = config_source_to_rpc(ConfigSource::Web);
+        rpc.run_network_instance(BaseController::default(), new_request)
+            .await
+            .unwrap();
+        assert_eq!(
+            instances.config(new_id).unwrap().get_inst_name(),
+            "new-instance-label"
+        );
+        assert_eq!(
+            instances
+                .config(new_id)
+                .unwrap()
+                .get_network_config_source(),
+            ConfigSource::Web
+        );
+        instances
+            .delete_network_instances(originals.iter().map(|(id, _, _)| *id).chain([new_id]))
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn packet_plane_does_not_retain_core_instance() {
         let instance = build_instance(test_config("packet-plane-ownership")).unwrap();
