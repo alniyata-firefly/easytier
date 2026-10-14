@@ -306,6 +306,7 @@ const settingsForm = ref({
     network_name: '',
     virtual_cidr: '',
     secure_mode: false,
+    prefer_ipv6: false,
     regenerate_secret: false,
 });
 // Initial nodes in the same model as the GUI config form; an empty list
@@ -337,6 +338,7 @@ const loadSettingsForm = () => {
         network_name: network.value.network_name,
         virtual_cidr: network.value.virtual_cidr ?? '',
         secure_mode: network.value.secure_mode ?? false,
+        prefer_ipv6: network.value.prefer_ipv6 ?? false,
         regenerate_secret: false,
     };
     // Present every networking method as an initial-node list: the gateway
@@ -381,6 +383,7 @@ const saveSettings = async () => {
             peer_urls: method === 'Manual' ? initialNodes.value : [],
             virtual_cidr: settingsForm.value.virtual_cidr.trim() || null,
             secure_mode: settingsForm.value.secure_mode,
+            prefer_ipv6: settingsForm.value.prefer_ipv6,
         };
         await api?.update_network(networkId.value, settings, settingsForm.value.regenerate_secret ? uuidv4() : undefined);
         settingsForm.value.regenerate_secret = false;
@@ -414,7 +417,7 @@ const loadMemberConfigForm = async (member: CentralNetworkMember) => {
     try {
         const raw = await api?.get_member_config(networkId.value, member.device_id);
         if (request !== configRequest) return;
-        configForm.value = NetworkTypes.normalizeNetworkConfig(raw);
+        configForm.value = NetworkTypes.normalizeMemberNetworkConfig(raw);
         configBaseline.value = {
             network_name: String(configForm.value.network_name ?? ''),
             network_secret: String(configForm.value.network_secret ?? ''),
@@ -1284,6 +1287,11 @@ const switchTab = async (tab: string) => {
                     <InputSwitch inputId="settings-secure-mode" v-model="settingsForm.secure_mode" />
                 </div>
                 <div class="flex flex-col gap-1">
+                    <label for="settings-prefer-ipv6">{{ t('prefer_ipv6') }}</label>
+                    <InputSwitch inputId="settings-prefer-ipv6" v-model="settingsForm.prefer_ipv6" />
+                    <small class="muted">{{ t('prefer_ipv6_help') }}</small>
+                </div>
+                <div class="flex flex-col gap-1">
                     <label>{{ t('network_secret') }}</label>
                     <div class="flex items-center gap-2">
                         <InputText :model-value="network.network_secret" :aria-label="t('network_secret')" readonly class="flex-1 min-w-0" />
@@ -1423,7 +1431,7 @@ const switchTab = async (tab: string) => {
                     <TabPanel value="advanced">
                         <div v-if="!configLoaded" class="flex justify-center py-6"><ProgressSpinner /></div>
                         <Config v-else v-model:cur-network="configForm" :config-invalid="false" :hide-secure-mode="true"
-                            :edit-vpn-portal-clients="true" />
+                            :edit-vpn-portal-clients="true" :network-default-prefer-ipv6="network?.prefer_ipv6 ?? false" />
                     </TabPanel>
                 </TabPanels>
             </Tabs>

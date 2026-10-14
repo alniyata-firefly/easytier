@@ -33,6 +33,7 @@ pub fn gen_default_flags() -> Flags {
         dev_name: "".to_string(),
         enable_encryption: true,
         enable_ipv6: true,
+        prefer_ipv6: false,
         mtu: 1380,
         latency_first: false,
         enable_exit_node: false,
@@ -131,6 +132,7 @@ define_flags_diff! {
         dev_name,
         enable_encryption,
         enable_ipv6,
+        prefer_ipv6,
         mtu,
         latency_first,
         enable_exit_node,
@@ -1486,6 +1488,30 @@ socket_mark = 66
             ..cfg.get_flags()
         });
         assert_eq!(cfg.get_flags().socket_mark, None);
+    }
+
+    #[test]
+    fn prefer_ipv6_is_disabled_in_legacy_toml() {
+        let config = TomlConfigLoader::new_from_str("").unwrap();
+        assert!(!config.get_flags().prefer_ipv6);
+        assert!(config.get_flags().enable_ipv6);
+    }
+
+    #[cfg(feature = "config-write")]
+    #[test]
+    fn prefer_ipv6_toml_round_trip_preserves_true_and_explicit_false() {
+        let config = TomlConfigLoader::new_from_str("[flags]\nprefer_ipv6 = true\n").unwrap();
+        let dumped = config.dump();
+        assert!(dumped.contains("prefer_ipv6 = true"));
+        let reloaded = TomlConfigLoader::new_from_str(&dumped).unwrap();
+        assert!(reloaded.get_flags().prefer_ipv6);
+
+        let mut flags = reloaded.get_flags();
+        flags.prefer_ipv6 = false;
+        reloaded.set_flags(flags);
+        let disabled = TomlConfigLoader::new_from_str(&reloaded.dump()).unwrap();
+        assert!(!disabled.get_flags().prefer_ipv6);
+        assert!(disabled.get_flags().enable_ipv6);
     }
 
     #[cfg(feature = "config-write")]

@@ -380,6 +380,7 @@ impl CoreInstanceConfig {
                     ..Default::default()
                 },
                 manual: ManualConnectorOptions {
+                    prefer_ipv6: flags.prefer_ipv6,
                     bind_device: flags.bind_device,
                     allow_interface_bind: host.allow_interface_bind,
                     tcp_bind: tcp_bind.clone(),
@@ -389,6 +390,7 @@ impl CoreInstanceConfig {
                 direct: DirectConnectorOptions {
                     default_protocol: flags.default_protocol,
                     enable_ipv6: flags.enable_ipv6,
+                    prefer_ipv6: flags.prefer_ipv6,
                     allow_public_server: true,
                     bind_device: flags.bind_device,
                     allow_interface_bind: host.allow_interface_bind,
@@ -406,6 +408,36 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
     use super::*;
+
+    #[test]
+    fn prefer_ipv6_normalization_defaults_off_and_preserves_policy() {
+        let legacy = TomlConfig::new_from_str("").unwrap();
+        assert!(
+            !CoreInstanceConfig::from_toml(&legacy)
+                .unwrap()
+                .connectivity
+                .direct
+                .prefer_ipv6
+        );
+        assert!(
+            !CoreInstanceConfig::from_toml(&legacy)
+                .unwrap()
+                .connectivity
+                .manual
+                .prefer_ipv6
+        );
+
+        for enable_ipv6 in [false, true] {
+            let config = TomlConfig::new_from_str(&format!(
+                "[flags]\nprefer_ipv6 = true\nenable_ipv6 = {enable_ipv6}\n"
+            ))
+            .unwrap();
+            let normalized = CoreInstanceConfig::from_toml(&config).unwrap();
+            assert!(normalized.connectivity.direct.prefer_ipv6);
+            assert!(normalized.connectivity.manual.prefer_ipv6);
+            assert_eq!(normalized.connectivity.direct.enable_ipv6, enable_ipv6);
+        }
+    }
 
     #[test]
     fn tcp_stun_servers_follow_toml_override_rules() {

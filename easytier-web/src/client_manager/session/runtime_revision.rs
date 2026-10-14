@@ -194,6 +194,7 @@ enum RoundStatus<T> {
 enum ConfigActionResult {
     Success,
     Failed,
+    UnsupportedIpv6Preference,
     StopRound,
 }
 
@@ -263,6 +264,7 @@ impl SessionRuntimeConfigCache {
 struct ReconcileOutcome {
     has_failed: bool,
     managed_revision_failed: bool,
+    unsupported_ipv6_preference: bool,
 }
 
 #[derive(Default)]
@@ -279,6 +281,7 @@ impl ReconcileOutcome {
     fn merge(&mut self, other: Self) {
         self.has_failed |= other.has_failed;
         self.managed_revision_failed |= other.managed_revision_failed;
+        self.unsupported_ipv6_preference |= other.unsupported_ipv6_preference;
     }
 }
 
@@ -999,7 +1002,11 @@ async fn reconcile_desired_runtime_configs(
                         "Failed to cache runtime config after run: {:?}",
                         e
                     );
-                    ConfigActionResult::Failed
+                    if e.is::<runtime_reconcile::UnsupportedIpv6Preference>() {
+                        ConfigActionResult::UnsupportedIpv6Preference
+                    } else {
+                        ConfigActionResult::Failed
+                    }
                 } else {
                     action_result
                 }
@@ -1015,6 +1022,11 @@ async fn reconcile_desired_runtime_configs(
                     cache.runtime_configs.forget(&config.network_instance_id);
                 }
                 outcome.record_failure(source == PersistedConfigSource::Web)
+            }
+            ConfigActionResult::UnsupportedIpv6Preference => {
+                cache.runtime_configs.forget(&config.network_instance_id);
+                outcome.unsupported_ipv6_preference = true;
+                outcome.record_failure(true);
             }
             ConfigActionResult::StopRound => {
                 if source == PersistedConfigSource::Web {
@@ -1099,7 +1111,11 @@ async fn reconcile_running_web_config(
         ConfigActionResult::Success
     } else {
         runtime_config_cache.forget(&config.network_instance_id);
-        ConfigActionResult::Failed
+        if ret.is_err_and(|error| error.is::<runtime_reconcile::UnsupportedIpv6Preference>()) {
+            ConfigActionResult::UnsupportedIpv6Preference
+        } else {
+            ConfigActionResult::Failed
+        }
     }
 }
 
@@ -1235,7 +1251,11 @@ async fn mark_config_revision_applied_if_current(
             let mut runtime = data.managed_runtime();
             if runtime.runtime_config_epoch == round.runtime_config_epoch {
                 runtime.last_reconciliation_error = outcome.has_failed.then(|| {
-                    "One or more managed network operations failed; retry pending".to_owned()
+                    if outcome.unsupported_ipv6_preference {
+                        runtime_reconcile::UnsupportedIpv6Preference.to_string()
+                    } else {
+                        "One or more managed network operations failed; retry pending".to_owned()
+                    }
                 });
             }
         }

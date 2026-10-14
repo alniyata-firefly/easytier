@@ -14,6 +14,8 @@ pub struct CentralNetworkIntent {
     pub mode: NetworkMode,
     pub virtual_cidr: Option<String>,
     pub secure_mode: bool,
+    #[serde(default)]
+    pub prefer_ipv6: bool,
     pub members: Vec<NetworkMemberIntent>,
     pub credentials: Vec<NetworkCredentialIntent>,
     pub acl_policy: Option<AclPolicy>,

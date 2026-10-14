@@ -69,6 +69,8 @@ pub(crate) struct GatewayRuntimeSpec {
     network_secret: String,
     secure_mode: bool,
     relay_data: bool,
+    prefer_ipv6: bool,
+    mapped_peer_url: Option<String>,
     credentials: Vec<ManagedCredentialConfig>,
 }
 
@@ -110,6 +112,11 @@ impl GatewayRuntimeSpec {
             network_secret: intent.network_secret.clone(),
             secure_mode: intent.secure_mode,
             relay_data,
+            prefer_ipv6: intent.prefer_ipv6,
+            mapped_peer_url: match &intent.mode {
+                NetworkMode::Gateway { peer_url } => Some(peer_url.clone()),
+                _ => None,
+            },
             credentials,
         }
     }
@@ -202,6 +209,15 @@ impl GatewayRuntimeFactory for NativeGatewayRuntimeFactory {
         ));
         config.set_dhcp(false);
         config.set_listeners(vec![]);
+        // The listener is owned by Web and shared across central networks.
+        // Advertise its public endpoint without binding a second socket, so
+        // peers can discover and upgrade an existing IPv4 connection via IPv6.
+        config.set_mapped_listeners(
+            spec.mapped_peer_url
+                .as_deref()
+                .map(|url| url.parse().map(|url| vec![url]))
+                .transpose()?,
+        );
 
         let mut flags = config.get_flags();
         flags.no_tun = true;
@@ -210,6 +226,7 @@ impl GatewayRuntimeFactory for NativeGatewayRuntimeFactory {
         flags.disable_upnp = true;
         flags.disable_relay_data = !spec.relay_data;
         flags.bind_device = false;
+        flags.prefer_ipv6 = spec.prefer_ipv6;
         config.set_flags(flags);
 
         if spec.secure_mode {
@@ -704,6 +721,7 @@ mod tests {
             },
             virtual_cidr: None,
             secure_mode: false,
+            prefer_ipv6: false,
             members: Vec::new(),
             credentials: Vec::new(),
             acl_policy: None,
@@ -718,6 +736,65 @@ mod tests {
             },
             factory,
         )
+    }
+
+    #[tokio::test]
+    async fn gateway_public_mapping_and_ipv6_preference_reach_runtime_factory() {
+        let factory = Arc::new(FakeFactory::default());
+        let manager = manager(factory.clone());
+        let mut intent = gateway_intent(Uuid::new_v4(), "dual-stack-mapping");
+        intent.prefer_ipv6 = true;
+        intent.mode = NetworkMode::Gateway {
+            peer_url: "tcp://vpn.qa.invalid:22020".to_owned(),
+        };
+        manager.reconcile(&intent).await;
+        let built = factory.built.lock().unwrap();
+        assert_eq!(built.len(), 1);
+        assert!(built[0].prefer_ipv6);
+        assert_eq!(
+            built[0].mapped_peer_url.as_deref(),
+            Some("tcp://vpn.qa.invalid:22020")
+        );
+        drop(built);
+        assert!(
+            manager
+                .deployment_status(intent.user_id, intent.id)
+                .await
+                .running
+        );
+        manager.remove(intent.user_id, intent.id).await;
+    }
+
+    #[tokio::test]
+    async fn changing_gateway_public_mapping_rebuilds_instead_of_patching_credentials() {
+        let factory = Arc::new(FakeFactory::default());
+        let manager = manager(factory.clone());
+        let mut intent = gateway_intent(Uuid::new_v4(), "mapping-replacement");
+        manager.reconcile(&intent).await;
+        intent.mode = NetworkMode::Gateway {
+            peer_url: "tcp://vpn.qa.invalid:22020".to_owned(),
+        };
+        manager.reconcile(&intent).await;
+        let built = factory.built.lock().unwrap();
+        assert_eq!(built.len(), 2);
+        assert_eq!(
+            built[0].mapped_peer_url.as_deref(),
+            Some("tcp://gateway.example:22020")
+        );
+        assert_eq!(
+            built[1].mapped_peer_url.as_deref(),
+            Some("tcp://vpn.qa.invalid:22020")
+        );
+        drop(built);
+        assert_eq!(*factory.stopped.lock().unwrap(), vec![intent.id]);
+        assert!(factory.patched.lock().unwrap().is_empty());
+        assert!(
+            manager
+                .deployment_status(intent.user_id, intent.id)
+                .await
+                .running
+        );
+        manager.remove(intent.user_id, intent.id).await;
     }
 
     #[tokio::test]

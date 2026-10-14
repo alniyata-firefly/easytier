@@ -13,6 +13,7 @@ const CONFIG_FLAG_FIELDS = [
   'latency_first',
   'use_smoltcp',
   'disable_ipv6',
+  'prefer_ipv6',
   'ipv6_public_addr_auto',
   'enable_kcp_proxy',
   'disable_kcp_input',
@@ -257,14 +258,19 @@ const SelectButtonStub = defineComponent({
   props: {
     modelValue: String,
     options: Array,
+    optionLabel: String,
+    optionValue: String,
   },
   emits: ['update:modelValue'],
-  setup(props, { emit }) {
+  setup(props, { emit, attrs }) {
     return () => h('select', {
+      ...attrs,
       value: props.modelValue,
       'data-stub': 'select-button',
       onChange: (event: Event) => emit('update:modelValue', (event.target as HTMLSelectElement).value),
-    }, (props.options ?? []).map((option) => h('option', { value: option as string }, option as string)))
+    }, (props.options ?? []).map((option: any) => h('option', {
+      value: props.optionValue ? option[props.optionValue] : option,
+    }, props.optionLabel ? option[props.optionLabel] : option)))
   },
 })
 
@@ -358,12 +364,13 @@ function makeConfig(): NetworkConfig {
   }
 }
 
-function mountConfig(config: NetworkConfig = makeConfig()) {
+function mountConfig(config: NetworkConfig = makeConfig(), memberProps: { networkDefaultPreferIpv6?: boolean } = {}) {
   const curNetwork = reactive(config) as NetworkConfig
   const wrapper = mount(Config, {
     props: {
       curNetwork,
       hostname: 'host-from-prop',
+      ...memberProps,
     },
     global: {
       directives: {
@@ -403,6 +410,47 @@ async function setInput(wrapper: VueWrapper, selector: string, value: string) {
 }
 
 describe('Config.vue network config projection', () => {
+  it('retains network inheritance when only the member MTU is edited', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    delete config.prefer_ipv6
+    const { curNetwork, wrapper } = mountConfig(config, { networkDefaultPreferIpv6: true })
+    await nextTick()
+    expect(wrapper.find('#prefer_ipv6').exists()).toBe(false)
+    expect((wrapper.find('#member-ipv6-preference').element as HTMLSelectElement).value).toBe('inherit')
+    await setInput(wrapper, '#mtu', '1280')
+    expect(curNetwork.prefer_ipv6).toBeUndefined()
+    const dto = toBackendNetworkConfig(curNetwork)
+    expect(dto.mtu).toBe(1280)
+    expect(dto).not.toHaveProperty('prefer_ipv6')
+
+    await wrapper.setProps({ networkDefaultPreferIpv6: false })
+    expect(curNetwork.prefer_ipv6).toBeUndefined()
+    expect(toBackendNetworkConfig(curNetwork)).not.toHaveProperty('prefer_ipv6')
+    wrapper.unmount()
+  })
+
+  it('keeps an explicit default-selection override false when the network prefers IPv6', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    delete config.prefer_ipv6
+    const { curNetwork, wrapper } = mountConfig(config, { networkDefaultPreferIpv6: true })
+    await wrapper.find('#member-ipv6-preference').setValue('default')
+    expect(curNetwork.prefer_ipv6).toBe(false)
+    expect(toBackendNetworkConfig(curNetwork)).toHaveProperty('prefer_ipv6', false)
+    wrapper.unmount()
+  })
+
+  it('can clear an explicit member preference without clearing other settings', async () => {
+    const config = { ...DEFAULT_NETWORK_CONFIG(), prefer_ipv6: true, mtu: 1280 }
+    const { curNetwork, wrapper } = mountConfig(config, { networkDefaultPreferIpv6: false })
+    expect((wrapper.find('#member-ipv6-preference').element as HTMLSelectElement).value).toBe('ipv6')
+    await wrapper.find('#member-ipv6-preference').setValue('inherit')
+    expect(curNetwork.prefer_ipv6).toBeUndefined()
+    const dto = toBackendNetworkConfig(curNetwork)
+    expect(dto).not.toHaveProperty('prefer_ipv6')
+    expect(dto.mtu).toBe(1280)
+    wrapper.unmount()
+  })
+
   it('projects config values into the visible form controls', async () => {
     const { curNetwork, wrapper } = mountConfig()
     await nextTick()

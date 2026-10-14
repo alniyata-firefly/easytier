@@ -13,6 +13,7 @@ const BOOLEAN_CONFIG_FIELDS = [
   'latency_first',
   'use_smoltcp',
   'disable_ipv6',
+  'prefer_ipv6',
   'enable_kcp_proxy',
   'disable_kcp_input',
   'disable_p2p',

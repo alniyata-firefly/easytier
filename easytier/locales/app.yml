@@ -138,6 +138,9 @@ core_clap:
   disable_ipv6:
     en: "do not use ipv6"
     zh-CN: "不使用IPv6"
+  prefer_ipv6:
+    en: "prefer IPv6 connections with IPv4 fallback; disabled by default"
+    zh-CN: "优先使用IPv6连接，失败时回退IPv4；默认关闭"
   dev_name:
     en: "optional tun interface name"
     zh-CN: "可选的TUN接口名称"

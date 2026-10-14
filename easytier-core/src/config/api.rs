@@ -134,6 +134,7 @@ pub fn network_config_from_toml(config: &TomlConfig) -> NetworkConfig {
     result.dev_name = Some(flags.dev_name.clone());
     result.use_smoltcp = Some(flags.use_smoltcp);
     result.disable_ipv6 = Some(!flags.enable_ipv6);
+    result.prefer_ipv6 = Some(flags.prefer_ipv6);
     result.enable_kcp_proxy = Some(flags.enable_kcp_proxy);
     result.disable_kcp_input = Some(flags.disable_kcp_input);
     result.enable_quic_proxy = Some(flags.enable_quic_proxy);
@@ -187,6 +188,17 @@ pub fn network_config_from_toml(config: &TomlConfig) -> NetworkConfig {
 mod tests {
     use super::*;
     use crate::config::toml::ManagedCredentialConfig;
+
+    #[test]
+    fn prefer_ipv6_api_projection_matches_toml_policy() {
+        for value in [false, true] {
+            let config = TomlConfig::default();
+            let mut flags = config.get_flags();
+            flags.prefer_ipv6 = value;
+            config.set_flags(flags);
+            assert_eq!(network_config_from_toml(&config).prefer_ipv6, Some(value));
+        }
+    }
 
     #[test]
     fn includes_managed_credentials() {

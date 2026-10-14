@@ -416,8 +416,8 @@ async fn persist_intent(
         INSERT INTO networks (
             user_id, id, display_name, network_name, network_secret,
             networking_method, public_server_url, peer_urls, virtual_cidr,
-            secure_mode, acl_policy, create_time, update_time
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            secure_mode, prefer_ipv6, acl_policy, create_time, update_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id, id) DO UPDATE SET
             display_name = excluded.display_name,
             network_name = excluded.network_name,
@@ -427,6 +427,7 @@ async fn persist_intent(
             peer_urls = excluded.peer_urls,
             virtual_cidr = excluded.virtual_cidr,
             secure_mode = excluded.secure_mode,
+            prefer_ipv6 = excluded.prefer_ipv6,
             acl_policy = excluded.acl_policy,
             update_time = excluded.update_time
         "#,
@@ -441,6 +442,7 @@ async fn persist_intent(
     .bind(&prepared.peer_urls)
     .bind(&prepared.intent.virtual_cidr)
     .bind(prepared.intent.secure_mode)
+    .bind(prepared.intent.prefer_ipv6)
     .bind(&prepared.acl_policy)
     .bind(now)
     .bind(now)
@@ -544,12 +546,13 @@ async fn load_intent(
         String,
         Option<String>,
         bool,
+        bool,
         Option<String>,
     );
     let row: Option<NetworkRow> = sqlx::query_as(
         r#"
         SELECT display_name, network_name, network_secret, networking_method,
-            public_server_url, peer_urls, virtual_cidr, secure_mode, acl_policy
+            public_server_url, peer_urls, virtual_cidr, secure_mode, prefer_ipv6, acl_policy
         FROM networks WHERE user_id = ? AND id = ?
         "#,
     )
@@ -567,6 +570,7 @@ async fn load_intent(
         peer_urls,
         virtual_cidr,
         secure_mode,
+        prefer_ipv6,
         acl_policy,
     )) = row
     else {
@@ -716,6 +720,7 @@ async fn load_intent(
         mode,
         virtual_cidr,
         secure_mode,
+        prefer_ipv6,
         members,
         credentials,
         acl_policy,
@@ -764,6 +769,7 @@ mod tests {
             mode: NetworkMode::Standalone,
             virtual_cidr: Some("10.42.0.0/29".to_owned()),
             secure_mode: true,
+            prefer_ipv6: false,
             members: vec![temporary.clone(), permanent],
             credentials: vec![NetworkCredentialIntent {
                 id: "temporary".to_owned(),
@@ -795,6 +801,55 @@ mod tests {
             .await
             .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn global_prefer_ipv6_legacy_intent_and_migrated_rows_default_false() {
+        use sea_orm_migration::MigratorTrait as _;
+
+        let db = Db::memory_db().await;
+        let user_id = db.auto_create_user("legacy-ipv6-policy").await.unwrap().id;
+        let network_id = Uuid::new_v4();
+        let mut original = intent(user_id, network_id, [Uuid::new_v4(), Uuid::new_v4()]);
+        original.members.clear();
+        original.credentials.clear();
+        let mut legacy_json = serde_json::to_value(original).unwrap();
+        legacy_json.as_object_mut().unwrap().remove("prefer_ipv6");
+        let legacy: CentralNetworkIntent = serde_json::from_value(legacy_json).unwrap();
+        assert!(!legacy.prefer_ipv6);
+
+        // Create a row against the actual pre-feature schema, then upgrade it.
+        crate::migrator::Migrator::down(db.orm_db(), Some(1))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO networks (user_id,id,display_name,network_name,network_secret,\
+             networking_method,peer_urls,virtual_cidr,secure_mode,create_time,update_time) \
+             VALUES (?,?,?,?,?,'Standalone','[]',?,1,?,?)",
+        )
+        .bind(user_id)
+        .bind(network_id.to_string())
+        .bind(&legacy.display_name)
+        .bind(&legacy.network_name)
+        .bind(&legacy.network_secret)
+        .bind(&legacy.virtual_cidr)
+        .bind("2026-10-14T00:00:00+00:00")
+        .bind("2026-10-14T00:00:00+00:00")
+        .execute(&db.db)
+        .await
+        .unwrap();
+        crate::migrator::Migrator::up(db.orm_db(), None)
+            .await
+            .unwrap();
+        let loaded = db
+            .load_central_network_intent(user_id, network_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!loaded.prefer_ipv6);
+        assert_eq!(loaded.id, network_id);
+        assert_eq!(loaded.network_name, legacy.network_name);
+        assert!(loaded.members.is_empty());
     }
 
     #[tokio::test]

@@ -30,6 +30,30 @@ fn conn_latency_sort_key(latency_us: u64, is_hole_punched: bool) -> (bool, u64) 
     (is_hole_punched && latency_us == 0, latency_us)
 }
 
+fn preferred_conn_sort_key(
+    latency_us: u64,
+    is_hole_punched: bool,
+    is_ipv6: bool,
+    confirmed: bool,
+) -> (u8, u64) {
+    let rank = match (confirmed, is_ipv6, is_hole_punched) {
+        (true, true, _) => 0,
+        (true, false, _) => 1,
+        (false, _, false) => 2,
+        (false, _, true) => 3,
+    };
+    (rank, latency_us)
+}
+
+fn preferred_key(conn: &PeerConn) -> (u8, u64) {
+    preferred_conn_sort_key(
+        conn.get_stats().latency_us,
+        conn.is_hole_punched(),
+        conn.uses_ipv6_underlay(),
+        conn.has_confirmed_liveness(),
+    )
+}
+
 pub struct Peer {
     pub peer_node_id: PeerId,
     conns: ConnMap,
@@ -130,11 +154,29 @@ impl Peer {
 
         let conns_copy = conns.clone();
         let default_conn_copy = default_conn.clone();
+        let context_copy = context.clone();
+        let default_conn_update_lock_copy = default_conn_update_lock.clone();
         let default_conn_clear_task = AbortOnDropHandle::new(tokio::spawn(async move {
             loop {
                 crate::foundation::time::sleep(std::time::Duration::from_secs(5)).await;
                 if conns_copy.len() > 1 {
-                    default_conn_copy.store(None);
+                    let flags = context_copy.flags();
+                    if flags.enable_ipv6 && flags.prefer_ipv6 {
+                        let _update_guard = default_conn_update_lock_copy.lock();
+                        if let Some(current) = default_conn_copy.load_full() {
+                            let current_rank = preferred_key(&current).0;
+                            if current.is_closed()
+                                || conns_copy.iter().any(|entry| {
+                                    !entry.value().is_closed()
+                                        && preferred_key(entry.value()).0 < current_rank
+                                })
+                            {
+                                default_conn_copy.store(None);
+                            }
+                        }
+                    } else {
+                        default_conn_copy.store(None);
+                    }
                 }
             }
         }));
@@ -212,6 +254,27 @@ impl Peer {
 
     fn select_conn(&self) -> Option<ArcPeerConn> {
         let _update_guard = self.default_conn_update_lock.lock();
+        let flags = self.context.flags();
+        if flags.enable_ipv6 && flags.prefer_ipv6 {
+            let selected = self
+                .conns
+                .iter()
+                .filter(|conn| !conn.value().is_closed())
+                .min_by_key(|conn| (preferred_key(conn.value()), conn.key().as_u128()))
+                .map(|conn| conn.value().clone());
+            if let Some(current) = self.default_conn.load_full()
+                && !current.is_closed()
+                && selected
+                    .as_ref()
+                    .is_none_or(|next| preferred_key(&current).0 <= preferred_key(next).0)
+            {
+                // Keep a healthy connection within the same family. A smaller
+                // ping fluctuation or another v6 connection must not move flows.
+                return Some(current);
+            }
+            self.default_conn.store(selected.clone());
+            return selected;
+        }
         if let Some(conn) = self.default_conn.load_full() {
             return Some(conn);
         }
@@ -239,8 +302,11 @@ impl Peer {
     pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
         let default_conn = self.default_conn.load();
         if let Some(conn) = default_conn.as_ref() {
-            conn.send_msg(msg).await?;
-            return Ok(());
+            let flags = self.context.flags();
+            if !(flags.enable_ipv6 && flags.prefer_ipv6 && conn.is_closed()) {
+                conn.send_msg(msg).await?;
+                return Ok(());
+            }
         }
         drop(default_conn);
 
@@ -291,6 +357,12 @@ impl Peer {
             .any(|entry| !entry.value().is_closed() && !entry.value().is_hole_punched())
     }
 
+    pub(crate) fn has_live_ipv6_connection(&self) -> bool {
+        self.conns
+            .iter()
+            .any(|entry| !entry.value().is_closed() && entry.value().uses_ipv6_underlay())
+    }
+
     pub(crate) fn has_direct_attached_conn(&self) -> bool {
         self.conns.iter().any(|entry| {
             let conn = entry.value();
@@ -338,7 +410,132 @@ impl Drop for Peer {
 
 #[cfg(test)]
 mod tests {
-    use super::conn_latency_sort_key;
+    use super::*;
+    use crate::{
+        peers::{
+            conn::peer_session::PeerSessionStore, create_packet_recv_chan,
+            test_support::NoopPeerContext,
+        },
+        proto::common::{FlagsInConfig, TunnelInfo},
+        tunnel::{SplitTunnel, Tunnel, ring::create_ring_tunnel_pair},
+    };
+
+    struct AddressedTunnel {
+        inner: Box<dyn Tunnel>,
+        info: TunnelInfo,
+    }
+
+    impl Tunnel for AddressedTunnel {
+        fn split(&self) -> SplitTunnel {
+            self.inner.split()
+        }
+        fn info(&self) -> Option<TunnelInfo> {
+            Some(self.info.clone())
+        }
+    }
+
+    async fn connection_pair(context: ArcPeerContext, endpoint: &str) -> (PeerConn, PeerConn) {
+        let (client, server) = create_ring_tunnel_pair();
+        let sessions = Arc::new(PeerSessionStore::new());
+        let mut client = PeerConn::new(
+            1,
+            context.clone(),
+            Box::new(AddressedTunnel {
+                inner: client,
+                info: TunnelInfo {
+                    remote_addr: Some(endpoint.parse::<url::Url>().unwrap().into()),
+                    ..Default::default()
+                },
+            }),
+            sessions.clone(),
+        );
+        let mut server = PeerConn::new(2, context, server, sessions);
+        let (a, b) = tokio::join!(
+            client.do_handshake_as_client(),
+            server.do_handshake_as_server_ext(|_, _| Ok(())),
+        );
+        a.unwrap();
+        b.unwrap();
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn preferred_cache_upgrades_verified_ipv6_and_falls_back_without_removing_ipv4() {
+        let context: ArcPeerContext =
+            Arc::new(NoopPeerContext::default().with_flags(FlagsInConfig {
+                enable_ipv6: true,
+                prefer_ipv6: true,
+                ..Default::default()
+            }));
+        let (client_tx, _client_rx) = create_packet_recv_chan();
+        let (server_tx, _server_rx) = create_packet_recv_chan();
+        let client = Peer::new(2, client_tx, context.clone());
+        let server = Peer::new(1, server_tx, context.clone());
+
+        let (v4, remote_v4) = connection_pair(context.clone(), "tcp://192.0.2.1:22020").await;
+        let v4_id = v4.get_conn_id();
+        v4.record_test_latency(10);
+        client.add_peer_conn(v4).await.unwrap();
+        server.add_peer_conn(remote_v4).await.unwrap();
+        assert_eq!(client.select_conn().unwrap().get_conn_id(), v4_id);
+
+        let (v6, remote_v6) = connection_pair(context.clone(), "tcp://[2001:db8::1]:22020").await;
+        let v6_id = v6.get_conn_id();
+        client.add_peer_conn(v6).await.unwrap();
+        server.add_peer_conn(remote_v6).await.unwrap();
+        assert_eq!(
+            client.select_conn().unwrap().get_conn_id(),
+            v4_id,
+            "unverified IPv6 must not steal an established IPv4 flow"
+        );
+        // A measured zero is valid. Readiness must use the sample count, not
+        // assume that zero microseconds means the ping loop has never succeeded.
+        client.conns.get(&v6_id).unwrap().record_test_latency(0);
+        assert_eq!(client.select_conn().unwrap().get_conn_id(), v6_id);
+        client
+            .conns
+            .get(&v6_id)
+            .unwrap()
+            .record_test_latency(60_000);
+
+        let (faster_v6, remote_faster_v6) =
+            connection_pair(context, "tcp://[2001:db8::2]:22020").await;
+        let faster_id = faster_v6.get_conn_id();
+        faster_v6.record_test_latency(1);
+        client.add_peer_conn(faster_v6).await.unwrap();
+        server.add_peer_conn(remote_faster_v6).await.unwrap();
+        assert_eq!(
+            client.select_conn().unwrap().get_conn_id(),
+            v6_id,
+            "a lower-latency path within the same family must not churn the cache"
+        );
+
+        for (removed, expected) in [(v6_id, faster_id), (faster_id, v4_id)] {
+            client.close_peer_conn(&removed).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while client.conns.contains_key(&removed) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(client.select_conn().unwrap().get_conn_id(), expected);
+        }
+        assert!(client.conns.contains_key(&v4_id));
+    }
+
+    #[test]
+    fn verified_ipv6_precedes_lower_latency_ipv4_only_when_preferred() {
+        assert!(
+            preferred_conn_sort_key(90_000, false, true, true)
+                < preferred_conn_sort_key(10, false, false, true)
+        );
+        assert!(conn_latency_sort_key(10, false) < conn_latency_sort_key(90_000, false));
+        assert!(
+            preferred_conn_sort_key(10, false, false, true)
+                < preferred_conn_sort_key(0, false, true, false)
+        );
+    }
 
     #[test]
     fn measured_relay_precedes_unverified_hole_punch_path() {

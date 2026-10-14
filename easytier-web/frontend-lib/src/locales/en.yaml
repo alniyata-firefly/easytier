@@ -186,6 +186,15 @@ use_smoltcp_help: Use a user-space TCP/IP stack to avoid issues with operating s
 disable_ipv6: Disable IPv6
 disable_ipv6_help: Disable IPv6 functionality for this node, only use IPv4 for network communication.
 
+prefer_ipv6: Prefer IPv6 Connections
+prefer_ipv6_help: Prefer an available IPv6 connection to peers, with IPv4 fallback. Disabled by default and inactive when IPv6 is disabled. Does not change virtual VPN addresses. Requires a Core client that supports this option; older versions ignore it.
+prefer_ipv6_policy: Connection Preference
+prefer_ipv6_follow_network: Follow Network
+prefer_ipv6_option_ipv6: Prefer IPv6
+prefer_ipv6_option_default: Default Selection
+prefer_ipv6_follow_network_help: Follow Network preserves inheritance, including later changes to the network default.
+prefer_ipv6_network_default: "Current network default: {0}"
+
 ipv6_public_addr_auto: Auto Public IPv6
 ipv6_public_addr_auto_help: Auto-obtain a public IPv6 address from a peer that shares its IPv6 subnet.
 
@@ -638,7 +647,7 @@ web:
     locate_credential: Show credential
     no_candidate_devices: No devices available to add
     remove_member: Remove Device
-    remove_member_confirm: Remove device {device} from this network? Its managed config will be withdrawn
+    remove_member_confirm: Remove device {device} from this network and withdraw its network authorization and managed config? Its management access token and membership in other networks are kept.
     edit_member: Edit Member
     tab_basic_settings: Basic Settings
     hostname_override: Hostname Override

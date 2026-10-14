@@ -363,6 +363,15 @@ struct NetworkOptions {
 
     #[arg(
         long,
+        env = "ET_PREFER_IPV6",
+        help = t!("core_clap.prefer_ipv6").to_string(),
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    prefer_ipv6: Option<bool>,
+
+    #[arg(
+        long,
         env = "ET_DEV_NAME",
         help = t!("core_clap.dev_name").to_string()
     )]
@@ -1249,6 +1258,7 @@ impl NetworkOptions {
         if let Some(v) = self.disable_ipv6 {
             f.enable_ipv6 = !v;
         }
+        f.prefer_ipv6 = self.prefer_ipv6.unwrap_or(f.prefer_ipv6);
         f.latency_first = self.latency_first.unwrap_or(f.latency_first);
         if let Some(dev_name) = &self.dev_name {
             f.dev_name = dev_name.clone()
@@ -2196,6 +2206,33 @@ mod tests {
                 input
             );
         }
+    }
+
+    #[test]
+    fn prefer_ipv6_cli_preserves_config_and_accepts_false_override() {
+        let config = TomlConfigLoader::new_from_str("[flags]\nprefer_ipv6 = true\n").unwrap();
+        NetworkOptions::default().merge_into(&config).unwrap();
+        assert!(config.get_flags().prefer_ipv6);
+
+        NetworkOptions {
+            prefer_ipv6: Some(false),
+            ..Default::default()
+        }
+        .merge_into(&config)
+        .unwrap();
+        assert!(!config.get_flags().prefer_ipv6);
+
+        let enabled = Cli::parse_from(["easytier-core", "--prefer-ipv6"]);
+        assert_eq!(enabled.network_options.prefer_ipv6, Some(true));
+        let disabled = Cli::parse_from(["easytier-core", "--prefer-ipv6", "false"]);
+        assert_eq!(disabled.network_options.prefer_ipv6, Some(false));
+
+        let command = Cli::command();
+        let flag = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "prefer_ipv6")
+            .unwrap();
+        assert_eq!(flag.get_env(), Some(std::ffi::OsStr::new("ET_PREFER_IPV6")));
     }
 
     #[test]

@@ -67,6 +67,7 @@ export interface CentralNetworkSettings {
     peer_urls: string[];
     virtual_cidr?: string | null;
     secure_mode?: boolean;
+    prefer_ipv6?: boolean;
 }
 
 export interface CentralNetworkSummary {
@@ -76,6 +77,7 @@ export interface CentralNetworkSummary {
     networking_method: string;
     virtual_cidr?: string | null;
     secure_mode?: boolean;
+    prefer_ipv6?: boolean;
     member_count: number;
     online_member_count: number;
 }

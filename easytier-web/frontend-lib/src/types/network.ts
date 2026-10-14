@@ -118,6 +118,7 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
 
     use_smoltcp: false,
     disable_ipv6: false,
+    prefer_ipv6: false,
     ipv6_public_addr_auto: false,
     enable_kcp_proxy: false,
     disable_kcp_input: false,
@@ -313,6 +314,7 @@ export function normalizeNetworkConfig(config: NetworkConfig): NetworkConfig {
     normalized.instance_recv_bps_limit as any,
   )
   normalized.proxy_cidrs ??= []
+  normalized.prefer_ipv6 ??= false
   normalized.listener_urls ??= []
   normalized.relay_network_whitelist ??= []
   normalized.routes ??= []
@@ -363,6 +365,17 @@ export function toBackendNetworkConfig(config: NetworkConfig): NetworkConfig {
   return NetworkConfigPb.toJson(backend, {
     useProtoFieldName: true,
   }) as unknown as NetworkConfig
+}
+
+/// Central member forms edit optional overrides rather than effective defaults.
+/// Keep an omitted preference omitted, including protobuf JSON's camel case.
+export function normalizeMemberNetworkConfig(config: NetworkConfig): NetworkConfig {
+  const normalized = normalizeNetworkConfig(config)
+  const raw = config as unknown as Record<string, unknown>
+  if (raw.prefer_ipv6 == null && raw.preferIpv6 == null) {
+    delete normalized.prefer_ipv6
+  }
+  return normalized
 }
 
 export function normalizeVpnPortalInfo(info: unknown): VpnPortalInfo {

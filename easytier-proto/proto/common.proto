@@ -88,6 +88,10 @@ message FlagsInConfig {
   // Prefer direct credential peers that already relay to a destination over
   // advertising another direct edge to the same destination.
   bool prefer_peer_relay = 44;
+
+  // Try IPv6 direct connections before IPv4, retaining IPv4 fallback.
+  // False preserves the existing connection policy.
+  bool prefer_ipv6 = 45;
 }
 
 message RpcDescriptor {

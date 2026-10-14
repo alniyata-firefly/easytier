@@ -352,6 +352,9 @@ pub struct ManualConnectorOptions {
     pub endpoint_discovery_timeout: Duration,
     pub bind_device: bool,
     pub allow_interface_bind: bool,
+    /// Prefer an IPv6 attempt, with bounded IPv4 fallback for dual-stack URLs.
+    #[serde(default)]
+    pub prefer_ipv6: bool,
     pub tcp_bind: TcpBindOptions,
     pub udp_bind: UdpBindOptions,
 }
@@ -364,6 +367,7 @@ impl Default for ManualConnectorOptions {
             endpoint_discovery_timeout: Duration::from_secs(20),
             bind_device: false,
             allow_interface_bind: true,
+            prefer_ipv6: false,
             tcp_bind: TcpBindOptions::default(),
             udp_bind: UdpBindOptions::direct_connect(),
         }
@@ -829,6 +833,76 @@ where
         }
     };
 
+    // Literal, discovery-only and external transports keep their existing path.
+    // A DNS family may contain several addresses; a failed random AAAA must not
+    // prevent a second healthy AAAA from being tried.
+    if data.options.prefer_ipv6
+        && matches!(normalized_url.host(), Some(url::Host::Domain(_)))
+        && !data.host.supports_external_tunnel(normalized_url.scheme())
+        && matches!(
+            ManualTransport::from_url(&normalized_url),
+            Ok(ManualTransport::Tcp(_) | ManualTransport::Udp(_))
+        )
+    {
+        let ipv6 =
+            reconnect_family_candidates(data.clone(), url.clone(), IpVersion::V6, connect_timeout);
+        let ipv4 =
+            reconnect_family_candidates(data.clone(), url.clone(), IpVersion::V4, connect_timeout);
+        return match (
+            ip_versions.contains(&IpVersion::V6),
+            ip_versions.contains(&IpVersion::V4),
+        ) {
+            (true, true) => {
+                connect_ipv6_with_fallback(ipv6, ipv4, Duration::from_millis(250), connect_timeout)
+                    .await
+            }
+            (true, false) => ipv6.await,
+            (false, true) => ipv4.await,
+            (false, false) => Err(anyhow::anyhow!("cannot get IP from URL")),
+        };
+    }
+
+    if data.options.prefer_ipv6
+        && ip_versions.contains(&IpVersion::V6)
+        && ip_versions.contains(&IpVersion::V4)
+    {
+        return connect_ipv6_with_fallback(
+            async {
+                let result = reconnect_with_ip_version(
+                    data.clone(),
+                    url.clone(),
+                    IpVersion::V6,
+                    None,
+                    Instant::now(),
+                    connect_timeout,
+                )
+                .await;
+                if let Err(error) = &result {
+                    emit_connect_error(&data, &url, IpVersion::V6, error);
+                }
+                result
+            },
+            async {
+                let result = reconnect_with_ip_version(
+                    data.clone(),
+                    url.clone(),
+                    IpVersion::V4,
+                    None,
+                    Instant::now(),
+                    connect_timeout,
+                )
+                .await;
+                if let Err(error) = &result {
+                    emit_connect_error(&data, &url, IpVersion::V4, error);
+                }
+                result
+            },
+            Duration::from_millis(250),
+            connect_timeout,
+        )
+        .await;
+    }
+
     let mut last_error = anyhow::anyhow!("cannot get IP from URL");
     for ip_version in ip_versions {
         let started_at = Instant::now();
@@ -836,6 +910,7 @@ where
             data.clone(),
             url.clone(),
             ip_version,
+            None,
             started_at,
             connect_timeout,
         )
@@ -851,10 +926,131 @@ where
     Err(last_error)
 }
 
+async fn reconnect_family_candidates<H>(
+    data: Arc<ManualConnectorData<H>>,
+    requested_url: Url,
+    ip_version: IpVersion,
+    connect_timeout: Duration,
+) -> anyhow::Result<()>
+where
+    H: ManualConnectorHost,
+{
+    let started_at = Instant::now();
+    let result = async {
+        let normalized_url = convert_idn_to_ascii(requested_url.clone())?;
+        let transport = ManualTransport::from_url(&normalized_url)?;
+        let candidates = with_timeout_budget(
+            "resolve",
+            started_at,
+            connect_timeout,
+            resolve_url_addrs(
+                &normalized_url,
+                manual_default_port(&normalized_url),
+                data.options.socket_context(transport, ip_version),
+                data.dns.as_ref(),
+            ),
+        )
+        .await?;
+        race_resolved_candidates(candidates, started_at, connect_timeout, |remote_addr| {
+            reconnect_with_ip_version(
+                data.clone(),
+                requested_url.clone(),
+                ip_version,
+                Some(remote_addr),
+                started_at,
+                connect_timeout,
+            )
+        })
+        .await
+    }
+    .await;
+    if let Err(error) = &result {
+        emit_connect_error(&data, &requested_url, ip_version, error);
+    }
+    result
+}
+
+/// All candidates in one family share the same resolve/connect/handshake
+/// deadline. The first admitted connection wins; dropping JoinSet cancels the
+/// other candidates rather than letting them outlive the reconnect attempt.
+async fn race_resolved_candidates<T, F, Fut>(
+    candidates: Vec<SocketAddr>,
+    started_at: Instant,
+    connect_timeout: Duration,
+    attempt: F,
+) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: Fn(SocketAddr) -> Fut,
+    Fut: Future<Output = anyhow::Result<T>> + Send + 'static,
+{
+    with_timeout_budget("connect", started_at, connect_timeout, async {
+        let mut unique = BTreeSet::new();
+        let mut tasks = JoinSet::new();
+        for candidate in candidates {
+            if unique.insert(candidate) {
+                tasks.spawn(attempt(candidate));
+            }
+        }
+        let mut last_error = anyhow::anyhow!("no resolved connection candidates");
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(value)) => return Ok(value),
+                Ok(Err(error)) => last_error = error,
+                Err(error) => last_error = error.into(),
+            }
+        }
+        Err(last_error)
+    })
+    .await
+}
+
+/// Delay polling IPv4 while IPv6 has a short head start. A failed preferred
+/// attempt starts the fallback immediately; neither family waits for the
+/// other's full connect timeout after the head-start window expires.
+async fn connect_ipv6_with_fallback<T>(
+    ipv6: impl std::future::Future<Output = anyhow::Result<T>>,
+    ipv4: impl std::future::Future<Output = anyhow::Result<T>>,
+    delay: Duration,
+    preferred_timeout: Duration,
+) -> anyhow::Result<T> {
+    let ipv6 = async {
+        crate::foundation::time::timeout(preferred_timeout, ipv6)
+            .await
+            .map_err(|_| anyhow::anyhow!("preferred IPv6 connection timed out"))?
+    };
+    tokio::pin!(ipv6);
+    tokio::pin!(ipv4);
+    tokio::select! {
+        biased;
+        result = &mut ipv6 => {
+            return match result {
+                Ok(value) => Ok(value),
+                Err(_) => ipv4.await,
+            };
+        }
+        _ = crate::foundation::time::sleep(delay) => {}
+    }
+    tokio::select! {
+        biased;
+        result = &mut ipv6 => match result {
+            Ok(value) => Ok(value),
+            Err(_) => ipv4.await,
+        },
+        result = &mut ipv4 => match result {
+            // IPv4 has already been admitted and can carry traffic. Keep the
+            // bounded IPv6 attempt alive so a slower healthy v6 path can win.
+            Ok(value) => Ok(ipv6.await.unwrap_or(value)),
+            Err(_) => ipv6.await,
+        },
+    }
+}
+
 async fn reconnect_with_ip_version<H>(
     data: Arc<ManualConnectorData<H>>,
     requested_url: Url,
     ip_version: IpVersion,
+    candidate_addr: Option<SocketAddr>,
     started_at: Instant,
     connect_timeout: Duration,
 ) -> anyhow::Result<()>
@@ -891,15 +1087,31 @@ where
                 let peer_manager = data.peer_manager.upgrade().ok_or_else(|| {
                     anyhow::anyhow!("peer manager is gone, cannot resolve connector")
                 })?;
-                let remote_addr = resolve_remote_addr(
-                    peer_manager.as_ref(),
-                    data.host.as_ref(),
-                    data.dns.as_ref(),
-                    &endpoint.url,
-                    manual_default_port(&endpoint.url),
-                    data.options.socket_context(transport, ip_version),
-                )
-                .await?;
+                let context = data.options.socket_context(transport, ip_version);
+                let remote_addr = if let Some(candidate) = candidate_addr {
+                    if let Some(reason) = rejected_remote_addr_reason(
+                        peer_manager.as_ref(),
+                        data.host.as_ref(),
+                        &endpoint.url,
+                        candidate,
+                        context,
+                    )
+                    .await?
+                    {
+                        anyhow::bail!("{reason}, refusing overlay-backed underlay connection");
+                    }
+                    candidate
+                } else {
+                    resolve_remote_addr(
+                        peer_manager.as_ref(),
+                        data.host.as_ref(),
+                        data.dns.as_ref(),
+                        &endpoint.url,
+                        manual_default_port(&endpoint.url),
+                        context,
+                    )
+                    .await?
+                };
                 let bind_addrs = if data.options.bind_device
                     && data.options.allow_interface_bind
                     && transport.supports_interface_bind()
@@ -1005,6 +1217,40 @@ where
     }
 }
 
+async fn rejected_remote_addr_reason<H>(
+    peer_manager: &PeerManagerCore,
+    host: &H,
+    url: &Url,
+    addr: SocketAddr,
+    context: SocketContext,
+) -> anyhow::Result<Option<String>>
+where
+    H: ManualConnectorHost,
+{
+    let SocketAddr::V6(v6_addr) = addr else {
+        return Ok(None);
+    };
+    if peer_manager.is_easytier_managed_ipv6(v6_addr.ip()).await {
+        return Ok(Some(format!(
+            "{} resolves to EasyTier-managed IPv6 {}",
+            redacted_endpoint_url(url),
+            v6_addr.ip()
+        )));
+    }
+    match host.local_addr_for_remote(addr, context).await? {
+        SocketAddr::V6(local_addr)
+            if peer_manager.is_easytier_managed_ipv6(local_addr.ip()).await =>
+        {
+            Ok(Some(format!(
+                "{} would use EasyTier-managed IPv6 {} as local source for {v6_addr}",
+                redacted_endpoint_url(url),
+                local_addr.ip()
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
 pub(crate) async fn resolve_remote_addr<H>(
     peer_manager: &PeerManagerCore,
     host: &H,
@@ -1021,30 +1267,9 @@ where
     let mut usable = Vec::new();
     let mut rejected_reason = None;
     for addr in addrs {
-        let SocketAddr::V6(v6_addr) = addr else {
-            usable.push(addr);
-            continue;
-        };
-        if peer_manager.is_easytier_managed_ipv6(v6_addr.ip()).await {
-            rejected_reason = Some(format!(
-                "{} resolves to EasyTier-managed IPv6 {}",
-                redacted_endpoint_url(url),
-                v6_addr.ip()
-            ));
-            continue;
-        }
-        match host.local_addr_for_remote(addr, context.clone()).await {
-            Ok(SocketAddr::V6(local_addr))
-                if peer_manager.is_easytier_managed_ipv6(local_addr.ip()).await =>
-            {
-                rejected_reason = Some(format!(
-                    "{} would use EasyTier-managed IPv6 {} as local source for {v6_addr}",
-                    redacted_endpoint_url(url),
-                    local_addr.ip()
-                ));
-            }
-            Ok(_) => usable.push(addr),
-            Err(error) => return Err(error),
+        match rejected_remote_addr_reason(peer_manager, host, url, addr, context.clone()).await? {
+            Some(reason) => rejected_reason = Some(reason),
+            None => usable.push(addr),
         }
     }
 
@@ -1459,6 +1684,223 @@ mod tests {
 
         assert_eq!(versions, [IpVersion::Both]);
         assert!(resolver.queries.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn prefer_ipv6_multi_aaaa_recovers_from_first_failure_and_finishes_io() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let bad: SocketAddr = "[2001:db8::1]:11010".parse().unwrap();
+        let healthy: SocketAddr = "[2001:db8::2]:11010".parse().unwrap();
+        let resolver = StaticDnsResolver {
+            ips: vec![bad.ip(), healthy.ip()],
+            queries: Mutex::new(Vec::new()),
+        };
+        let candidates = resolve_url_addrs(
+            &"tcp://multi-aaaa.example:11010".parse().unwrap(),
+            11010,
+            SocketContext::default().with_ip_version(IpVersion::V6),
+            &resolver,
+        )
+        .await
+        .unwrap();
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        let seen = attempted.clone();
+        let winner = race_resolved_candidates(
+            candidates,
+            Instant::now(),
+            Duration::from_secs(1),
+            move |address| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(address);
+                    if address == bad {
+                        return Err(
+                            std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into()
+                        );
+                    }
+                    let (mut client, mut server) = tokio::io::duplex(64);
+                    let server = tokio::spawn(async move {
+                        let mut request = [0u8; 4];
+                        server.read_exact(&mut request).await?;
+                        if request != *b"ping" {
+                            anyhow::bail!("unexpected candidate handshake");
+                        }
+                        server.write_all(b"pong").await?;
+                        Ok::<_, anyhow::Error>(())
+                    });
+                    client.write_all(b"ping").await?;
+                    let mut response = [0u8; 4];
+                    client.read_exact(&mut response).await?;
+                    server.await??;
+                    anyhow::ensure!(response == *b"pong", "candidate handshake did not complete");
+                    Ok(address)
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(winner, healthy);
+        let attempted = attempted.lock().unwrap();
+        assert!(attempted.contains(&bad));
+        assert!(attempted.contains(&healthy));
+    }
+
+    #[tokio::test]
+    async fn prefer_ipv6_multi_aaaa_can_upgrade_after_ipv4_fallback() {
+        let hanging: SocketAddr = "[2001:db8::1]:11010".parse().unwrap();
+        let healthy: SocketAddr = "[2001:db8::2]:11010".parse().unwrap();
+        let fallback: SocketAddr = "127.0.0.1:11010".parse().unwrap();
+        let fallback_admitted = std::sync::atomic::AtomicBool::new(false);
+        let winner = connect_ipv6_with_fallback(
+            race_resolved_candidates(
+                vec![hanging, healthy],
+                Instant::now(),
+                Duration::from_millis(200),
+                move |address| async move {
+                    if address == hanging {
+                        std::future::pending::<()>().await;
+                    }
+                    crate::foundation::time::sleep(Duration::from_millis(30)).await;
+                    Ok(address)
+                },
+            ),
+            async {
+                fallback_admitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(fallback)
+            },
+            Duration::from_millis(5),
+            Duration::from_millis(200),
+        )
+        .await
+        .unwrap();
+        assert!(fallback_admitted.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(winner, healthy);
+    }
+
+    #[tokio::test]
+    async fn prefer_ipv6_multi_aaaa_shares_one_timeout_budget() {
+        let candidates = vec![
+            "[2001:db8::1]:11010".parse().unwrap(),
+            "[2001:db8::2]:11010".parse().unwrap(),
+        ];
+        let attempted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = attempted.clone();
+        let error = race_resolved_candidates(
+            candidates,
+            Instant::now(),
+            Duration::from_millis(30),
+            move |_| {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    std::future::pending::<anyhow::Result<()>>().await
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("connect timeout after"));
+        assert_eq!(attempted.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn prefer_ipv6_fast_success_does_not_start_ipv4() {
+        let fallback_started = std::sync::atomic::AtomicBool::new(false);
+        let result = connect_ipv6_with_fallback(
+            async { Ok(6) },
+            async {
+                fallback_started.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(4)
+            },
+            Duration::from_millis(250),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, 6);
+        assert!(!fallback_started.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn prefer_ipv6_immediate_failure_does_not_delay_ipv4() {
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            connect_ipv6_with_fallback(
+                async { anyhow::bail!("no IPv6 route") },
+                async { Ok(4) },
+                Duration::from_secs(5),
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, 4);
+    }
+
+    #[tokio::test]
+    async fn prefer_ipv6_blackhole_has_bounded_ipv4_fallback() {
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            connect_ipv6_with_fallback(
+                std::future::pending::<anyhow::Result<i32>>(),
+                async { Ok(4) },
+                Duration::from_millis(20),
+                Duration::from_millis(50),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, 4);
+    }
+
+    #[tokio::test]
+    async fn prefer_ipv6_failed_fallback_keeps_preferred_attempt_alive() {
+        let result = connect_ipv6_with_fallback(
+            async {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Ok(6)
+            },
+            async { anyhow::bail!("IPv4 unavailable") },
+            Duration::from_millis(5),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, 6);
+    }
+
+    #[tokio::test]
+    async fn prefer_ipv6_can_upgrade_after_ipv4_is_admitted() {
+        let admitted_v4 = std::sync::atomic::AtomicBool::new(false);
+        let result = connect_ipv6_with_fallback(
+            async {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Ok(6)
+            },
+            async {
+                admitted_v4.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(4)
+            },
+            Duration::from_millis(5),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert!(admitted_v4.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(result, 6);
+    }
+
+    #[test]
+    fn prefer_ipv6_defaults_off_for_existing_connector_configs() {
+        let defaults = ManualConnectorOptions::default();
+        assert!(!defaults.prefer_ipv6);
+        let mut json = serde_json::to_value(defaults).unwrap();
+        json.as_object_mut().unwrap().remove("prefer_ipv6");
+        let legacy: ManualConnectorOptions = serde_json::from_value(json).unwrap();
+        assert!(!legacy.prefer_ipv6);
     }
 
     #[test]

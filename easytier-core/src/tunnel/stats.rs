@@ -59,6 +59,10 @@ impl WindowLatency {
             (T::from(sum)) / T::from(count)
         }
     }
+
+    pub(crate) fn has_samples(&self) -> bool {
+        self.count.load(Relaxed) != 0
+    }
 }
 
 #[derive(Debug)]

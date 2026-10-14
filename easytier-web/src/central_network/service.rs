@@ -80,6 +80,8 @@ pub struct NetworkSettings {
     pub virtual_cidr: Option<String>,
     #[serde(default)]
     pub secure_mode: bool,
+    #[serde(default)]
+    pub prefer_ipv6: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -142,6 +144,7 @@ pub struct NetworkSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub virtual_cidr: Option<String>,
     pub secure_mode: bool,
+    pub prefer_ipv6: bool,
     pub member_count: usize,
     pub online_member_count: usize,
 }
@@ -163,6 +166,7 @@ pub struct NetworkDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub virtual_cidr: Option<String>,
     pub secure_mode: bool,
+    pub prefer_ipv6: bool,
     pub public_server_url: Option<String>,
     pub peer_urls: Vec<String>,
     pub member_count: usize,
@@ -361,6 +365,7 @@ impl CentralNetworkService {
                 networking_method: row.networking_method,
                 virtual_cidr: row.virtual_cidr,
                 secure_mode: row.secure_mode,
+                prefer_ipv6: row.prefer_ipv6,
                 member_count,
                 online_member_count,
             });
@@ -438,6 +443,7 @@ impl CentralNetworkService {
             mode,
             virtual_cidr: settings.virtual_cidr,
             secure_mode: settings.secure_mode,
+            prefer_ipv6: settings.prefer_ipv6.unwrap_or(false),
             members: Vec::new(),
             credentials: Vec::new(),
             acl_policy: None,
@@ -463,6 +469,7 @@ impl CentralNetworkService {
             networking_method,
             virtual_cidr: intent.virtual_cidr,
             secure_mode: intent.secure_mode,
+            prefer_ipv6: intent.prefer_ipv6,
             public_server_url,
             peer_urls,
             member_count: intent.members.len(),
@@ -484,6 +491,9 @@ impl CentralNetworkService {
             intent.network_name = network_name;
         }
         intent.mode = mode;
+        if let Some(prefer_ipv6) = request.settings.prefer_ipv6 {
+            intent.prefer_ipv6 = prefer_ipv6;
+        }
         if intent.virtual_cidr != request.settings.virtual_cidr {
             for member in &mut intent.members {
                 member.allocated_ipv4 = None;
@@ -1801,6 +1811,292 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn global_prefer_ipv6_persists_compiles_and_survives_legacy_updates() {
+        use easytier_core::management::remote_client::Storage as _;
+
+        let (service, user_id, _) = service().await;
+        let mut legacy_settings_json = serde_json::to_value(standalone_settings()).unwrap();
+        legacy_settings_json
+            .as_object_mut()
+            .unwrap()
+            .remove("prefer_ipv6");
+        let legacy_settings: NetworkSettings =
+            serde_json::from_value(legacy_settings_json).unwrap();
+        assert!(legacy_settings.prefer_ipv6.is_none());
+        let created = service
+            .create_network(user_id, legacy_settings.clone(), None)
+            .await
+            .unwrap();
+        assert!(!created.prefer_ipv6);
+        let network_id = Uuid::parse_str(&created.network_id).unwrap();
+        let device_id = Uuid::new_v4();
+        register_device(&service, user_id, device_id).await;
+        service
+            .add_members(
+                user_id,
+                network_id,
+                AddMembersReq {
+                    device_ids: vec![device_id.to_string()],
+                    temporary: false,
+                    ttl_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+        let mut enabled_settings = legacy_settings.clone();
+        enabled_settings.prefer_ipv6 = Some(true);
+        let updated = service
+            .update_network(
+                user_id,
+                network_id,
+                UpdateNetworkReq {
+                    settings: enabled_settings,
+                    network_secret: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(updated.prefer_ipv6);
+        let loaded = service.load(user_id, network_id).await.unwrap();
+        assert!(loaded.prefer_ipv6);
+        let compiled = super::super::compiler::compile(&loaded).unwrap();
+        assert_eq!(compiled.members[0].network_config.prefer_ipv6, Some(true));
+        assert_eq!(
+            service
+                .get_member_config(user_id, network_id, device_id)
+                .await
+                .unwrap()
+                .prefer_ipv6,
+            None
+        );
+        let saved = service
+            .db
+            .get_network_config((user_id, device_id), &network_id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        let saved_config: NetworkConfig = serde_json::from_str(&saved.network_config).unwrap();
+        assert_eq!(saved_config.prefer_ipv6, Some(true));
+
+        // Editing another option must retain inheritance rather than pinning
+        // the member to the currently effective network value.
+        for preference in [None, Some(false), None] {
+            service
+                .set_member_config(
+                    user_id,
+                    network_id,
+                    device_id,
+                    NetworkConfig {
+                        mtu: Some(1300),
+                        prefer_ipv6: preference,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let raw = service
+                .get_member_config(user_id, network_id, device_id)
+                .await
+                .unwrap();
+            assert_eq!(raw.prefer_ipv6, preference);
+            assert_eq!(raw.mtu, Some(1300));
+            let intent = service.load(user_id, network_id).await.unwrap();
+            let compiled = super::super::compiler::compile(&intent).unwrap();
+            assert_eq!(
+                compiled.members[0].network_config.prefer_ipv6,
+                Some(preference.unwrap_or(true))
+            );
+        }
+
+        service
+            .update_network(
+                user_id,
+                network_id,
+                UpdateNetworkReq {
+                    settings: legacy_settings.clone(),
+                    network_secret: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(service.load(user_id, network_id).await.unwrap().prefer_ipv6);
+        let mut disabled_settings = legacy_settings;
+        disabled_settings.prefer_ipv6 = Some(false);
+        let disabled = service
+            .update_network(
+                user_id,
+                network_id,
+                UpdateNetworkReq {
+                    settings: disabled_settings,
+                    network_secret: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!disabled.prefer_ipv6);
+        let loaded = service.load(user_id, network_id).await.unwrap();
+        assert!(!loaded.prefer_ipv6);
+        assert_eq!(
+            super::super::compiler::compile(&loaded).unwrap().members[0]
+                .network_config
+                .prefer_ipv6,
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_one_network_member_preserves_management_access_and_other_network() {
+        use easytier_core::management::remote_client::Storage as _;
+
+        let (service, user_id, _) = service().await;
+        let device_id = Uuid::new_v4();
+        let heartbeat = || DeviceHeartbeatRecord {
+            user_id,
+            machine_id: device_id,
+            hostname: "managed-mobile".to_owned(),
+            easytier_version: "test".to_owned(),
+            device_os: "{}".to_owned(),
+            client_url: "udp://127.0.0.1:22020".to_owned(),
+        };
+        let issued = service
+            .db
+            .create_device_access_token(user_id, "managed-mobile", Some(device_id), None)
+            .await
+            .unwrap();
+        let identity = service
+            .db
+            .authenticate_device_access_token(&issued.token, heartbeat())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.token_id, issued.info.id);
+
+        let mut network_ids = Vec::new();
+        for name in ["network-a", "network-b"] {
+            let mut settings = standalone_settings();
+            settings.display_name = name.to_owned();
+            settings.network_name = Some(name.to_owned());
+            settings.secure_mode = true;
+            let detail = service
+                .create_network(user_id, settings, None)
+                .await
+                .unwrap();
+            let network_id = Uuid::parse_str(&detail.network_id).unwrap();
+            service
+                .add_members(
+                    user_id,
+                    network_id,
+                    AddMembersReq {
+                        device_ids: vec![device_id.to_string()],
+                        temporary: true,
+                        ttl_seconds: Some(3600),
+                    },
+                )
+                .await
+                .unwrap();
+            network_ids.push(network_id);
+        }
+        let [network_a, network_b] = network_ids.as_slice() else {
+            unreachable!();
+        };
+        let a_before = service.load(user_id, *network_a).await.unwrap();
+        let b_before = service.load(user_id, *network_b).await.unwrap();
+        let b_compiled_before = super::super::compiler::compile(&b_before).unwrap();
+        let b_saved_before = service
+            .db
+            .get_network_config((user_id, device_id), &network_b.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(a_before.members.len(), 1);
+        assert_eq!(a_before.credentials.len(), 1);
+        assert_eq!(b_before.members.len(), 1);
+        assert_eq!(b_before.credentials.len(), 1);
+
+        service
+            .remove_member(user_id, *network_a, device_id)
+            .await
+            .unwrap();
+
+        let a_after = service.load(user_id, *network_a).await.unwrap();
+        assert!(a_after.members.is_empty());
+        assert!(a_after.credentials.is_empty());
+        assert!(
+            service
+                .db
+                .get_network_config((user_id, device_id), &network_a.to_string())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let b_after = service.load(user_id, *network_b).await.unwrap();
+        assert!(b_after.members == b_before.members);
+        assert!(b_after.credentials == b_before.credentials);
+        assert!(super::super::compiler::compile(&b_after).unwrap() == b_compiled_before);
+        let b_saved_after = service
+            .db
+            .get_network_config((user_id, device_id), &network_b.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(b_saved_after.network_config == b_saved_before.network_config);
+        assert_eq!(b_saved_after.source, b_saved_before.source);
+        assert_eq!(b_saved_after.disabled, b_saved_before.disabled);
+        assert!(
+            service
+                .db
+                .get_device((user_id, device_id))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let after = service
+            .db
+            .authenticate_device_access_token(&issued.token, heartbeat())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after, identity);
+        let token = service
+            .db
+            .get_device_access_token(user_id, &issued.info.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(token.status, "active");
+        assert_eq!(token.auth_generation, issued.info.auth_generation);
+
+        // Rejoining uses the same management identity and a fresh network grant.
+        service
+            .add_members(
+                user_id,
+                *network_a,
+                AddMembersReq {
+                    device_ids: vec![device_id.to_string()],
+                    temporary: true,
+                    ttl_seconds: Some(3600),
+                },
+            )
+            .await
+            .unwrap();
+        let a_rejoined = service.load(user_id, *network_a).await.unwrap();
+        assert_eq!(a_rejoined.members.len(), 1);
+        assert_eq!(a_rejoined.credentials.len(), 1);
+        assert!(a_rejoined.credentials[0].secret != a_before.credentials[0].secret);
+        let after_rejoin = service
+            .db
+            .authenticate_device_access_token(&issued.token, heartbeat())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_rejoin, identity);
+        let tokens = service.db.list_device_access_tokens(user_id).await.unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].id, issued.info.id);
+        assert_eq!(tokens[0].status, "active");
+    }
+
+    #[tokio::test]
     async fn temporary_member_uses_core_device_id_without_changing_permanent_role() {
         let (service, user_a, _) = service().await;
         let temporary = Uuid::new_v4();
@@ -2179,6 +2475,7 @@ mod tests {
             peer_urls: Vec::new(),
             virtual_cidr: Some("10.88.0.0/24".to_owned()),
             secure_mode: true,
+            prefer_ipv6: None,
         }
     }
 

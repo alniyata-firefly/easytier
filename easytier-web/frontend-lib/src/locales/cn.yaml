@@ -187,6 +187,15 @@ use_smoltcp_help: 使用用户态 TCP/IP 协议栈，避免操作系统防火墙
 disable_ipv6: 禁用IPv6
 disable_ipv6_help: 禁用此节点的IPv6功能，仅使用IPv4进行网络通信。
 
+prefer_ipv6: 优先使用 IPv6 连接
+prefer_ipv6_help: 对等节点有可用 IPv6 时优先连接，失败时回退 IPv4。默认关闭；禁用 IPv6 时此选项不生效，不改变 VPN 内的虚拟地址。需要支持此选项的 Core 客户端，旧版本会忽略。
+prefer_ipv6_policy: 连接选路
+prefer_ipv6_follow_network: 跟随网络
+prefer_ipv6_option_ipv6: 优先 IPv6
+prefer_ipv6_option_default: 默认选路
+prefer_ipv6_follow_network_help: 跟随网络时保留继承关系，今后修改网络默认值也会应用到此成员。
+prefer_ipv6_network_default: "网络当前默认：{0}"
+
 ipv6_public_addr_auto: 自动获取公网 IPv6
 ipv6_public_addr_auto_help: 自动从共享了 IPv6 子网的对等节点获取一个公网 IPv6 地址。
 
@@ -638,7 +647,7 @@ web:
     locate_credential: 查看凭证
     no_candidate_devices: 暂无可添加的设备
     remove_member: 移除设备
-    remove_member_confirm: 确定将设备 {device} 移出该网络？其托管配置将被回收
+    remove_member_confirm: 确定将设备 {device} 移出该网络并回收此网络的授权和托管配置？管理接入令牌及其他网络成员关系仍保留。
     edit_member: 编辑成员
     tab_basic_settings: 常规设置
     hostname_override: 主机名覆盖

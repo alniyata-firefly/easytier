@@ -27,6 +27,10 @@ use easytier::{
 
 use super::session::{SessionConfigClient, SessionRpcClient};
 
+#[derive(Debug, thiserror::Error)]
+#[error("This client Core does not support IPv6 preference; update the client before enabling it")]
+pub(super) struct UnsupportedIpv6Preference;
+
 pub(super) enum RuntimeReconcileAction {
     Unchanged(Box<NetworkConfig>),
     Run {
@@ -497,6 +501,12 @@ pub(super) fn prepare_web_source_runtime_reconcile_from_current(
     current_config: &NetworkConfig,
     desired_config: NetworkConfig,
 ) -> anyhow::Result<RuntimeReconcileAction> {
+    // The optional DTO field is also a capability marker: updated Core always
+    // reports Some(false/true), while older Core omits it. Avoid repeatedly
+    // rebuilding a running legacy instance for a preference it cannot apply.
+    if desired_config.prefer_ipv6 == Some(true) && current_config.prefer_ipv6.is_none() {
+        return Err(UnsupportedIpv6Preference.into());
+    }
     let Some(patch) = web_source_runtime_patch(current_config, &desired_config)? else {
         let mut run_config = desired_config;
         if run_config.hostname.is_none() {
@@ -554,6 +564,30 @@ pub(super) async fn apply_web_source_runtime_reconcile(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prefer_ipv6_requires_updated_core_without_rebuilding_legacy_runtime() {
+        let current = super::NetworkConfig::default();
+        let desired = super::NetworkConfig {
+            prefer_ipv6: Some(true),
+            ..current.clone()
+        };
+        let error = super::prepare_web_source_runtime_reconcile_from_current(&current, desired)
+            .err()
+            .expect("legacy Core must not enter a recreate loop");
+        assert!(error.to_string().contains("update the client"));
+    }
+
+    #[test]
+    fn prefer_ipv6_disabled_is_compatible_with_legacy_core_metadata() {
+        let current = config_with_port_forwards(Vec::new());
+        let mut desired = current.clone();
+        desired.prefer_ipv6 = Some(false);
+        assert!(matches!(
+            prepare_web_source_runtime_reconcile_from_current(&current, desired).unwrap(),
+            RuntimeReconcileAction::Unchanged(_)
+        ));
+    }
+
     use easytier::proto::{
         api::{
             config::ConfigPatchAction,

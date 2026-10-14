@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Context;
 use async_trait::async_trait;
+use dashmap::DashSet;
 use quanta::Instant;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -64,8 +65,48 @@ const DIRECT_CONNECTOR_BLACKLIST_TIMEOUT: Duration = Duration::from_secs(300);
 const INVALID_SERVICE_BLACKLIST_TIMEOUT: Duration = Duration::from_secs(3600);
 const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const DIRECT_TASK_LOOP_INTERVAL_MS: u64 = 5000;
+const IPV6_HEAD_START: Duration = Duration::from_millis(250);
+const IPV6_UPGRADE_RETRY: Duration = Duration::from_secs(60);
 const MAX_IPV6_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
 const MAX_UDP_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
+
+/// Give v6 a bounded head start. Once v4 has established it can already carry
+/// packets, while the bounded v6 attempt finishes and may upgrade that peer.
+/// Dropping either future cancels its pending work; admitted connections remain.
+async fn connect_with_ipv6_head_start<V6, V4>(
+    ipv6: V6,
+    ipv4: V4,
+    head_start: Duration,
+) -> anyhow::Result<bool>
+where
+    V6: std::future::Future<Output = anyhow::Result<()>>,
+    V4: std::future::Future<Output = anyhow::Result<()>>,
+{
+    tokio::pin!(ipv6, ipv4);
+    let delay = crate::foundation::time::sleep(head_start);
+    tokio::pin!(delay);
+    tokio::select! {
+        biased;
+        result = &mut ipv6 => {
+            return match result {
+                Ok(()) => Ok(true),
+                Err(_) => ipv4.await.map(|()| false),
+            };
+        }
+        _ = &mut delay => {}
+    }
+    tokio::select! {
+        biased;
+        result = &mut ipv6 => match result {
+            Ok(()) => Ok(true),
+            Err(_) => ipv4.await.map(|()| false),
+        },
+        result = &mut ipv4 => match result {
+            Ok(()) => Ok(ipv6.await.is_ok()),
+            Err(error) => ipv6.await.map(|()| true).map_err(|_| error),
+        },
+    }
+}
 
 #[async_trait]
 pub trait DirectConnectorHost: ManualConnectorHost {
@@ -123,6 +164,8 @@ impl DirectTransport {
 pub struct DirectConnectorOptions {
     pub default_protocol: String,
     pub enable_ipv6: bool,
+    #[serde(default)]
+    pub prefer_ipv6: bool,
     pub allow_public_server: bool,
     pub bind_device: bool,
     pub allow_interface_bind: bool,
@@ -137,6 +180,7 @@ impl Default for DirectConnectorOptions {
         Self {
             default_protocol: "tcp".to_owned(),
             enable_ipv6: true,
+            prefer_ipv6: false,
             allow_public_server: false,
             bind_device: false,
             allow_interface_bind: true,
@@ -160,6 +204,35 @@ impl DirectConnectorOptions {
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct ListenerBlacklistKey(PeerId, String);
 
+#[derive(Default)]
+struct Ipv6UpgradeState {
+    observed_ipv6: DashSet<PeerId>,
+    backoff: ExpiringSet<PeerId>,
+}
+
+impl Ipv6UpgradeState {
+    fn should_attempt(&self, peer_id: PeerId, ipv6_connected: bool, fallback_alive: bool) -> bool {
+        if ipv6_connected {
+            self.observed_ipv6.insert(peer_id);
+            return false;
+        }
+        if self.observed_ipv6.remove(&peer_id).is_some() && fallback_alive {
+            self.backoff.insert(peer_id, IPV6_UPGRADE_RETRY);
+        }
+        // A failed upgrade may delay another upgrade, never restoration of a
+        // completely disconnected peer.
+        !fallback_alive || !self.backoff.contains(&peer_id)
+    }
+
+    fn completed(&self, peer_id: PeerId, ipv6_connected: bool, fallback_alive: bool) {
+        if ipv6_connected {
+            self.observed_ipv6.insert(peer_id);
+        } else if fallback_alive {
+            self.backoff.insert(peer_id, IPV6_UPGRADE_RETRY);
+        }
+    }
+}
+
 struct DirectConnectorData<H>
 where
     H: DirectConnectorHost,
@@ -175,6 +248,7 @@ where
     options: DirectConnectorOptions,
     listener_blacklist: ExpiringSet<ListenerBlacklistKey>,
     peer_blacklist: ExpiringSet<PeerId>,
+    ipv6_upgrades: Ipv6UpgradeState,
 }
 
 impl<H> std::fmt::Debug for DirectConnectorData<H>
@@ -225,6 +299,7 @@ where
             options,
             listener_blacklist: ExpiringSet::default(),
             peer_blacklist: ExpiringSet::default(),
+            ipv6_upgrades: Ipv6UpgradeState::default(),
         });
         let client = PeerTaskManager::new_with_external_signal(
             DirectConnectorLauncher(data.clone()),
@@ -322,6 +397,7 @@ where
     async fn collect_peers_need_task(&self) -> Vec<PeerId> {
         let data = &self.0;
         data.peer_blacklist.cleanup();
+        data.ipv6_upgrades.backoff.cleanup();
         let my_peer_id = data.peer_manager.my_peer_id();
         let policy = data.peer_manager.p2p_policy_flags();
         let now = Instant::now();
@@ -346,7 +422,15 @@ where
                 ) && data.peer_manager.has_recent_traffic(route.peer_id, now);
                 route.peer_id != my_peer_id
                     && (static_allowed || dynamic_allowed)
-                    && !data.peer_manager.has_directly_connected_conn(route.peer_id)
+                    && if data.prefers_ipv6() {
+                        data.ipv6_upgrades.should_attempt(
+                            route.peer_id,
+                            data.has_ipv6_connection(route.peer_id),
+                            data.has_live_connection(route.peer_id),
+                        )
+                    } else {
+                        !data.peer_manager.has_directly_connected_conn(route.peer_id)
+                    }
                     && !data.peer_blacklist.contains(&route.peer_id)
             })
             .map(|route| route.peer_id)
@@ -367,6 +451,36 @@ impl<H> DirectConnectorData<H>
 where
     H: DirectConnectorHost,
 {
+    fn prefers_ipv6(&self) -> bool {
+        self.options.enable_ipv6 && self.options.prefer_ipv6
+    }
+
+    fn has_ipv6_connection(&self, peer_id: PeerId) -> bool {
+        self.peer_manager
+            .get_peer_map()
+            .get_peer_by_id(peer_id)
+            .or_else(|| {
+                self.peer_manager
+                    .get_foreign_network_client()
+                    .get_peer_map()
+                    .get_peer_by_id(peer_id)
+            })
+            .is_some_and(|peer| peer.has_live_ipv6_connection())
+    }
+
+    fn has_live_connection(&self, peer_id: PeerId) -> bool {
+        self.peer_manager
+            .get_peer_map()
+            .get_peer_by_id(peer_id)
+            .or_else(|| {
+                self.peer_manager
+                    .get_foreign_network_client()
+                    .get_peer_map()
+                    .get_peer_by_id(peer_id)
+            })
+            .is_some_and(|peer| peer.has_live_conns())
+    }
+
     async fn try_direct_connect(self: Arc<Self>, dst_peer_id: PeerId) -> anyhow::Result<()> {
         let backoffs_ms = [1000, 2000, 2000, 5000, 5000, 10000, 30000, 60000];
         let mut backoff_index = 0usize;
@@ -410,13 +524,214 @@ where
                 .try_direct_connect_with_ip_list(dst_peer_id, ip_list)
                 .await;
             tracing::info!(?result, dst_peer_id, "direct-connect attempt returned");
-            if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
+            if self.peer_manager.has_directly_connected_conn(dst_peer_id)
+                || (self.prefers_ipv6() && self.has_live_connection(dst_peer_id))
+            {
+                if self.prefers_ipv6() {
+                    // The existing IPv4 connection remains usable. Retry upgrades
+                    // independently per peer, without tearing down a working path.
+                    self.ipv6_upgrades.completed(
+                        dst_peer_id,
+                        self.has_ipv6_connection(dst_peer_id),
+                        self.has_live_connection(dst_peer_id),
+                    );
+                }
                 return Ok(());
             }
         }
     }
 
     async fn try_direct_connect_with_ip_list(
+        self: &Arc<Self>,
+        dst_peer_id: PeerId,
+        ip_list: GetIpListResponse,
+    ) -> anyhow::Result<()> {
+        if !self.prefers_ipv6() {
+            return self
+                .try_direct_connect_with_ip_list_legacy(dst_peer_id, ip_list)
+                .await;
+        }
+        if self.has_ipv6_connection(dst_peer_id) {
+            return Ok(());
+        }
+
+        let ipv4 = async {
+            let listeners = self
+                .preferred_family_targets(&ip_list, IpVersion::V4)
+                .await?;
+            if listeners.is_empty() {
+                if self.peer_manager.has_directly_connected_conn(dst_peer_id) {
+                    return Ok(());
+                }
+                anyhow::bail!("no usable IPv4 direct listener");
+            }
+            self.try_direct_connect_with_ip_list_legacy(
+                dst_peer_id,
+                GetIpListResponse {
+                    listeners: listeners.into_iter().map(Into::into).collect(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            anyhow::ensure!(
+                self.peer_manager.has_directly_connected_conn(dst_peer_id),
+                "IPv4 direct connection did not establish"
+            );
+            Ok(())
+        };
+
+        // Literal IPv4-only listeners cannot provide a v6 path. Do not delay
+        // those peers just because another peer in this network supports v6.
+        let may_have_ipv6 = ip_list.listeners.iter().any(|listener| {
+            Url::parse(&listener.url)
+                .is_ok_and(|url| matches!(url.host(), Some(Host::Ipv6(_)) | Some(Host::Domain(_))))
+        });
+        if !may_have_ipv6 {
+            return ipv4.await;
+        }
+
+        let ipv6 = async {
+            crate::foundation::time::timeout(DIRECT_CONNECT_TIMEOUT, async {
+                let listeners = self
+                    .preferred_family_targets(&ip_list, IpVersion::V6)
+                    .await?;
+                self.try_ipv6_targets(dst_peer_id, listeners).await
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("IPv6 direct attempt timed out"))?
+        };
+        connect_with_ipv6_head_start(ipv6, ipv4, IPV6_HEAD_START)
+            .await
+            .map(|_| ())
+    }
+
+    async fn preferred_family_targets(
+        &self,
+        ip_list: &GetIpListResponse,
+        family: IpVersion,
+    ) -> anyhow::Result<Vec<Url>> {
+        let local_listeners = self.running_listeners.local_listener_urls();
+        let mut targets = Vec::new();
+        let mut seen = HashSet::new();
+        for raw in &ip_list.listeners {
+            let listener: Url = raw.clone().into();
+            if listener.scheme() == "ring"
+                || listener.host().is_none()
+                || mapped_listener_port(&listener).is_none()
+            {
+                continue;
+            }
+            if matches!(listener.host(), Some(Host::Ipv4(_))) && family == IpVersion::V6
+                || matches!(listener.host(), Some(Host::Ipv6(_))) && family == IpVersion::V4
+            {
+                continue;
+            }
+            let context = self
+                .options
+                .tcp_bind
+                .context
+                .clone()
+                .with_ip_version(family);
+            let Ok(addrs) = resolve_url_addrs(
+                &listener,
+                mapped_listener_port(&listener).unwrap(),
+                context,
+                self.dns.as_ref(),
+            )
+            .await
+            else {
+                continue;
+            };
+            let is_udp = protocol_uses_udp(listener.scheme());
+            let port = mapped_listener_port(&listener).unwrap();
+            for addr in addrs {
+                let ips: Vec<IpAddr> = match addr.ip() {
+                    IpAddr::V4(ip) if ip.is_unspecified() => ip_list
+                        .interface_ipv4s
+                        .iter()
+                        .chain(ip_list.public_ipv4.iter())
+                        .map(|ip| IpAddr::V4(ip.addr.into()))
+                        .collect(),
+                    IpAddr::V6(ip) if ip.is_unspecified() => ip_list
+                        .interface_ipv6s
+                        .iter()
+                        .chain(ip_list.public_ipv6.iter())
+                        .map(|ip| IpAddr::V6(Ipv6Addr::from(*ip)))
+                        .collect(),
+                    ip => vec![ip],
+                };
+                for ip in ips {
+                    if ip.is_unspecified()
+                        || ip.is_multicast()
+                        || (ip.is_loopback() && !self.options.testing)
+                    {
+                        continue;
+                    }
+                    let protected = local_listeners.iter().any(|local| {
+                        local.port() == Some(port) && protocol_uses_udp(local.scheme()) == is_udp
+                    }) || (!is_udp && self.protected_tcp_ports.contains(port));
+                    if protected && self.host.is_local_ip(&ip) {
+                        continue;
+                    }
+                    if let IpAddr::V6(remote) = ip {
+                        if remote.to_ipv4_mapped().is_some()
+                            || remote.is_unicast_link_local()
+                            || self.peer_manager.is_easytier_managed_ipv6(&remote).await
+                        {
+                            continue;
+                        }
+                        let Ok(transport) = DirectTransport::from_url(&listener) else {
+                            continue;
+                        };
+                        let Ok(SocketAddr::V6(local)) = self
+                            .host
+                            .local_addr_for_remote(
+                                SocketAddr::new(ip, port),
+                                self.options.socket_context(transport, IpVersion::V6),
+                            )
+                            .await
+                        else {
+                            continue;
+                        };
+                        if local.ip().is_unspecified()
+                            || self.peer_manager.is_easytier_managed_ipv6(local.ip()).await
+                        {
+                            continue;
+                        }
+                    }
+                    let mut url = listener.clone();
+                    if url.set_ip_host(ip).is_ok() && seen.insert(url.to_string()) {
+                        targets.push(url);
+                    }
+                }
+            }
+        }
+        Ok(targets)
+    }
+
+    async fn try_ipv6_targets(
+        self: &Arc<Self>,
+        dst_peer_id: PeerId,
+        targets: Vec<Url>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(!targets.is_empty(), "no usable IPv6 direct listener");
+        let mut tasks = JoinSet::new();
+        for url in targets {
+            let data = self.clone();
+            tasks.spawn(async move { data.connect_to_url_once(dst_peer_id, url.as_str()).await });
+        }
+        let mut last_error = anyhow::anyhow!("no IPv6 direct attempt completed");
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(error)) => last_error = error,
+                Err(error) => last_error = error.into(),
+            }
+        }
+        Err(last_error)
+    }
+
+    async fn try_direct_connect_with_ip_list_legacy(
         self: &Arc<Self>,
         dst_peer_id: PeerId,
         ip_list: GetIpListResponse,
@@ -1201,6 +1516,140 @@ fn is_public_ipv4(ip: Ipv4Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv6_preference_is_opt_in() {
+        assert!(!DirectConnectorOptions::default().prefer_ipv6);
+    }
+
+    #[test]
+    fn ipv6_disconnect_cools_only_that_peer_without_delaying_total_reconnection() {
+        let state = Ipv6UpgradeState::default();
+        assert!(!state.should_attempt(7, true, true));
+        assert!(
+            !state.should_attempt(7, false, true),
+            "keep IPv4 stable after IPv6 closes"
+        );
+        assert!(!state.should_attempt(7, false, true));
+        assert!(
+            state.should_attempt(8, false, true),
+            "another peer has independent preference"
+        );
+        assert!(
+            state.should_attempt(7, false, false),
+            "both paths gone must reconnect immediately"
+        );
+    }
+
+    #[test]
+    fn failed_ipv6_upgrade_is_cooled_while_ipv4_remains_available() {
+        let state = Ipv6UpgradeState::default();
+        state.completed(9, false, true);
+        assert!(!state.should_attempt(9, false, true));
+        assert!(state.should_attempt(9, false, false));
+        state.completed(10, false, false);
+        assert!(state.should_attempt(10, false, false));
+    }
+
+    #[tokio::test]
+    async fn ipv6_head_start_does_not_poll_ipv4_when_ipv6_succeeds() {
+        let ipv4_polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = ipv4_polled.clone();
+        assert!(
+            connect_with_ipv6_head_start(
+                async { Ok(()) },
+                async move {
+                    observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+                Duration::ZERO,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(!ipv4_polled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn ipv6_fast_failure_bypasses_fallback_delay() {
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            connect_with_ipv6_head_start(
+                async { anyhow::bail!("unreachable") },
+                async { Ok(()) },
+                Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("IPv4 must not wait for the IPv6 head start after a hard failure")
+        .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn established_ipv4_is_retained_while_ipv6_upgrade_finishes() {
+        let (allow_ipv6, wait_ipv6) = tokio::sync::oneshot::channel::<()>();
+        let (ipv4_ready, wait_ipv4) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(connect_with_ipv6_head_start(
+            async move {
+                wait_ipv6.await.unwrap();
+                Ok(())
+            },
+            async move {
+                ipv4_ready.send(()).unwrap();
+                Ok(())
+            },
+            Duration::ZERO,
+        ));
+        tokio::time::timeout(Duration::from_secs(1), wait_ipv4)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !task.is_finished(),
+            "upgrade must remain eligible after IPv4 established"
+        );
+        allow_ipv6.send(()).unwrap();
+        assert!(task.await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn failed_ipv6_upgrade_does_not_discard_established_ipv4() {
+        let (fail_ipv6, wait_ipv6) = tokio::sync::oneshot::channel::<()>();
+        let (ipv4_ready, wait_ipv4) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(connect_with_ipv6_head_start(
+            async move {
+                wait_ipv6.await.unwrap();
+                anyhow::bail!("blackholed")
+            },
+            async move {
+                ipv4_ready.send(()).unwrap();
+                Ok(())
+            },
+            Duration::ZERO,
+        ));
+        wait_ipv4.await.unwrap();
+        fail_ipv6.send(()).unwrap();
+        assert!(!task.await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn ipv6_failure_for_one_peer_does_not_change_another_peer() {
+        let (dual_stack, ipv4_only) = tokio::join!(
+            connect_with_ipv6_head_start(
+                async { Ok(()) },
+                async { anyhow::bail!("IPv4 not needed") },
+                Duration::ZERO,
+            ),
+            connect_with_ipv6_head_start(
+                async { anyhow::bail!("no IPv6 listener") },
+                async { Ok(()) },
+                Duration::ZERO,
+            ),
+        );
+        assert!(dual_stack.unwrap());
+        assert!(!ipv4_only.unwrap());
+    }
 
     impl<H> DirectConnectorRpcHandler<H>
     where

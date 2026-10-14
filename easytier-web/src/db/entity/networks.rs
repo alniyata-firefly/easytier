@@ -25,6 +25,7 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub virtual_cidr: Option<String>,
     pub secure_mode: bool,
+    pub prefer_ipv6: bool,
     #[sea_orm(column_type = "Text", nullable)]
     pub acl_policy: Option<String>,
     pub create_time: DateTimeWithTimeZone,

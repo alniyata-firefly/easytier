@@ -7,6 +7,7 @@ import {
   addRow,
   DEFAULT_NETWORK_CONFIG,
   NetworkConfig,
+  normalizeMemberNetworkConfig,
   normalizeNetworkConfig,
   removeRow,
 } from '../types/network'
@@ -17,7 +18,7 @@ import UrlListInput from './UrlListInput.vue'
 import { createVpnPortalConfig } from '../modules/vpnPortal'
 import type { VpnPortalClientConfig } from '../types/network'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   actionLabel?: string
   configInvalid?: boolean
   hostname?: string
@@ -27,7 +28,11 @@ const props = defineProps<{
   hideSecureMode?: boolean
   /// Central members save their clients through the configuration owner.
   editVpnPortalClients?: boolean
-}>()
+  /// A central member can inherit this network-wide preference.
+  networkDefaultPreferIpv6?: boolean
+}>(), { networkDefaultPreferIpv6: undefined })
+
+const isCentralMemberConfig = computed(() => props.networkDefaultPreferIpv6 !== undefined)
 
 defineEmits(['runNetwork'])
 
@@ -140,6 +145,7 @@ const bool_flags: BoolFlag[] = [
   { field: 'latency_first', help: 'latency_first_help' },
   { field: 'use_smoltcp', help: 'use_smoltcp_help' },
   { field: 'disable_ipv6', help: 'disable_ipv6_help' },
+  { field: 'prefer_ipv6', help: 'prefer_ipv6_help' },
   { field: 'ipv6_public_addr_auto', help: 'ipv6_public_addr_auto_help' },
   { field: 'enable_kcp_proxy', help: 'enable_kcp_proxy_help' },
   { field: 'disable_kcp_input', help: 'disable_kcp_input_help' },
@@ -164,6 +170,23 @@ const bool_flags: BoolFlag[] = [
   { field: 'enable_magic_dns', help: 'enable_magic_dns_help' },
   { field: 'enable_private_mode', help: 'enable_private_mode_help' },
 ]
+
+const visibleBoolFlags = computed(() => isCentralMemberConfig.value
+  ? bool_flags.filter((flag) => flag.field !== 'prefer_ipv6')
+  : bool_flags)
+const ipv6PreferenceOptions = computed(() => [
+  { value: 'inherit', label: t('prefer_ipv6_follow_network') },
+  { value: 'ipv6', label: t('prefer_ipv6_option_ipv6') },
+  { value: 'default', label: t('prefer_ipv6_option_default') },
+])
+const ipv6PreferenceChoice = computed({
+  get: () => curNetwork.value.prefer_ipv6 === true ? 'ipv6'
+    : curNetwork.value.prefer_ipv6 === false ? 'default' : 'inherit',
+  set: (choice: string) => {
+    if (choice === 'inherit') delete curNetwork.value.prefer_ipv6
+    else curNetwork.value.prefer_ipv6 = choice === 'ipv6'
+  },
+})
 
 const portForwardProtocolOptions = ref(["tcp", "udp"]);
 
@@ -217,7 +240,12 @@ function syncNormalizedNetwork(network: NetworkConfig | undefined): void {
     return
   }
 
-  Object.assign(network, normalizeNetworkConfig(network))
+  Object.assign(network, isCentralMemberConfig.value
+    ? normalizeMemberNetworkConfig(network) : normalizeNetworkConfig(network))
+  if (isCentralMemberConfig.value) {
+    // Object.assign cannot remove a previously present optional field.
+    if (network.prefer_ipv6 == null) delete network.prefer_ipv6
+  }
   if (network.vpn_portal_config?.enabled !== false && network.vpn_portal_config
     && !network.vpn_portal_config.wireguard_private_key) {
     network.vpn_portal_config.wireguard_private_key = createVpnPortalConfig().wireguard_private_key
@@ -393,12 +421,20 @@ function removeVpnPortalClient(index: number) {
                   <label> {{ t('flags_switch') }} </label>
                   <div class="flex flex-row flex-wrap">
 
-                    <div class="basis-[20rem] flex items-center" v-for="flag in bool_flags">
+                    <div class="basis-[20rem] flex items-center" v-for="flag in visibleBoolFlags">
                       <Checkbox v-model="curNetwork[flag.field]" :input-id="flag.field" :binary="true" />
                       <label :for="flag.field" class="ml-2"> {{ t(flag.field) }} </label>
                       <span class="pi pi-question-circle ml-2 self-center" v-tooltip="t(flag.help)"></span>
                     </div>
 
+                  </div>
+                  <div v-if="isCentralMemberConfig" class="flex flex-col gap-2 mt-2">
+                    <label for="member-ipv6-preference">{{ t('prefer_ipv6_policy') }}</label>
+                    <SelectButton id="member-ipv6-preference" v-model="ipv6PreferenceChoice"
+                      :options="ipv6PreferenceOptions" option-label="label" option-value="value" :allow-empty="false" />
+                    <small>{{ t('prefer_ipv6_follow_network_help') }}</small>
+                    <small>{{ t('prefer_ipv6_network_default', [t(props.networkDefaultPreferIpv6
+                      ? 'prefer_ipv6_option_ipv6' : 'prefer_ipv6_option_default')]) }}</small>
                   </div>
                 </div>
               </div>

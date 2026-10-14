@@ -121,6 +121,7 @@ const FORM_MANAGED_FLAG_FIELDS: &[&str] = &[
     "dev_name",
     "use_smoltcp",
     "enable_ipv6",
+    "prefer_ipv6",
     "enable_kcp_proxy",
     "disable_kcp_input",
     "enable_quic_proxy",
@@ -500,6 +501,10 @@ impl NetworkConfigExt for NetworkConfig {
             flags.enable_ipv6 = !disable_ipv6;
         }
 
+        if let Some(prefer_ipv6) = self.prefer_ipv6 {
+            flags.prefer_ipv6 = prefer_ipv6;
+        }
+
         if let Some(enable_kcp_proxy) = self.enable_kcp_proxy {
             flags.enable_kcp_proxy = enable_kcp_proxy;
         }
@@ -772,6 +777,7 @@ impl NetworkConfigExt for NetworkConfig {
         result.dev_name = Some(flags.dev_name.clone());
         result.use_smoltcp = Some(flags.use_smoltcp);
         result.disable_ipv6 = Some(!flags.enable_ipv6);
+        result.prefer_ipv6 = Some(flags.prefer_ipv6);
         result.enable_kcp_proxy = Some(flags.enable_kcp_proxy);
         result.disable_kcp_input = Some(flags.disable_kcp_input);
         result.enable_quic_proxy = Some(flags.enable_quic_proxy);
@@ -851,6 +857,35 @@ mod tests {
             networking_method: Some(NetworkingMethod::Standalone as i32),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn prefer_ipv6_api_round_trips_true_false_and_missing() {
+        for value in [None, Some(false), Some(true)] {
+            let input = NetworkConfig {
+                prefer_ipv6: value,
+                ..standalone_config()
+            };
+            let config = input.gen_config().unwrap();
+            assert_eq!(config.get_flags().prefer_ipv6, value.unwrap_or(false));
+            let output = NetworkConfig::new_from_config(&config).unwrap();
+            assert_eq!(output.prefer_ipv6, Some(value.unwrap_or(false)));
+        }
+    }
+
+    #[test]
+    fn prefer_ipv6_does_not_enable_disabled_ipv6() {
+        let input = NetworkConfig {
+            prefer_ipv6: Some(true),
+            disable_ipv6: Some(true),
+            ..standalone_config()
+        };
+        let config = input.gen_config().unwrap();
+        assert!(config.get_flags().prefer_ipv6);
+        assert!(!config.get_flags().enable_ipv6);
+        let output = NetworkConfig::new_from_config(&config).unwrap();
+        assert_eq!(output.prefer_ipv6, Some(true));
+        assert_eq!(output.disable_ipv6, Some(true));
     }
 
     #[test]
@@ -967,6 +1002,28 @@ mod tests {
         .unwrap();
 
         assert!(config.get_vpn_portal_config().is_none());
+    }
+
+    #[cfg(feature = "browser-config")]
+    #[test]
+    fn prefer_ipv6_browser_merge_can_clear_a_saved_preference() {
+        let original = "[flags]\nprefer_ipv6 = true\ndefault_protocol = \"udp\"\n";
+        let parsed = TomlConfigLoader::new_from_str(original).unwrap();
+        let mut input = NetworkConfig::new_from_config(&parsed).unwrap();
+        input.prefer_ipv6 = Some(false);
+        let merged = merge_network_config_toml(original, &input).unwrap();
+        let reloaded = TomlConfigLoader::new_from_str(&merged).unwrap();
+        assert!(!reloaded.get_flags().prefer_ipv6);
+        assert_eq!(reloaded.get_flags().default_protocol, "udp");
+
+        input.prefer_ipv6 = Some(true);
+        let merged = merge_network_config_toml(&merged, &input).unwrap();
+        assert!(
+            TomlConfigLoader::new_from_str(&merged)
+                .unwrap()
+                .get_flags()
+                .prefer_ipv6
+        );
     }
 
     #[cfg(feature = "browser-config")]

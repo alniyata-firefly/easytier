@@ -62,6 +62,19 @@ use crate::{
 
 pub type PeerConnId = uuid::Uuid;
 
+fn tunnel_uses_ipv6_underlay(info: &TunnelInfo) -> bool {
+    // Discovery keeps the requested domain in remote_addr. Only the resolved
+    // transport endpoint tells us the actual underlay family in that case.
+    info.resolved_remote_addr
+        .as_ref()
+        .or(info.remote_addr.as_ref())
+        .and_then(|endpoint| url::Url::parse(&endpoint.url).ok())
+        .is_some_and(|url| match url.host() {
+            Some(url::Host::Ipv6(ip)) => ip.to_ipv4_mapped().is_none(),
+            _ => false,
+        })
+}
+
 const MAGIC: u32 = 0xd1e1a5e1;
 const VERSION: u32 = 1;
 
@@ -459,6 +472,21 @@ impl PeerConn {
 
     pub fn is_closed(&self) -> bool {
         self.close_event_notifier.is_closed()
+    }
+
+    pub(crate) fn has_confirmed_liveness(&self) -> bool {
+        self.latency_stats.has_samples()
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_test_latency(&self, latency_us: u32) {
+        self.latency_stats.record_latency(latency_us);
+    }
+
+    pub(crate) fn uses_ipv6_underlay(&self) -> bool {
+        self.tunnel_info
+            .as_ref()
+            .is_some_and(tunnel_uses_ipv6_underlay)
     }
 
     async fn wait_handshake(&self, need_retry: &mut bool) -> Result<HandshakeRequest, Error> {
@@ -1538,6 +1566,45 @@ impl Drop for PeerConn {
 mod tests {
     use super::*;
     use crate::{peers::test_support::NoopPeerContext, tunnel::ring::create_ring_tunnel_pair};
+
+    #[test]
+    fn ipv6_underlay_uses_resolved_endpoint_and_rejects_mapped_ipv4() {
+        let mut info = TunnelInfo {
+            remote_addr: Some(
+                "tcp://example.invalid:22020"
+                    .parse::<url::Url>()
+                    .unwrap()
+                    .into(),
+            ),
+            resolved_remote_addr: Some(
+                "tcp://[2001:db8::1]:22020"
+                    .parse::<url::Url>()
+                    .unwrap()
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        assert!(tunnel_uses_ipv6_underlay(&info));
+        info.resolved_remote_addr =
+            Some("tcp://192.0.2.1:22020".parse::<url::Url>().unwrap().into());
+        assert!(!tunnel_uses_ipv6_underlay(&info));
+        info.resolved_remote_addr = Some(
+            "tcp://[::ffff:192.0.2.1]:22020"
+                .parse::<url::Url>()
+                .unwrap()
+                .into(),
+        );
+        assert!(!tunnel_uses_ipv6_underlay(&info));
+        info.resolved_remote_addr = None;
+        assert!(!tunnel_uses_ipv6_underlay(&info));
+        info.remote_addr = Some(
+            "udp://[2001:db8::1]:22020"
+                .parse::<url::Url>()
+                .unwrap()
+                .into(),
+        );
+        assert!(tunnel_uses_ipv6_underlay(&info));
+    }
 
     #[tokio::test]
     async fn connection_origin_determines_hole_punch_and_ping_policy() {

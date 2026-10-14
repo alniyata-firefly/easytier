@@ -117,6 +117,7 @@ pub fn compile(intent: &CentralNetworkIntent) -> Result<CompiledNetwork, Compile
                 .or(Some(24));
 
             let base_config = NetworkConfig {
+                prefer_ipv6: Some(intent.prefer_ipv6),
                 instance_id: Some(intent.id.to_string()),
                 dhcp: Some(address.is_none()),
                 virtual_ipv4: address.map(|address| address.to_string()),
@@ -191,6 +192,7 @@ fn apply_member_override(
         return base;
     };
     let mut merged = config_override.clone();
+    merged.prefer_ipv6 = merged.prefer_ipv6.or(base.prefer_ipv6);
     merged.instance_id = base.instance_id;
     merged.dhcp = base.dhcp;
     merged.virtual_ipv4 = base.virtual_ipv4;
@@ -852,6 +854,7 @@ mod tests {
             },
             virtual_cidr: Some("10.42.0.0/29".to_owned()),
             secure_mode: true,
+            prefer_ipv6: false,
             members: vec![temporary.clone(), member(1, "device-a", None)],
             credentials: vec![
                 credential("temporary", Some(temporary.id)),
@@ -1242,6 +1245,52 @@ mod tests {
             compile(&duplicate_public_key),
             Err(CompileError::InvalidMemberCredential { .. })
         ));
+    }
+
+    #[test]
+    fn global_prefer_ipv6_is_inherited_unless_a_member_explicitly_overrides_it() {
+        let mut intent = intent();
+        intent.prefer_ipv6 = true;
+        let compiled = compile(&intent).unwrap();
+        assert!(
+            compiled
+                .members
+                .iter()
+                .all(|member| { member.network_config.prefer_ipv6 == Some(true) })
+        );
+
+        intent.members[1].config_override = Some(NetworkConfig {
+            mtu: Some(1300),
+            ..Default::default()
+        });
+        let compiled = compile(&intent).unwrap();
+        let permanent = compiled
+            .members
+            .iter()
+            .find(|member| member.device_id == "device-a")
+            .unwrap();
+        assert_eq!(permanent.network_config.prefer_ipv6, Some(true));
+        assert_eq!(permanent.network_config.mtu, Some(1300));
+
+        intent.members[1]
+            .config_override
+            .as_mut()
+            .unwrap()
+            .prefer_ipv6 = Some(false);
+        let compiled = compile(&intent).unwrap();
+        let permanent = compiled
+            .members
+            .iter()
+            .find(|member| member.device_id == "device-a")
+            .unwrap();
+        let temporary = compiled
+            .members
+            .iter()
+            .find(|member| member.device_id == "device-b")
+            .unwrap();
+        assert_eq!(permanent.network_config.prefer_ipv6, Some(false));
+        assert_eq!(permanent.network_config.mtu, Some(1300));
+        assert_eq!(temporary.network_config.prefer_ipv6, Some(true));
     }
 
     #[test]
