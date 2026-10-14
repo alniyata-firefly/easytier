@@ -4,6 +4,7 @@
 //! only a secondary lookup used by the shared config-server listener.
 
 pub mod listener;
+pub mod shared_udp;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -193,11 +194,19 @@ impl GatewayRuntime for NativeGatewayRuntime {
 }
 
 #[derive(Default)]
-struct NativeGatewayRuntimeFactory;
+struct NativeGatewayRuntimeFactory {
+    shared_udp_control: Arc<shared_udp::SharedUdpControlEndpoints>,
+}
 
 impl GatewayRuntimeFactory for NativeGatewayRuntimeFactory {
     fn build(&self, spec: &GatewayRuntimeSpec) -> anyhow::Result<Arc<dyn GatewayRuntime>> {
         let config = TomlConfigLoader::default();
+        #[cfg(test)]
+        {
+            // Native integration tests exercise only local transport ownership.
+            config.set_stun_servers(Some(Vec::new()));
+            config.set_stun_servers_v6(Some(Vec::new()));
+        }
         config.set_inst_name(format!(
             "easytier-web-gw-{}-{}",
             spec.user_id, spec.network_id
@@ -243,9 +252,9 @@ impl GatewayRuntimeFactory for NativeGatewayRuntimeFactory {
             }));
         }
         config.set_managed_credentials(spec.credentials.clone());
-        Ok(Arc::new(NativeGatewayRuntime(create_native_instance(
-            config,
-        )?)))
+        let instance = create_native_instance(config)?;
+        instance.attach_shared_udp_control_source(self.shared_udp_control.clone());
+        Ok(Arc::new(NativeGatewayRuntime(instance)))
     }
 }
 
@@ -299,7 +308,20 @@ impl std::fmt::Debug for NetworkInstanceManager {
 
 impl NetworkInstanceManager {
     pub fn new(config: GatewayConfig) -> Self {
-        Self::with_factory(config, Arc::new(NativeGatewayRuntimeFactory))
+        Self::with_shared_udp_control(
+            config,
+            Arc::new(shared_udp::SharedUdpControlEndpoints::default()),
+        )
+    }
+
+    pub fn with_shared_udp_control(
+        config: GatewayConfig,
+        shared_udp_control: Arc<shared_udp::SharedUdpControlEndpoints>,
+    ) -> Self {
+        Self::with_factory(
+            config,
+            Arc::new(NativeGatewayRuntimeFactory { shared_udp_control }),
+        )
     }
 
     pub(crate) fn with_factory(
@@ -1023,6 +1045,218 @@ mod tests {
         assert!(factory.patched.lock().unwrap().last().unwrap().is_empty());
         assert_eq!(factory.built.lock().unwrap().len(), 1);
         assert!(factory.stopped.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn shared_web_udp_gateway_reverse_control_uses_actual_owner_and_revokes() {
+        use crate::FeatureFlags;
+        use crate::client_manager::{ClientManager, HeartbeatPolicy};
+        use easytier::proto::rpc::standalone::runtime_udp_tunnel_listener;
+        use easytier_core::{
+            connectivity::LocalListenerUrls as _, packet::UdpPacketType,
+            socket::udp::parse_udp_session_datagram, tunnel::ring::create_ring_tunnel_pair,
+        };
+        use easytier_proto::{
+            peer_rpc::{
+                DirectConnectorRpc, DirectConnectorRpcClientFactory, GetIpListRequest,
+                SendUdpHolePunchPacketRequest,
+            },
+            rpc_types::controller::BaseController,
+        };
+        use std::{net::SocketAddr, time::Duration};
+        use tokio::{net::UdpSocket, time::timeout};
+
+        for (bind_url, bind_addr, client_host, alias_host) in [
+            ("udp://0.0.0.0:0", "0.0.0.0:0", "127.0.0.1", "198.51.100.7"),
+            ("udp://[::]:0", "[::]:0", "[::1]", "[2001:db8::7]"),
+        ] {
+            let shared = Arc::new(shared_udp::SharedUdpControlEndpoints::default());
+            let alias: url::Url = format!("udp://{alias_host}:2862").parse().unwrap();
+            let instances = Arc::new(NetworkInstanceManager::with_shared_udp_control(
+                GatewayConfig {
+                    peer_url: alias.to_string(),
+                    relay_data: true,
+                },
+                shared.clone(),
+            ));
+            let mut intent = gateway_intent(Uuid::new_v4(), "shared-udp-owner-test");
+            intent.mode = NetworkMode::Gateway {
+                peer_url: alias.to_string(),
+            };
+            instances.reconcile(&intent).await;
+            let gateway = instances
+                .state
+                .read()
+                .await
+                .by_key
+                .get(&GatewayRuntimeKey::from_intent(&intent))
+                .unwrap()
+                .runtime
+                .peer_manager()
+                .unwrap();
+            let gateway_id = gateway.my_peer_id();
+
+            let mut web = ClientManager::new(
+                crate::db::Db::memory_db().await,
+                None,
+                HeartbeatPolicy::default(),
+                Arc::new(FeatureFlags::default()),
+                Arc::new(crate::webhook::WebhookConfig::new(
+                    None, None, None, None, None,
+                )),
+            );
+            let endpoints = shared.clone();
+            let actual = web
+                .add_listener_with_lifetime(
+                    listener::GatewayListener::new(
+                        runtime_udp_tunnel_listener(
+                            bind_url.parse().unwrap(),
+                            bind_addr.parse().unwrap(),
+                        ),
+                        instances.clone(),
+                    ),
+                    move |url| endpoints.register(url),
+                )
+                .await
+                .unwrap();
+            let actual_port = actual.port().unwrap();
+            assert_ne!(actual_port, 0);
+            assert_eq!(shared.local_listener_urls(), vec![actual]);
+
+            let config = TomlConfigLoader::default();
+            config.set_network_identity(NetworkIdentity::new(
+                intent.network_name.clone(),
+                intent.network_secret.clone(),
+            ));
+            config.set_listeners(Vec::new());
+            config.set_stun_servers(Some(Vec::new()));
+            config.set_stun_servers_v6(Some(Vec::new()));
+            let mut flags = config.get_flags();
+            flags.no_tun = true;
+            flags.disable_p2p = true;
+            flags.disable_upnp = true;
+            flags.bind_device = false;
+            config.set_flags(flags);
+            let client = create_native_instance(config).unwrap();
+            client.start().await.unwrap();
+            client
+                .add_connector(
+                    format!("udp://{client_host}:{actual_port}")
+                        .parse()
+                        .unwrap(),
+                )
+                .unwrap();
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    if client
+                        .peer_manager()
+                        .list_peer_snapshots()
+                        .await
+                        .iter()
+                        .any(|peer| peer.peer_id == gateway_id && !peer.conns.is_empty())
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the real shared Gateway listener must admit the client mesh");
+
+            let rpc = client
+                .peer_manager()
+                .get_peer_rpc_mgr()
+                .rpc_client()
+                .scoped_client::<DirectConnectorRpcClientFactory<BaseController>>(
+                client.peer_id(),
+                gateway_id,
+                intent.network_name.clone(),
+            );
+            let discovered = rpc
+                .get_ip_list(BaseController::default(), GetIpListRequest {})
+                .await
+                .unwrap();
+            assert_eq!(
+                discovered
+                    .listeners
+                    .into_iter()
+                    .map(url::Url::from)
+                    .filter(|url| url.scheme() == "udp")
+                    .collect::<Vec<_>>(),
+                vec![alias]
+            );
+            let receiver = UdpSocket::bind(format!("{client_host}:0")).await.unwrap();
+            let receiver_addr: SocketAddr = receiver.local_addr().unwrap();
+            let request = SendUdpHolePunchPacketRequest {
+                listener_port: 2862,
+                connector_addr: Some(receiver_addr.into()),
+                ..Default::default()
+            };
+            rpc.send_udp_hole_punch_packet(BaseController::default(), request.clone())
+                .await
+                .unwrap();
+            let mut buffer = [0; 128];
+            let (len, source) = timeout(Duration::from_secs(2), receiver.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+            let packet = parse_udp_session_datagram((&buffer[..len]).into(), false).unwrap();
+            assert_eq!(
+                packet.udp_tunnel_header().unwrap().msg_type,
+                UdpPacketType::HolePunch as u8
+            );
+            assert_eq!(source.port(), actual_port);
+            assert_eq!(source.is_ipv6(), receiver_addr.is_ipv6());
+
+            // Preserve an independent authenticated RPC path while the shared
+            // UDP owner is removed, so rejection is the lookup result rather
+            // than a disconnected management channel.
+            let (server_ring, client_ring) = create_ring_tunnel_pair();
+            let (admitted, connected) = tokio::join!(
+                gateway.add_tunnel_as_server(server_ring),
+                client.peer_manager().add_client_tunnel(client_ring),
+            );
+            admitted.unwrap();
+            assert_eq!(connected.unwrap().0, gateway_id);
+            for peers in [client.peer_manager().clone(), gateway.clone()] {
+                for peer in peers.list_peer_snapshots().await {
+                    for conn in peer.conns {
+                        if conn
+                            .tunnel
+                            .as_ref()
+                            .is_some_and(|tunnel| tunnel.tunnel_type == "udp")
+                        {
+                            peers
+                                .close_peer_conn(peer.peer_id, &conn.conn_id.parse().unwrap())
+                                .await
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+            // The same handler still works over the independent mesh path.
+            rpc.send_udp_hole_punch_packet(BaseController::default(), request.clone())
+                .await
+                .unwrap();
+            drop(web);
+            timeout(Duration::from_secs(1), async {
+                while !shared.local_listener_urls().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the shared listener owner must revoke its actual endpoint");
+            let rejected = rpc
+                .send_udp_hole_punch_packet(BaseController::default(), request)
+                .await
+                .unwrap_err();
+            assert!(
+                rejected.to_string().contains("has no running"),
+                "{rejected}"
+            );
+            client.stop().await;
+            instances.remove(intent.user_id, intent.id).await;
+        }
     }
 
     #[tokio::test]

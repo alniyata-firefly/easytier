@@ -8,6 +8,7 @@ use std::{
 use anyhow::Context;
 use async_trait::async_trait;
 use dashmap::DashSet;
+use futures::StreamExt;
 use quanta::Instant;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,8 @@ const IPV6_PORT_MAPPING_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_IPV6_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
 const MAX_UDP_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
 const MAX_UDP_HOLE_PUNCH_LISTENER_PORTS: usize = 16;
+const UDP_MAPPED_LISTENER_DNS_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_UDP_MAPPED_LISTENER_DNS_QUERIES: usize = 4;
 
 /// Give v6 a bounded head start. Once v4 has established it can already carry
 /// packets, while the bounded v6 attempt finishes and may upgrade that peer.
@@ -364,7 +367,8 @@ where
                         self.data.running_listeners.clone(),
                         self.data.options.udp_bind.context.clone(),
                         Some(self.data.stun.clone()),
-                    ),
+                    )
+                    .with_dns(self.data.dns.clone()),
                 ),
                 self.data.peer_manager.network_name(),
             );
@@ -389,7 +393,8 @@ where
                         self.data.running_listeners.clone(),
                         self.data.options.udp_bind.context.clone(),
                         Some(self.data.stun.clone()),
-                    ),
+                    )
+                    .with_dns(self.data.dns.clone()),
                 ),
                 self.data.peer_manager.network_name(),
             );
@@ -1252,6 +1257,7 @@ where
     socket_context: SocketContext,
     foreign_network: bool,
     stun: Option<Arc<dyn StunInfoProvider>>,
+    dns: Option<Arc<dyn DnsResolver>>,
 }
 
 impl<H> Clone for DirectConnectorRpcHandler<H>
@@ -1266,6 +1272,7 @@ where
             socket_context: self.socket_context.clone(),
             foreign_network: self.foreign_network,
             stun: self.stun.clone(),
+            dns: self.dns.clone(),
         }
     }
 }
@@ -1287,6 +1294,7 @@ where
             socket_context,
             foreign_network: true,
             stun,
+            dns: None,
         }
     }
 
@@ -1304,7 +1312,13 @@ where
             socket_context,
             foreign_network: false,
             stun,
+            dns: None,
         }
+    }
+
+    fn with_dns(mut self, dns: Arc<dyn DnsResolver>) -> Self {
+        self.dns = Some(dns);
+        self
     }
 }
 
@@ -1359,6 +1373,7 @@ where
     host: Arc<H>,
     stun: Arc<dyn StunInfoProvider>,
     running_listeners: Arc<dyn LocalListenerUrls>,
+    dns: Option<Arc<dyn DnsResolver>>,
 }
 
 impl<H> ForeignDirectConnectorRpcRegistrar<H>
@@ -1374,7 +1389,13 @@ where
             host,
             stun,
             running_listeners,
+            dns: None,
         }
+    }
+
+    pub fn with_dns(mut self, dns: Arc<dyn DnsResolver>) -> Self {
+        self.dns = Some(dns);
+        self
     }
 }
 
@@ -1388,15 +1409,17 @@ where
         network_name: &str,
         socket_context: SocketContext,
     ) {
+        let mut handler = DirectConnectorRpcHandler::new_for_foreign_network_with_stun(
+            self.host.clone(),
+            socket_context,
+            Some(self.stun.clone()),
+            self.running_listeners.clone(),
+        );
+        if let Some(dns) = &self.dns {
+            handler = handler.with_dns(dns.clone());
+        }
         peer_rpc.rpc_server().registry().register(
-            GeneratedDirectConnectorRpcServer::new(
-                DirectConnectorRpcHandler::new_for_foreign_network_with_stun(
-                    self.host.clone(),
-                    socket_context,
-                    Some(self.stun.clone()),
-                    self.running_listeners.clone(),
-                ),
-            ),
+            GeneratedDirectConnectorRpcServer::new(handler),
             network_name,
         );
     }
@@ -1453,12 +1476,15 @@ where
         } else {
             IpVersion::V4
         };
-        let listener_ports = udp_hole_punch_listener_ports(
+        let listener_ports = udp_hole_punch_listener_ports_with_dns(
             listener_port,
             family,
-            &self.running_listeners.local_listener_urls(),
-            &self.host.mapped_listeners(),
-        )?;
+            self.running_listeners.as_ref(),
+            || self.host.mapped_listeners(),
+            self.socket_context.clone(),
+            self.dns.as_deref(),
+        )
+        .await?;
         let peer_manager = self.peer_manager.as_ref().and_then(Weak::upgrade);
         let preferred_source = match preferred_src_ipv6.map(Ipv6Addr::from) {
             Some(ip) => {
@@ -1519,6 +1545,126 @@ where
     }
 }
 
+fn same_family_udp_listener(url: &Url, family: IpVersion) -> bool {
+    url.scheme() == "udp"
+        && matches!(
+            (literal_url_ip(url), family),
+            (Some(IpAddr::V4(_)), IpVersion::V4) | (Some(IpAddr::V6(_)), IpVersion::V6)
+        )
+}
+
+fn actual_udp_listener_ports(running_listeners: &[Url], family: IpVersion) -> BTreeSet<u16> {
+    running_listeners
+        .iter()
+        .filter(|url| same_family_udp_listener(url, family))
+        .filter_map(mapped_listener_port)
+        .filter(|port| *port != 0)
+        .collect()
+}
+
+async fn udp_hole_punch_listener_ports_with_dns<F>(
+    requested_port: u16,
+    family: IpVersion,
+    running_listeners: &dyn LocalListenerUrls,
+    mapped_listeners: F,
+    context: SocketContext,
+    dns: Option<&dyn DnsResolver>,
+) -> anyhow::Result<Vec<u16>>
+where
+    F: Fn() -> Vec<Url> + Send + Sync,
+{
+    let running = running_listeners.udp_control_listener_urls();
+    let mapped = mapped_listeners();
+    let initial_error =
+        match udp_hole_punch_listener_ports(requested_port, family, &running, &mapped) {
+            Ok(ports) => return Ok(ports),
+            Err(error) => error,
+        };
+    // DNS may identify the family of an administrator's alias, but cannot
+    // create a socket owner or authorize a port absent from configuration.
+    let actual_ports = actual_udp_listener_ports(&running, family);
+    if actual_ports.is_empty() || actual_ports.len() > MAX_UDP_HOLE_PUNCH_LISTENER_PORTS {
+        return Err(initial_error);
+    }
+    let aliases = mapped
+        .into_iter()
+        .filter(|url| {
+            url.scheme() == "udp"
+                && requested_port != 0
+                && mapped_listener_port(url) == Some(requested_port)
+                && literal_url_ip(url).is_none()
+                && matches!(url.host(), Some(Host::Domain(_)))
+        })
+        .collect::<Vec<_>>();
+    let Some(dns) = dns.filter(|_| !aliases.is_empty()) else {
+        return Err(initial_error);
+    };
+    crate::foundation::time::timeout(UDP_MAPPED_LISTENER_DNS_TIMEOUT, async {
+        let mut resolutions = futures::stream::iter(aliases)
+            .map(|alias| {
+                let context = context.clone().with_ip_version(family);
+                let mapped_listeners = &mapped_listeners;
+                async move {
+                    let current_ports = actual_udp_listener_ports(
+                        &running_listeners.udp_control_listener_urls(),
+                        family,
+                    );
+                    if current_ports.is_empty()
+                        || current_ports.len() > MAX_UDP_HOLE_PUNCH_LISTENER_PORTS
+                        || !mapped_listeners().contains(&alias)
+                    {
+                        return None;
+                    }
+                    let addrs = resolve_url_addrs(&alias, requested_port, context, dns).await;
+                    Some((alias, addrs))
+                }
+            })
+            .buffer_unordered(MAX_UDP_MAPPED_LISTENER_DNS_QUERIES);
+        while let Some(resolution) = resolutions.next().await {
+            let current_ports =
+                actual_udp_listener_ports(&running_listeners.udp_control_listener_urls(), family);
+            if current_ports.is_empty() || current_ports.len() > MAX_UDP_HOLE_PUNCH_LISTENER_PORTS {
+                return Err(initial_error);
+            }
+            let Some((alias, Ok(addrs))) = resolution else {
+                continue;
+            };
+            let mut literals = Vec::new();
+            for addr in addrs {
+                if matches!(addr.ip(), IpAddr::V6(ip) if ip.to_ipv4_mapped().is_some()) {
+                    continue;
+                }
+                let mut literal = alias.clone();
+                literal
+                    .set_ip_host(addr.ip())
+                    .expect("IP is a valid URL host");
+                if same_family_udp_listener(&literal, family) {
+                    literals.push(literal);
+                }
+            }
+            if literals.is_empty() {
+                continue;
+            }
+            // Both the socket owner and its alias may disappear during DNS.
+            // A valid alias suffices; do not wait for unrelated slower aliases.
+            let mut current_mapped = mapped_listeners();
+            if !current_mapped.contains(&alias) {
+                continue;
+            }
+            current_mapped.extend(literals);
+            return udp_hole_punch_listener_ports(
+                requested_port,
+                family,
+                &running_listeners.udp_control_listener_urls(),
+                &current_mapped,
+            );
+        }
+        Err(initial_error)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("configured UDP mapped listener DNS resolution timed out"))?
+}
+
 fn udp_hole_punch_listener_ports(
     requested_port: u16,
     family: IpVersion,
@@ -1529,25 +1675,14 @@ fn udp_hole_punch_listener_ports(
         requested_port != 0,
         "UDP punch listener port must be nonzero"
     );
-    let same_family_udp = |url: &Url| {
-        url.scheme() == "udp"
-            && matches!(
-                (literal_url_ip(url), family),
-                (Some(IpAddr::V4(_)), IpVersion::V4) | (Some(IpAddr::V6(_)), IpVersion::V6)
-            )
-    };
-    let actual_ports = running_listeners
-        .iter()
-        .filter(|url| same_family_udp(url))
-        .filter_map(mapped_listener_port)
-        .filter(|port| *port != 0)
-        .collect::<BTreeSet<_>>();
+    let actual_ports = actual_udp_listener_ports(running_listeners, family);
     if actual_ports.contains(&requested_port) {
         return Ok(vec![requested_port]);
     }
     anyhow::ensure!(
         mapped_listeners.iter().any(|url| {
-            same_family_udp(url) && mapped_listener_port(url) == Some(requested_port)
+            same_family_udp_listener(url, family)
+                && mapped_listener_port(url) == Some(requested_port)
         }),
         "UDP punch port {requested_port} is not a known {family:?} listener or mapped advertisement"
     );
@@ -1574,6 +1709,29 @@ pub async fn send_udp_hole_punch_packet_for_test<H>(
 where
     H: DirectConnectorHost,
 {
+    send_udp_hole_punch_packet_with_dns_for_test(
+        host,
+        running_listeners,
+        socket_context,
+        request,
+        foreign_network,
+        None,
+    )
+    .await
+}
+
+#[cfg(feature = "test-utils")]
+pub async fn send_udp_hole_punch_packet_with_dns_for_test<H>(
+    host: Arc<H>,
+    running_listeners: Vec<Url>,
+    socket_context: SocketContext,
+    request: SendUdpHolePunchPacketRequest,
+    foreign_network: bool,
+    dns: Option<Arc<dyn DnsResolver>>,
+) -> rpc_types::error::Result<Void>
+where
+    H: DirectConnectorHost,
+{
     #[derive(Debug)]
     struct TestListeners(Vec<Url>);
     impl LocalListenerUrls for TestListeners {
@@ -1582,7 +1740,7 @@ where
         }
     }
     let listeners = Arc::new(TestListeners(running_listeners));
-    let handler = if foreign_network {
+    let mut handler = if foreign_network {
         DirectConnectorRpcHandler::new_for_foreign_network_with_stun(
             host,
             socket_context,
@@ -1598,6 +1756,9 @@ where
             None,
         )
     };
+    if let Some(dns) = dns {
+        handler = handler.with_dns(dns);
+    }
     handler
         .send_udp_hole_punch_packet(BaseController::default(), request)
         .await
@@ -1900,6 +2061,7 @@ mod tests {
                 socket_context,
                 foreign_network: false,
                 stun,
+                dns: None,
             }
         }
     }
@@ -2019,6 +2181,307 @@ mod tests {
             udp_hole_punch_listener_ports(40016, IpVersion::V6, &running, &mapped).unwrap(),
             vec![40016]
         );
+    }
+
+    #[derive(Debug, Default)]
+    struct AliasTestListeners(std::sync::Mutex<Vec<Url>>);
+
+    impl LocalListenerUrls for AliasTestListeners {
+        fn local_listener_urls(&self) -> Vec<Url> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    #[derive(Default)]
+    struct AliasTestDns {
+        addrs: Vec<IpAddr>,
+        fail: bool,
+        queries: std::sync::Mutex<Vec<crate::host::dns::DnsQuery>>,
+        entered: tokio::sync::Notify,
+        release: Option<Arc<tokio::sync::Notify>>,
+        pending_host: Option<String>,
+    }
+
+    #[async_trait]
+    impl DnsResolver for AliasTestDns {
+        async fn resolve(&self, query: crate::host::dns::DnsQuery) -> anyhow::Result<Vec<IpAddr>> {
+            let pending = self.pending_host.as_deref() == Some(query.host.as_str());
+            self.queries.lock().unwrap().push(query);
+            self.entered.notify_one();
+            if pending {
+                return std::future::pending().await;
+            }
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
+            anyhow::ensure!(!self.fail, "injected DNS failure");
+            Ok(self.addrs.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_punch_fqdn_uses_requested_family_and_returns_before_slow_alias() {
+        for (family, expected_port) in [(IpVersion::V4, 40000), (IpVersion::V6, 40001)] {
+            let running = AliasTestListeners(std::sync::Mutex::new(
+                ["udp://0.0.0.0:40000", "udp://[::]:40001"]
+                    .map(|url| url.parse().unwrap())
+                    .to_vec(),
+            ));
+            let mapped = [
+                "tcp://ignored.example:2862",
+                "udp://other-port.example:2863",
+                "udp://gw.example:2862",
+                "udp://slow.example:2862",
+            ]
+            .map(|url| url.parse().unwrap())
+            .to_vec();
+            let dns = AliasTestDns {
+                addrs: ["198.51.100.7", "2001:db8::7"]
+                    .map(|ip| ip.parse().unwrap())
+                    .to_vec(),
+                pending_host: Some("slow.example".to_owned()),
+                ..Default::default()
+            };
+            let context = SocketContext::default()
+                .with_socket_mark(Some(19))
+                .with_netns(Some(crate::socket::NetNamespace::new("alias-test")));
+            assert_eq!(
+                udp_hole_punch_listener_ports_with_dns(
+                    2862,
+                    family,
+                    &running,
+                    || mapped.clone(),
+                    context.clone(),
+                    Some(&dns),
+                )
+                .await
+                .unwrap(),
+                vec![expected_port],
+            );
+            let queries = dns.queries.lock().unwrap();
+            assert!(queries.iter().any(|query| query.host == "gw.example"));
+            assert!(queries.iter().all(|query| {
+                ["gw.example", "slow.example"].contains(&query.host.as_str())
+                    && query.context == context.clone().with_ip_version(family)
+            }));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn udp_punch_fqdn_slow_first_alias_does_not_block_valid_second() {
+        let running = AliasTestListeners(std::sync::Mutex::new(vec![
+            "udp://[::]:40000".parse().unwrap(),
+        ]));
+        let mapped = ["udp://slow.example:2862", "udp://gw.example:2862"]
+            .map(|url| url.parse().unwrap())
+            .to_vec();
+        let dns = AliasTestDns {
+            addrs: vec!["2001:db8::7".parse().unwrap()],
+            pending_host: Some("slow.example".to_owned()),
+            ..Default::default()
+        };
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            udp_hole_punch_listener_ports_with_dns(
+                2862,
+                IpVersion::V6,
+                &running,
+                || mapped.clone(),
+                SocketContext::default(),
+                Some(&dns),
+            )
+            .await
+            .unwrap(),
+            vec![40000]
+        );
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        let queries = dns.queries.lock().unwrap();
+        assert!(queries.iter().any(|query| query.host == "slow.example"));
+        assert!(queries.iter().any(|query| query.host == "gw.example"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn udp_punch_fqdn_queries_have_bounded_concurrency() {
+        let running = AliasTestListeners(std::sync::Mutex::new(vec![
+            "udp://[::]:40000".parse().unwrap(),
+        ]));
+        let mapped = (0..MAX_UDP_MAPPED_LISTENER_DNS_QUERIES + 2)
+            .map(|index| format!("udp://gw{index}.example:2862").parse().unwrap())
+            .collect::<Vec<_>>();
+        let dns = AliasTestDns {
+            release: Some(Arc::new(tokio::sync::Notify::new())),
+            ..Default::default()
+        };
+        assert!(
+            udp_hole_punch_listener_ports_with_dns(
+                2862,
+                IpVersion::V6,
+                &running,
+                || mapped.clone(),
+                SocketContext::default(),
+                Some(&dns),
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("timed out")
+        );
+        assert_eq!(
+            dns.queries.lock().unwrap().len(),
+            MAX_UDP_MAPPED_LISTENER_DNS_QUERIES
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_punch_fqdn_skips_dns_for_exact_literal_unknown_and_missing_owners() {
+        let alias: Url = "udp://gw.example:2862".parse().unwrap();
+        let local: Url = "udp://[::]:40000".parse().unwrap();
+        for (requested, running, mapped, succeeds) in [
+            (40000, vec![local.clone()], vec![alias.clone()], true),
+            (
+                2862,
+                vec![local.clone()],
+                vec!["udp://[2001:db8::7]:2862".parse().unwrap()],
+                true,
+            ),
+            (2863, vec![local.clone()], vec![alias.clone()], false),
+            (2862, vec![], vec![alias.clone()], false),
+            (
+                2862,
+                vec!["udp://0.0.0.0:40000".parse().unwrap()],
+                vec![alias.clone()],
+                false,
+            ),
+            (
+                2862,
+                vec![local.clone()],
+                vec!["tcp://gw.example:2862".parse().unwrap()],
+                false,
+            ),
+            (
+                2862,
+                (40000..40017)
+                    .map(|port| format!("udp://[::]:{port}").parse().unwrap())
+                    .collect(),
+                vec![alias],
+                false,
+            ),
+        ] {
+            let dns = AliasTestDns::default();
+            let running = AliasTestListeners(std::sync::Mutex::new(running));
+            assert_eq!(
+                udp_hole_punch_listener_ports_with_dns(
+                    requested,
+                    IpVersion::V6,
+                    &running,
+                    || mapped.clone(),
+                    SocketContext::default(),
+                    Some(&dns),
+                )
+                .await
+                .is_ok(),
+                succeeds,
+            );
+            assert!(dns.queries.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_punch_fqdn_rejects_dns_errors_and_missing_actual_family() {
+        let running = AliasTestListeners(std::sync::Mutex::new(vec![
+            "udp://[::]:40000".parse().unwrap(),
+        ]));
+        let mapped = vec!["udp://gw.example:2862".parse().unwrap()];
+        for (addrs, fail) in [
+            (Vec::new(), false),
+            (vec!["198.51.100.7".parse().unwrap()], false),
+            (vec!["::ffff:198.51.100.7".parse().unwrap()], false),
+            (vec!["2001:db8::7".parse().unwrap()], true),
+        ] {
+            let dns = AliasTestDns {
+                addrs,
+                fail,
+                ..Default::default()
+            };
+            assert!(
+                udp_hole_punch_listener_ports_with_dns(
+                    2862,
+                    IpVersion::V6,
+                    &running,
+                    || mapped.clone(),
+                    SocketContext::default(),
+                    Some(&dns),
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(dns.queries.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_punch_fqdn_rechecks_owner_and_mapping_after_dns() {
+        for revoke_owner in [true, false] {
+            let running = Arc::new(AliasTestListeners(std::sync::Mutex::new(vec![
+                "udp://[::]:40000".parse().unwrap(),
+            ])));
+            let mapped = Arc::new(std::sync::Mutex::new(vec![
+                "udp://gw.example:2862".parse().unwrap(),
+            ]));
+            let release = Arc::new(tokio::sync::Notify::new());
+            let dns = Arc::new(AliasTestDns {
+                addrs: vec!["2001:db8::7".parse().unwrap()],
+                release: Some(release.clone()),
+                ..Default::default()
+            });
+            let lookup = {
+                let (running, mapped, dns) = (running.clone(), mapped.clone(), dns.clone());
+                tokio::spawn(async move {
+                    udp_hole_punch_listener_ports_with_dns(
+                        2862,
+                        IpVersion::V6,
+                        running.as_ref(),
+                        || mapped.lock().unwrap().clone(),
+                        SocketContext::default(),
+                        Some(dns.as_ref()),
+                    )
+                    .await
+                })
+            };
+            dns.entered.notified().await;
+            if revoke_owner {
+                running.0.lock().unwrap().clear();
+            } else {
+                mapped.lock().unwrap().clear();
+            }
+            release.notify_one();
+            assert!(lookup.await.unwrap().is_err());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn udp_punch_fqdn_dns_has_one_bounded_budget() {
+        let running = AliasTestListeners(std::sync::Mutex::new(vec![
+            "udp://[::]:40000".parse().unwrap(),
+        ]));
+        let mapped = vec!["udp://gw.example:2862".parse().unwrap()];
+        let dns = AliasTestDns {
+            pending_host: Some("gw.example".to_owned()),
+            ..Default::default()
+        };
+        let started = tokio::time::Instant::now();
+        let result = udp_hole_punch_listener_ports_with_dns(
+            2862,
+            IpVersion::V6,
+            &running,
+            || mapped.clone(),
+            SocketContext::default(),
+            Some(&dns),
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        assert_eq!(started.elapsed(), UDP_MAPPED_LISTENER_DNS_TIMEOUT);
+        assert_eq!(dns.queries.lock().unwrap().len(), 1);
     }
 
     #[test]

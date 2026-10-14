@@ -192,10 +192,24 @@ impl ClientManager {
 
     pub async fn add_listener<L: SocketListener<Accepted = Box<dyn Tunnel>> + 'static>(
         &mut self,
-        mut listener: L,
+        listener: L,
     ) -> Result<url::Url, anyhow::Error> {
+        self.add_listener_with_lifetime(listener, |_| ()).await
+    }
+
+    pub async fn add_listener_with_lifetime<L, F, G>(
+        &mut self,
+        mut listener: L,
+        on_bound: F,
+    ) -> Result<url::Url, anyhow::Error>
+    where
+        L: SocketListener<Accepted = Box<dyn Tunnel>> + 'static,
+        F: FnOnce(&url::Url) -> G,
+        G: Send + 'static,
+    {
         listener.listen().await?;
         let local_url = listener.local_url();
+        let listener_lifetime = on_bound(&local_url);
         self.listeners_cnt.fetch_add(1, Ordering::Relaxed);
         let sessions = self.client_sessions.clone();
         let storage = self.storage.weak_ref();
@@ -206,6 +220,7 @@ impl ClientManager {
         let feature_flags = self.feature_flags.clone();
         let webhook_config = self.webhook_config.clone();
         self.tasks.spawn(async move {
+            let _listener_lifetime = listener_lifetime;
             let mut handshakes = JoinSet::new();
             'accept: loop {
                 // Some listeners include a WebSocket upgrade in accept(). Keep

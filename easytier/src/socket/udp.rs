@@ -205,13 +205,14 @@ impl VirtualUdpSocketFactory for RuntimeUdpSocketFactory {
 #[cfg(test)]
 mod tests {
     use easytier_core::{
-        connectivity::direct::send_udp_hole_punch_packet_for_test,
+        connectivity::direct::send_udp_hole_punch_packet_with_dns_for_test,
+        host::dns::{DnsQuery, DnsResolver},
         packet::UdpPacketType,
-        socket::SocketListener,
         socket::udp::{
             UdpSessionLayer, UdpSessionListenRequest, UdpSessionSocket, parse_udp_session_datagram,
             send_v4_hole_punch_control_packet, send_v6_hole_punch_control_packet,
         },
+        socket::{IpVersion, SocketListener},
     };
 
     use crate::{
@@ -371,6 +372,31 @@ mod tests {
 
     #[tokio::test]
     async fn mapped_udp_listener_port_forwards_punch_and_preserves_native_handshake() {
+        verify_mapped_udp_listener_control(false).await;
+    }
+
+    #[tokio::test]
+    async fn fqdn_mapped_udp_listener_port_forwards_punch_and_preserves_native_handshake() {
+        verify_mapped_udp_listener_control(true).await;
+    }
+
+    #[derive(Default)]
+    struct GatewayAliasDns {
+        queries: std::sync::Mutex<Vec<DnsQuery>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DnsResolver for GatewayAliasDns {
+        async fn resolve(&self, query: DnsQuery) -> anyhow::Result<Vec<IpAddr>> {
+            self.queries.lock().unwrap().push(query);
+            Ok(vec![
+                "198.51.100.10".parse().unwrap(),
+                "2001:db8::7".parse().unwrap(),
+            ])
+        }
+    }
+
+    async fn verify_mapped_udp_listener_control(use_dns_alias: bool) {
         for foreign_network in [false, true] {
             for (listener_url, bind_addr, receiver_bind, mapped_host) in [
                 (
@@ -392,6 +418,11 @@ mod tests {
                 listener.listen().await.unwrap();
                 let actual_port = listener.local_url().port().unwrap();
                 let alias_port: u16 = if actual_port == 2862 { 2863 } else { 2862 };
+                let mapped_host = if use_dns_alias {
+                    "gw.example"
+                } else {
+                    mapped_host
+                };
                 let alias: url::Url = format!("udp://{mapped_host}:{alias_port}").parse().unwrap();
                 let config = TomlConfigLoader::default();
                 config.set_mapped_listeners(Some(vec![alias]));
@@ -400,20 +431,44 @@ mod tests {
                     UdpSocket::bind(receiver_bind).await.unwrap(),
                 )));
                 let receiver_addr = receiver.local_addr().unwrap();
+                let dns = Arc::new(GatewayAliasDns::default());
+                let resolver: Arc<dyn DnsResolver> = dns.clone();
+                let context = SocketContext::default();
 
-                send_udp_hole_punch_packet_for_test(
+                send_udp_hole_punch_packet_with_dns_for_test(
                     host,
                     vec![listener.local_url()],
-                    SocketContext::default(),
+                    context.clone(),
                     SendUdpHolePunchPacketRequest {
                         connector_addr: Some(receiver_addr.into()),
                         listener_port: u32::from(alias_port),
                         ..Default::default()
                     },
                     foreign_network,
+                    use_dns_alias.then_some(resolver),
                 )
                 .await
                 .unwrap();
+
+                let queries = dns.queries.lock().unwrap();
+                if use_dns_alias {
+                    let family = if receiver_addr.is_ipv6() {
+                        IpVersion::V6
+                    } else {
+                        IpVersion::V4
+                    };
+                    let expected_context = context.with_ip_version(family);
+                    assert!(
+                        !queries.is_empty(),
+                        "the configured FQDN alias must be resolved"
+                    );
+                    assert!(queries.iter().all(|query| {
+                        query.host == "gw.example" && query.context == expected_context
+                    }));
+                } else {
+                    assert!(queries.is_empty());
+                }
+                drop(queries);
 
                 let mut buf = [0; 128];
                 let (len, source) = tokio::time::timeout(

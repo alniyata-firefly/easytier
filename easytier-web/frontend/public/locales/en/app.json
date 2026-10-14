@@ -1,0 +1,55 @@
+{
+  "documentTitle": "EasyTier Network Console",
+  "consoleCaption": "Network console",
+  "console": "Console",
+  "fontNotices": "Fonts and licenses",
+  "nav": {
+    "overview": "Overview",
+    "networks": "Networks",
+    "devices": "Devices",
+    "tokens": "Management tokens",
+    "primary": "Main navigation",
+    "title": "Navigation",
+    "open": "Open navigation",
+    "close": "Close navigation",
+    "skip": "Skip to main content",
+    "networkDetail": "Network details",
+    "deviceDetail": "Device details"
+  },
+  "scope": { "central": "Central management", "external": "External management" },
+  "connection": { "checking": "Connecting to console", "retry": "Reconnect" },
+  "page": {
+    "loading": "Loading page",
+    "failed": "The page could not be displayed. Reload to try again.",
+    "reload": "Reload page",
+    "invalidLink": "This link is invalid. Open the page from navigation."
+  },
+  "password": {
+    "title": "Change password",
+    "new": "New password",
+    "confirm": "Confirm new password",
+    "mismatch": "The passwords do not match.",
+    "changed": "Password changed."
+  },
+  "auth": {
+    "title": "Sign in to console",
+    "login": "Sign in",
+    "logout": "Sign out",
+    "register": "Create account",
+    "loginHint": "Sign in with your console account.",
+    "registerHint": "Sign in after creating your account.",
+    "username": "Username",
+    "password": "Password",
+    "captcha": "Verification code",
+    "refreshCaptcha": "Refresh verification code",
+    "sso": "Sign in with SSO",
+    "hasAccount": "Already have an account?",
+    "noAccount": "Need an account?",
+    "backToLogin": "Back to sign in",
+    "created": "Account created. Sign in to continue.",
+    "errors": {
+      "registration": "Registration failed. Check your username, password and verification code.",
+      "login": "Sign-in failed. Check your username and password."
+    }
+  }
+}

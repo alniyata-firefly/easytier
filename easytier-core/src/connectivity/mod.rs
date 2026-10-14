@@ -24,6 +24,12 @@ pub mod transport;
 /// query rather than on the listener module's concrete registry type.
 pub trait LocalListenerUrls: Debug + Send + Sync + 'static {
     fn local_listener_urls(&self) -> Vec<Url>;
+
+    /// Actual UDP endpoints eligible for local reverse-punch control. A Host
+    /// may lend a shared socket without advertising it as this instance's own.
+    fn udp_control_listener_urls(&self) -> Vec<Url> {
+        self.local_listener_urls()
+    }
 }
 
 /// Empty [`LocalListenerUrls`] for connectors that track no listeners.

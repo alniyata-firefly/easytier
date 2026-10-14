@@ -59,6 +59,19 @@ where
         self.running_listeners.running_listeners()
     }
 
+    /// Lends actual Host-owned UDP endpoints to reverse-punch control without
+    /// changing this instance's listeners or discovery advertisements. The
+    /// provider must report only successfully bound sockets and remove each
+    /// endpoint when its socket owner stops; configuration URLs are not proof
+    /// of a running listener.
+    pub fn attach_shared_udp_control_source(
+        &self,
+        source: Arc<dyn crate::connectivity::LocalListenerUrls>,
+    ) {
+        self.running_listeners
+            .attach_shared_udp_control_source(source);
+    }
+
     pub fn peer_id(&self) -> crate::config::PeerId {
         self.peer_manager.my_peer_id()
     }

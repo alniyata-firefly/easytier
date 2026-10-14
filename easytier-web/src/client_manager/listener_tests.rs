@@ -1,11 +1,13 @@
 use super::*;
 
 use easytier::proto::rpc::standalone::{
-    RuntimeRpcListener, runtime_rpc_dialer, runtime_rpc_listener,
+    RuntimeRpcListener, runtime_rpc_dialer, runtime_rpc_listener, runtime_udp_tunnel_listener,
 };
-use easytier_core::connectivity::protocol::raw::TunnelDialer;
+use easytier_core::connectivity::{LocalListenerUrls, protocol::raw::TunnelDialer};
 use std::sync::atomic::AtomicUsize;
 use tokio::{io::AsyncReadExt, net::TcpStream, sync::Notify, time::timeout};
+
+use crate::central_network::gateway::shared_udp::SharedUdpControlEndpoints;
 
 #[derive(Debug)]
 struct TestListener {
@@ -59,6 +61,138 @@ async fn manager() -> ClientManager {
             None, None, None, None, None,
         )),
     )
+}
+
+fn udp_control_listener() -> impl SocketListener<Accepted = Box<dyn Tunnel>> {
+    runtime_udp_tunnel_listener(
+        "udp://127.0.0.1:0".parse().unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+}
+
+#[derive(Debug)]
+struct OwnerTestListener {
+    inner: Box<dyn SocketListener<Accepted = Box<dyn Tunnel>>>,
+    fail_listen: bool,
+    stop_accept: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl SocketListener for OwnerTestListener {
+    type Accepted = Box<dyn Tunnel>;
+
+    async fn listen(&mut self) -> anyhow::Result<()> {
+        if self.fail_listen {
+            anyhow::bail!("test listener bind failed");
+        }
+        self.inner.listen().await
+    }
+
+    async fn accept(&mut self) -> anyhow::Result<Self::Accepted> {
+        self.stop_accept.notified().await;
+        anyhow::bail!("test listener accept ended")
+    }
+
+    fn local_url(&self) -> url::Url {
+        self.inner.local_url()
+    }
+}
+
+#[tokio::test]
+async fn failed_listener_family_does_not_publish_or_block_other_family() {
+    let mut manager = manager().await;
+    let endpoints = Arc::new(SharedUdpControlEndpoints::default());
+    let callback_calls = AtomicUsize::new(0);
+    let result = manager
+        .add_listener_with_lifetime(
+            OwnerTestListener {
+                inner: Box::new(runtime_udp_tunnel_listener(
+                    "udp://[::1]:0".parse().unwrap(),
+                    "[::1]:0".parse().unwrap(),
+                )),
+                fail_listen: true,
+                stop_accept: Arc::new(Notify::new()),
+            },
+            |actual_url| {
+                callback_calls.fetch_add(1, Ordering::SeqCst);
+                endpoints.register(actual_url)
+            },
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(callback_calls.load(Ordering::SeqCst), 0);
+    assert!(endpoints.local_listener_urls().is_empty());
+    assert!(!manager.is_running());
+    let actual_v4 = manager
+        .add_listener_with_lifetime(udp_control_listener(), |url| {
+            callback_calls.fetch_add(1, Ordering::SeqCst);
+            endpoints.register(url)
+        })
+        .await
+        .unwrap();
+    assert_eq!(callback_calls.load(Ordering::SeqCst), 1);
+    assert_ne!(actual_v4.port(), Some(0));
+    assert_eq!(actual_v4.host_str(), Some("127.0.0.1"));
+    assert_eq!(endpoints.local_listener_urls(), vec![actual_v4]);
+}
+
+#[tokio::test]
+async fn listener_accept_exit_revokes_its_control_endpoint() {
+    let mut manager = manager().await;
+    let endpoints = Arc::new(SharedUdpControlEndpoints::default());
+    let stop_accept = Arc::new(Notify::new());
+    let owner = endpoints.clone();
+    let actual_url = manager
+        .add_listener_with_lifetime(
+            OwnerTestListener {
+                inner: Box::new(udp_control_listener()),
+                fail_listen: false,
+                stop_accept: stop_accept.clone(),
+            },
+            move |url| owner.register(url),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(actual_url.port(), Some(0));
+    assert_eq!(endpoints.local_listener_urls(), vec![actual_url]);
+    stop_accept.notify_one();
+    wait_until(|| endpoints.local_listener_urls().is_empty() && !manager.is_running()).await;
+}
+
+#[tokio::test]
+async fn manager_drop_revokes_a_bound_control_endpoint_before_task_poll() {
+    let mut manager = manager().await;
+    let endpoints = Arc::new(SharedUdpControlEndpoints::default());
+    let owner = endpoints.clone();
+    let actual_url = manager
+        .add_listener_with_lifetime(udp_control_listener(), move |url| owner.register(url))
+        .await
+        .unwrap();
+
+    assert_ne!(actual_url.port(), Some(0));
+    assert_eq!(endpoints.local_listener_urls(), vec![actual_url]);
+    // Do not yield after the task is spawned: its capture must own the lease
+    // even when the listener accept future has never been polled.
+    drop(manager);
+    wait_until(|| endpoints.local_listener_urls().is_empty()).await;
+}
+
+#[tokio::test]
+async fn aborted_listener_task_revokes_its_control_endpoint() {
+    let mut manager = manager().await;
+    let endpoints = Arc::new(SharedUdpControlEndpoints::default());
+    let owner = endpoints.clone();
+    let actual_url = manager
+        .add_listener_with_lifetime(udp_control_listener(), move |url| owner.register(url))
+        .await
+        .unwrap();
+
+    assert_eq!(endpoints.local_listener_urls(), vec![actual_url]);
+    tokio::task::yield_now().await;
+    manager.tasks.abort_all();
+    wait_until(|| endpoints.local_listener_urls().is_empty()).await;
 }
 
 #[tokio::test]

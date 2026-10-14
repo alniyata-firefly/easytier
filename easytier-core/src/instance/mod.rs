@@ -552,11 +552,14 @@ where
         ) = match &stun {
             Some(stun) => (
                 Arc::new(CoreStunPeerInfoSource(stun.clone())),
-                Arc::new(ForeignDirectConnectorRpcRegistrar::new(
-                    adapters.host.clone(),
-                    stun.clone(),
-                    running_listeners.clone(),
-                )),
+                Arc::new(
+                    ForeignDirectConnectorRpcRegistrar::new(
+                        adapters.host.clone(),
+                        stun.clone(),
+                        running_listeners.clone(),
+                    )
+                    .with_dns(adapters.dns.clone()),
+                ),
             ),
             None => (Arc::new(()), Arc::new(())),
         };

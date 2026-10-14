@@ -1,0 +1,9 @@
+{
+  "node_info": {
+    "peer_id": 7,
+    "ipv4_addr": "100.64.4.7/24",
+    "hostname": "Node contract fixture",
+    "inst_id": "00000000-0000-4000-8000-000000000007",
+    "version": "2.7.0"
+  }
+}

@@ -67,9 +67,18 @@ where
 #[derive(Debug, Default)]
 pub(crate) struct RunningListenerRegistry {
     listeners: std::sync::Mutex<Vec<(Url, usize)>>,
+    shared_udp_control_sources:
+        std::sync::Mutex<Vec<Arc<dyn crate::connectivity::LocalListenerUrls>>>,
 }
 
 impl RunningListenerRegistry {
+    pub(crate) fn attach_shared_udp_control_source(
+        &self,
+        source: Arc<dyn crate::connectivity::LocalListenerUrls>,
+    ) {
+        self.shared_udp_control_sources.lock().unwrap().push(source);
+    }
+
     pub(crate) fn running_listeners(&self) -> Vec<Url> {
         self.listeners
             .lock()
@@ -119,6 +128,21 @@ impl Drop for RunningListenerRegistration {
 impl crate::connectivity::LocalListenerUrls for RunningListenerRegistry {
     fn local_listener_urls(&self) -> Vec<Url> {
         self.running_listeners()
+    }
+
+    fn udp_control_listener_urls(&self) -> Vec<Url> {
+        let mut urls = self.running_listeners();
+        // Snapshot the providers before querying them; the socket owner may
+        // independently revoke its leases while this instance remains alive.
+        let sources = self.shared_udp_control_sources.lock().unwrap().clone();
+        for source in sources {
+            for url in source.udp_control_listener_urls() {
+                if !urls.contains(&url) {
+                    urls.push(url);
+                }
+            }
+        }
+        urls
     }
 }
 
@@ -633,6 +657,40 @@ mod tests {
         assert_eq!(registry.running_listeners(), vec![url.clone()]);
         drop(second);
         assert!(registry.running_listeners().is_empty());
+    }
+
+    #[test]
+    fn shared_udp_control_sources_revoke_without_changing_owned_advertisements() {
+        use crate::connectivity::LocalListenerUrls as _;
+
+        #[derive(Debug)]
+        struct Shared(std::sync::Mutex<Vec<Url>>);
+        impl crate::connectivity::LocalListenerUrls for Shared {
+            fn local_listener_urls(&self) -> Vec<Url> {
+                self.0.lock().unwrap().clone()
+            }
+        }
+
+        let registry = Arc::new(RunningListenerRegistry::default());
+        let owned: Url = "udp://0.0.0.0:40000".parse().unwrap();
+        let lease = registry.register(owned.clone());
+        let borrowed: Url = "udp://[::]:22020".parse().unwrap();
+        let shared = Arc::new(Shared(std::sync::Mutex::new(vec![
+            borrowed.clone(),
+            owned.clone(),
+        ])));
+        registry.attach_shared_udp_control_source(shared.clone());
+        assert_eq!(registry.local_listener_urls(), vec![owned.clone()]);
+        assert_eq!(
+            registry.udp_control_listener_urls(),
+            vec![owned.clone(), borrowed]
+        );
+
+        shared.0.lock().unwrap().clear();
+        assert_eq!(registry.udp_control_listener_urls(), vec![owned.clone()]);
+        assert_eq!(registry.local_listener_urls(), vec![owned]);
+        drop(lease);
+        assert!(registry.udp_control_listener_urls().is_empty());
     }
 
     #[tokio::test]

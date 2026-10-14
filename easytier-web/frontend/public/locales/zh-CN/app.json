@@ -1,0 +1,55 @@
+{
+  "documentTitle": "EasyTier 网络控制台",
+  "consoleCaption": "网络控制台",
+  "console": "控制台",
+  "fontNotices": "字体与许可",
+  "nav": {
+    "overview": "概览",
+    "networks": "网络",
+    "devices": "设备",
+    "tokens": "管理令牌",
+    "primary": "主导航",
+    "title": "导航",
+    "open": "打开导航",
+    "close": "关闭导航",
+    "skip": "跳到主要内容",
+    "networkDetail": "网络详情",
+    "deviceDetail": "设备详情"
+  },
+  "scope": { "central": "中央管理", "external": "外部管理" },
+  "connection": { "checking": "正在连接控制台", "retry": "重新连接" },
+  "page": {
+    "loading": "正在加载页面",
+    "failed": "页面未能显示，请刷新后重试。",
+    "reload": "刷新页面",
+    "invalidLink": "链接格式不正确，请从导航进入页面。"
+  },
+  "password": {
+    "title": "修改密码",
+    "new": "新密码",
+    "confirm": "再次输入新密码",
+    "mismatch": "两次输入的密码不一致。",
+    "changed": "密码已修改。"
+  },
+  "auth": {
+    "title": "登录控制台",
+    "login": "登录",
+    "logout": "退出登录",
+    "register": "创建账户",
+    "loginHint": "使用控制台账户登录。",
+    "registerHint": "创建后使用账户登录。",
+    "username": "用户名",
+    "password": "密码",
+    "captcha": "验证码",
+    "refreshCaptcha": "刷新验证码",
+    "sso": "使用单点登录",
+    "hasAccount": "已有账户？",
+    "noAccount": "还没有账户？",
+    "backToLogin": "返回登录",
+    "created": "账户已创建，请登录。",
+    "errors": {
+      "registration": "注册未完成，请检查用户名、密码和验证码。",
+      "login": "登录失败，请检查用户名和密码。"
+    }
+  }
+}

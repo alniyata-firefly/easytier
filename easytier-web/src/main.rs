@@ -402,6 +402,7 @@ async fn main() {
         std::process::exit(2);
     });
 
+    let shared_udp_control = Arc::new(gateway::shared_udp::SharedUdpControlEndpoints::default());
     let network_instances = cli.gateway_peer_url.as_ref().map(|peer_url| {
         let config = gateway::GatewayConfig {
             peer_url: peer_url.to_string(),
@@ -413,7 +414,10 @@ async fn main() {
                 eprintln!("Invalid Gateway configuration: {error}");
                 std::process::exit(2);
             });
-        Arc::new(gateway::NetworkInstanceManager::new(config))
+        Arc::new(gateway::NetworkInstanceManager::with_shared_udp_control(
+            config,
+            shared_udp_control.clone(),
+        ))
     });
 
     let mut mgr = client_manager::ClientManager::new(
@@ -431,10 +435,11 @@ async fn main() {
         // add_listener owns listen(). A family that is unavailable must not
         // prevent the other family from serving LAN-only clients.
         let result = if let Some(instances) = network_instances.as_ref() {
-            mgr.add_listener(gateway::listener::GatewayListener::new(
-                listener,
-                instances.clone(),
-            ))
+            let endpoints = shared_udp_control.clone();
+            mgr.add_listener_with_lifetime(
+                gateway::listener::GatewayListener::new(listener, instances.clone()),
+                move |actual_url| endpoints.register(actual_url),
+            )
             .await
         } else {
             mgr.add_listener(listener).await

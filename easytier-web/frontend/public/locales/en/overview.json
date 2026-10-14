@@ -1,0 +1,30 @@
+{
+  "connections": "Network connections",
+  "loadingConnections": "Loading connections…",
+  "title": "Network overview",
+  "description": "Connections, devices and server resources",
+  "connectDevice": "Connect device",
+  "summary": "Network summary",
+  "registered": "Registered devices",
+  "online": "Online devices",
+  "centralNetworks": "Central networks",
+  "instances": "Running instances",
+  "observe": "Observe network",
+  "emptyNetworks": "No central networks yet",
+  "createDetail": "Create a network, then add registered devices.",
+  "viewDevices": "View devices",
+  "createNetwork": "Create network",
+  "devices": "Devices",
+  "networks": "Networks",
+  "viewAll": "View all",
+  "unnamed": "Unnamed device",
+  "loadingDevices": "Loading devices…",
+  "emptyDevices": "No devices yet",
+  "registerDetail": "Issue a management token and register the client.",
+  "loadingNetworks": "Loading networks…",
+  "networkOnline": "{{online}} / {{total}} online",
+  "external": {
+    "title": "Managed by an external system",
+    "detail": "View the current instances on the devices page."
+  }
+}
