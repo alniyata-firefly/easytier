@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.Bundle
 import android.content.pm.ServiceInfo
+import android.content.pm.PackageManager
 import androidx.core.app.NotificationCompat
 import java.net.InetAddress
 import java.util.Arrays
@@ -135,7 +136,17 @@ class TauriVpnService : VpnService() {
     }
 
     private fun setMainForegroundServiceEnabled(enabled: Boolean) {
-        val intent = Intent().setClassName(packageName, "$packageName.MainForegroundService")
+        // applicationId can have an adapted/debug suffix while the service's
+        // Kotlin namespace stays unchanged. Use the actual merged manifest
+        // component, not a class name guessed from the installed package name.
+        val foregroundServices = packageManager
+            .getPackageInfo(packageName, PackageManager.GET_SERVICES)
+            .services.orEmpty()
+            .filter { it.name?.substringAfterLast('.') == "MainForegroundService" }
+        check(foregroundServices.size == 1) {
+            "Expected exactly one MainForegroundService in the application manifest"
+        }
+        val intent = Intent().setClassName(packageName, foregroundServices.single().name)
         if (!enabled) {
             stopService(intent)
             return
