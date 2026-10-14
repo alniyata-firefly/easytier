@@ -18,7 +18,7 @@ import {
 import { executeVpnTileAction } from '~/composables/mobile_vpn_tile'
 import { GUIRemoteClient } from '~/modules/api'
 
-import { Password, useToast, useConfirm } from 'primevue'
+import { ConfirmDialog, Password, useToast, useConfirm } from 'primevue'
 import { loadMode, saveMode, type ConfigServerCredentials, type Mode } from '~/composables/mode'
 import { buildConfigServerUrl, splitConfigServerUrl } from '~/composables/config_server_credentials'
 import { applyServiceConfiguration, ServiceConfigurationError } from '~/composables/service_configuration'
@@ -86,9 +86,10 @@ async function applyModeSettings(requestedMode: Mode) {
     // A backend error can contain the full management URL. Never log it or the
     // mode objects, which include the device management token.
     console.error('Failed to apply client settings')
-    if (currentMode.value.mode === 'service' && error instanceof ServiceConfigurationError && error.restoredStatus === 'Stopped') {
-      // A previously stopped service must stay stopped after rollback. Calling
-      // initWithMode here would start it despite the user's earlier Stop action.
+    if (currentMode.value.mode === 'service' && error instanceof ServiceConfigurationError
+      && (error.restoredStatus === 'Stopped' || error.restoredStatus === 'NotInstalled')) {
+      // A previously stopped or absent service must stay that way after rollback.
+      // initWithMode here would start it or recreate a service the user removed.
       manualDisconnect.value = true
       clientRunning.value = false
     } else {
@@ -562,6 +563,7 @@ async function saveConfigServer() {
   if (editingMode.value.mode === 'service') {
     const confirmed = await new Promise<boolean>((resolve) => {
       confirm.require({
+        group: 'config-server-service',
         message: t('config-server.update_service_confirm'),
         icon: 'pi pi-exclamation-triangle',
         rejectProps: {
@@ -610,6 +612,7 @@ const configServerConnectionStatus = computed(() => {
 
 <template>
   <div id="root" class="flex flex-col">
+    <ConfirmDialog group="config-server-service" />
     <Dialog v-model:visible="aboutVisible" modal :header="t('about.title')" :style="{ width: '70%' }">
       <About />
     </Dialog>
