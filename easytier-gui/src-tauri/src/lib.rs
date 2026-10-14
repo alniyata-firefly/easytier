@@ -392,7 +392,7 @@ fn init_service() -> Result<(), String> {
 
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
-fn init_service(opts: Option<service::ServiceOptions>) -> Result<(), String> {
+fn init_service(app: AppHandle, opts: Option<service::ServiceOptions>) -> Result<(), String> {
     match opts {
         Some(args) => {
             let path = std::path::Path::new(&args.config_dir);
@@ -408,7 +408,11 @@ fn init_service(opts: Option<service::ServiceOptions>) -> Result<(), String> {
                 return Err("file_log_dir exists but is not a directory".to_string());
             }
 
-            service::install(args).map_err(|e| format!("{:#}", e))?;
+            let machine_id = easytier::common::resolve_machine_id(
+                &gui_machine_id_options(&app).map_err(|e| format!("{:#}", e))?,
+            )
+            .map_err(|e| format!("{:#}", e))?;
+            service::install(args, machine_id).map_err(|e| format!("{:#}", e))?;
         }
         None => {
             service::uninstall().map_err(|e| format!("{:#}", e))?;
@@ -581,6 +585,17 @@ async fn is_client_running() -> Result<bool, String> {
     Ok(get_client_manager!()?.rpc_manager.is_running())
 }
 
+fn gui_machine_id_options(app: &AppHandle) -> anyhow::Result<easytier::common::MachineIdOptions> {
+    Ok(easytier::common::MachineIdOptions {
+        explicit_machine_id: None,
+        state_dir: Some(
+            app.path()
+                .app_data_dir()
+                .with_context(|| "Failed to resolve machine id state directory")?,
+        ),
+    })
+}
+
 #[tauri::command]
 async fn init_web_client(app: AppHandle, url: Option<String>) -> Result<(), String> {
     let mut web_client_guard = WEB_CLIENT.write().await;
@@ -595,18 +610,11 @@ async fn init_web_client(app: AppHandle, url: Option<String>) -> Result<(), Stri
         .ok_or_else(|| "Instance manager is not available".to_string())?;
 
     let hooks = Arc::new(manager::GuiHooks { app: app.clone() });
-    let machine_id_state_dir = app
-        .path()
-        .app_data_dir()
-        .with_context(|| "Failed to resolve machine id state directory")
-        .map_err(|e| format!("{:#}", e))?;
+    let machine_id_options = gui_machine_id_options(&app).map_err(|e| format!("{:#}", e))?;
 
     let web_client = web_client::run_web_client(
         url.as_str(),
-        easytier::common::MachineIdOptions {
-            explicit_machine_id: None,
-            state_dir: Some(machine_id_state_dir),
-        },
+        machine_id_options,
         None,
         false,
         instance_manager,
@@ -1342,7 +1350,7 @@ mod service {
         pub(super) config_server: Option<String>,
     }
     impl ServiceOptions {
-        fn to_args_vec(&self) -> Vec<std::ffi::OsString> {
+        fn to_args_vec(&self, machine_id: uuid::Uuid) -> Vec<std::ffi::OsString> {
             let mut args = vec![
                 "--config-dir".into(),
                 self.config_dir.clone().into(),
@@ -1353,6 +1361,11 @@ mod service {
                 "--file-log-dir".into(),
                 self.file_log_dir.clone().into(),
                 "--daemon".into(),
+                // A Windows service can run under a different account and
+                // state directory. Use the GUI's persistent identity so the
+                // same management token stays bound across mode switches.
+                "--machine-id".into(),
+                machine_id.to_string().into(),
             ];
 
             if let Some(config_server) = &self.config_server {
@@ -1375,11 +1388,11 @@ mod service {
         None
     }
 
-    pub fn install(opts: ServiceOptions) -> anyhow::Result<()> {
+    pub fn install(opts: ServiceOptions, machine_id: uuid::Uuid) -> anyhow::Result<()> {
         let service = easytier::service_manager::Service::new(env!("CARGO_PKG_NAME").to_string())?;
         let options = easytier::service_manager::ServiceInstallOptions {
             program: super::get_exe_path().into(),
-            args: opts.to_args_vec(),
+            args: opts.to_args_vec(machine_id),
             work_directory: std::env::current_dir()?,
             environment: service_environment(),
             disable_autostart: false,
@@ -1420,6 +1433,27 @@ mod service {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn service_arguments_use_the_existing_gui_identity_for_core() {
+            let machine_id = uuid::Uuid::new_v4();
+            let options = super::ServiceOptions {
+                config_dir: "configs".to_owned(),
+                rpc_portal: "127.0.0.1:15888".to_owned(),
+                file_log_level: "warn".to_owned(),
+                file_log_dir: "logs".to_owned(),
+                config_server: Some("udp://vpn.example.test:22020/fixture-token".to_owned()),
+            };
+            let arguments = options.to_args_vec(machine_id);
+            let positions: Vec<_> = arguments
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| *value == "--machine-id")
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(positions.len(), 1);
+            assert_eq!(arguments[positions[0] + 1], machine_id.to_string().as_str());
+        }
+
         #[test]
         fn service_environment_matches_platform() {
             #[cfg(target_os = "macos")]

@@ -6,7 +6,7 @@ import { type ConfigSource, normalizeConfigSource } from './config_source'
 type NetworkConfig = NetworkTypes.NetworkConfig
 type ValidateConfigResponse = Api.ValidateConfigResponse
 type ListNetworkInstanceIdResponse = Api.ListNetworkInstanceIdResponse
-interface ServiceOptions {
+export interface ServiceOptions {
   config_dir: string
   rpc_portal: string
   file_log_level: string

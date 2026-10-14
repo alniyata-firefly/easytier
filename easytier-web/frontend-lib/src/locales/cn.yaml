@@ -435,6 +435,7 @@ web:
     token_expired: "已过期"
     rotate_token: "轮换"
     revoke_token: "撤销"
+    copy_management_token: "复制管理令牌"
     any_protocol: "所有协议"
     ipv6_proxy_unavailable: "IPv6 接口；当前中心代理配置仅支持 IPv4"
     mask_unavailable: "未报告掩码，请手动填写 CIDR"
@@ -849,21 +850,35 @@ mode:
   uninstall_service_confirm: 确定要卸载服务吗？
   uninstall_service_success: 服务卸载成功，已切换回普通模式
   stop_service_success: 服务停止成功
+  uninstall_service_failed: 服务卸载失败，请检查服务状态与权限。
+  stop_service_failed: 服务停止失败，请检查服务状态与权限。
   remote_rpc_address_empty: 远程RPC地址不能为空
   service_config_empty: 服务配置不能为空
   rpc_connection_failed: "RPC 连接失败：{error}"
+  rpc_connection_failed_safe: RPC 连接失败，请检查客户端服务是否正在运行。
+  apply_failed: 客户端设置应用失败，请检查服务状态及配置。
   autostart: 开机自启
   autostart_hint: 开机自启由服务模式提供。切换为「服务模式」并保存后，EasyTier 将注册为系统服务，开机自动启动并在后台运行。
 
 config-server:
   title: 配置服务器
-  address: 配置服务器地址
-  address_placeholder: 例如：udp://127.0.0.1:22020/admin 或 admin
+  address: 服务器地址
+  address_placeholder: 例如：udp://服务器地址:22020
+  token: 设备管理令牌
+  token_placeholder: 粘贴控制台签发的设备管理令牌
+  invalid_credentials: 请填写完整服务器地址和有效的设备管理令牌；同时留空可断开连接。
+  invalid_address: 请输入带协议和端口的有效服务器地址。
+  unsupported_protocol: 管理连接仅支持 UDP、TCP、WebSocket 或 QUIC；请勿填写网页地址。
+  credentials_in_address: 请移除服务器地址中的凭据，并在令牌输入框中单独填写。
+  address_required: 请填写服务器地址；同时留空可断开连接。
+  token_required: 请填写设备管理令牌；同时留空可断开连接。
+  invalid_token: 设备管理令牌不能包含空白或控制字符。
+  connection_failed: 配置服务器初始化失败，请检查服务器地址和设备管理令牌。
+  legacy_credentials: 旧的用户名接入方式不适用于此控制台，请填写服务器地址和设备管理令牌。
   description: |
-    配置服务器地址，支持以下格式：
-    完整URL：udp://127.0.0.1:22020/admin
-    仅用户名：admin（使用官方服务器）
-    留空：不连接配置服务器
+    填写设备管理入口地址，并单独粘贴控制台「设备管理」签发的令牌。
+    此地址不是网页地址或 VPN 网络的公共服务器地址。连接后，管理员仍需将设备加入网络。
+    服务器地址和令牌同时留空：不连接配置服务器。
   connection_status: 连接状态
   connected: ": 已连接"
   disconnected: ": 未连接"

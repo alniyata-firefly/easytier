@@ -93,6 +93,11 @@ const revoke = (id: string) => {
 };
 const copy = async () => toast.add({ severity: await RuntimeDisplay.copyText(command.value) ? 'success' : 'error',
     summary: t('web.console.enroll_copy'), life: 2500 });
+const copyToken = async () => {
+    if (!secret.value) return;
+    toast.add({ severity: await RuntimeDisplay.copyText(secret.value) ? 'success' : 'error',
+        summary: t('web.adaptation.copy_management_token'), life: 2500 });
+};
 </script>
 
 <template>
@@ -110,7 +115,8 @@ const copy = async () => toast.add({ severity: await RuntimeDisplay.copyText(com
             <section v-if="secret" class="p-3 rounded mb-4" style="background: var(--console-ground)">
                 <Message severity="warn" :closable="false">{{ t('web.adaptation.one_time_token') }}</Message>
                 <div class="flex items-start gap-2 mt-3"><code class="mono-value break-all flex-1">{{ command || t('web.adaptation.invalid_entry') }}</code>
-                    <Button icon="pi pi-copy" :aria-label="t('web.console.enroll_copy')" :disabled="!command" @click="copy" /></div>
+                    <Button icon="pi pi-copy" :aria-label="t('web.console.enroll_copy')" :disabled="!command" @click="copy" />
+                    <Button icon="pi pi-key" :label="t('web.adaptation.copy_management_token')" :disabled="!secret" @click="copyToken" /></div>
                 <p class="text-xs muted mt-2">{{ t('web.adaptation.management_only') }}</p>
             </section>
             <DataTable :value="tokens" dataKey="id" :loading="loading" class="console-table" size="small" :paginator="tokens.length > 10" :rows="10">

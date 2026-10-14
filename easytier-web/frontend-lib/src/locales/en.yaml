@@ -435,6 +435,7 @@ web:
     token_expired: "Expired"
     rotate_token: "Rotate"
     revoke_token: "Revoke"
+    copy_management_token: "Copy Management Token"
     any_protocol: "Any protocol"
     ipv6_proxy_unavailable: "IPv6 interface; central subnet proxy configuration currently supports IPv4"
     mask_unavailable: "Prefix unavailable; enter the CIDR manually"
@@ -849,21 +850,35 @@ mode:
   uninstall_service_confirm: Are you sure you want to uninstall the service?
   uninstall_service_success: Service uninstalled successfully, switched back to normal mode
   stop_service_success: Service stopped successfully
+  uninstall_service_failed: Failed to uninstall the service. Check the service status and permissions.
+  stop_service_failed: Failed to stop the service. Check the service status and permissions.
   remote_rpc_address_empty: Remote RPC Address cannot be empty
   service_config_empty: Service Config cannot be empty
   rpc_connection_failed: "RPC connection failed: {error}"
+  rpc_connection_failed_safe: RPC connection failed. Check that the client service is running.
+  apply_failed: Failed to apply client settings. Check the service status and configuration.
   autostart: Start on Boot
   autostart_hint: Auto-start on boot is provided by service mode. After switching to Service mode and saving, EasyTier will be registered as a system service that starts automatically at boot and keeps running in the background.
 
 config-server:
   title: Config Server
-  address: Config Server Address
-  address_placeholder: "e.g.: udp://127.0.0.1:22020/admin or admin"
+  address: Server Address
+  address_placeholder: "e.g.: udp://server-address:22020"
+  token: Device Management Token
+  token_placeholder: Paste the device management token issued by the console
+  invalid_credentials: Enter a complete server address and a valid device management token. Leave both empty to disconnect.
+  invalid_address: Enter a valid server address including its protocol and port.
+  unsupported_protocol: Management connections support UDP, TCP, WebSocket or QUIC. Do not enter a web console address.
+  credentials_in_address: Remove credentials from the server address and enter the management token separately.
+  address_required: Enter the server address. Leave both fields empty to disconnect.
+  token_required: Enter the device management token. Leave both fields empty to disconnect.
+  invalid_token: The device management token must not contain whitespace or control characters.
+  connection_failed: Config server initialization failed. Check the server address and device management token.
+  legacy_credentials: Username-based registration is not supported by this console. Enter the server address and device management token.
   description: |
-    Config server address, allowed formats:
-    Full URL: udp://127.0.0.1:22020/admin
-    Username only: admin (uses official server)
-    Leave blank: Don't connect to a config server
+    Enter the device management endpoint and paste the token issued in the console's Devices page separately.
+    This is not the web address or a VPN network's public server address. An administrator must still add the connected device to a network.
+    Leave both the server address and token empty to disconnect from the config server.
   connection_status: Connection Status
   connected: ": Connected"
   disconnected: ": Disconnected"
