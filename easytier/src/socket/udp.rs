@@ -205,14 +205,24 @@ impl VirtualUdpSocketFactory for RuntimeUdpSocketFactory {
 #[cfg(test)]
 mod tests {
     use easytier_core::{
+        connectivity::direct::send_udp_hole_punch_packet_for_test,
+        packet::UdpPacketType,
         socket::SocketListener,
         socket::udp::{
-            UdpSessionListenRequest, send_v4_hole_punch_control_packet,
-            send_v6_hole_punch_control_packet,
+            UdpSessionLayer, UdpSessionListenRequest, UdpSessionSocket, parse_udp_session_datagram,
+            send_v4_hole_punch_control_packet, send_v6_hole_punch_control_packet,
         },
     };
 
-    use crate::host_runtime::native_host_runtime;
+    use crate::{
+        common::{
+            config::{ConfigLoader, TomlConfigLoader},
+            global_ctx::GlobalCtx,
+        },
+        host_runtime::native_host_runtime,
+        instance::host::native_instance_host,
+        proto::peer_rpc::SendUdpHolePunchPacketRequest,
+    };
 
     use super::*;
 
@@ -357,6 +367,85 @@ mod tests {
         .await
         .expect("timeout waiting for v6 hole-punch packet")
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mapped_udp_listener_port_forwards_punch_and_preserves_native_handshake() {
+        for foreign_network in [false, true] {
+            for (listener_url, bind_addr, receiver_bind, mapped_host) in [
+                (
+                    "udp://0.0.0.0:0",
+                    "0.0.0.0:0",
+                    "127.0.0.1:0",
+                    "198.51.100.10",
+                ),
+                ("udp://[::]:0", "[::]:0", "[::1]:0", "[2001:db8::7]"),
+            ] {
+                let mut listener = new_runtime_udp_session_listener(
+                    listener_url.parse().unwrap(),
+                    UdpSessionListenRequest::new(UdpBindOptions::port_bound_listener(
+                        bind_addr.parse().unwrap(),
+                    )),
+                    UdpSessionAcceptKind::EasyTierMux,
+                    NetNS::new(None),
+                );
+                listener.listen().await.unwrap();
+                let actual_port = listener.local_url().port().unwrap();
+                let alias_port: u16 = if actual_port == 2862 { 2863 } else { 2862 };
+                let alias: url::Url = format!("udp://{mapped_host}:{alias_port}").parse().unwrap();
+                let config = TomlConfigLoader::default();
+                config.set_mapped_listeners(Some(vec![alias]));
+                let host = native_instance_host(Arc::new(GlobalCtx::new(config)));
+                let receiver = Arc::new(RuntimeUdpSocket::new(Arc::new(
+                    UdpSocket::bind(receiver_bind).await.unwrap(),
+                )));
+                let receiver_addr = receiver.local_addr().unwrap();
+
+                send_udp_hole_punch_packet_for_test(
+                    host,
+                    vec![listener.local_url()],
+                    SocketContext::default(),
+                    SendUdpHolePunchPacketRequest {
+                        connector_addr: Some(receiver_addr.into()),
+                        listener_port: u32::from(alias_port),
+                        ..Default::default()
+                    },
+                    foreign_network,
+                )
+                .await
+                .unwrap();
+
+                let mut buf = [0; 128];
+                let (len, source) = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    receiver.recv_from(&mut buf),
+                )
+                .await
+                .expect("the advertised port must deliver control to the actual listener")
+                .unwrap();
+                let punch =
+                    parse_udp_session_datagram(bytes::BytesMut::from(&buf[..len]), false).unwrap();
+                assert_eq!(
+                    punch.udp_tunnel_header().unwrap().msg_type,
+                    UdpPacketType::HolePunch as u8
+                );
+                assert_eq!(source.port(), actual_port);
+                assert_ne!(source.port(), alias_port);
+
+                let layer = UdpSessionLayer::new(receiver.clone());
+                let listener_addr = SocketAddr::new(receiver_addr.ip(), actual_port);
+                let (connected, accepted) =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        tokio::join!(layer.connect(listener_addr), listener.accept_session())
+                    })
+                    .await
+                    .expect(
+                        "the listener and the same receiver socket must still complete a handshake",
+                    );
+                assert_eq!(connected.unwrap().peer_addr().unwrap(), listener_addr);
+                assert_eq!(accepted.unwrap().peer_addr().unwrap(), receiver_addr);
+            }
+        }
     }
 
     #[test]

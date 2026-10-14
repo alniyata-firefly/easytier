@@ -726,6 +726,7 @@ mod tests {
             host,
             SocketContext::default().with_socket_mark(Some(7)),
             Some(Arc::new(FixedStunProvider)),
+            Arc::new(crate::connectivity::NoLocalListeners),
         );
 
         let response = handler

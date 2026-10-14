@@ -21,6 +21,19 @@ an existing source when editing and starting a writable configuration. Edit,
 delete and persistent-save permissions are independent flags, not an inferred
 central/local classification.
 
+`get_network_info` restores protobuf JSON's omitted empty arrays and default route
+scalars at the GUI boundary. Routes with no proxy prefixes remain valid rows;
+optional node, connection and pair-route messages remain optional. Prefixes and
+additional IPv6 or latency fields are preserved. Missing IPs and unspecified next
+hops display an em dash; a known next-hop ID is retained when its name is absent.
+The same GUI client also normalizes metadata in normal, service and remote modes:
+an existing metadata message with an omitted permission scalar means permission
+zero. A missing message keeps the UI's read-only/no-delete fallback. Explicit
+permission bits remain unchanged.
+NAT enum names from protobuf JSON become numeric codes before display, and an
+omitted non-optional connection loss scalar means zero loss. Absent STUN messages,
+peers and counter-stat messages remain absent.
+
 Existing `networkList`, `app_mode` and `last_network_instance_id` keys remain
 compatible. Bare old network configurations become `legacy`; `webhook` becomes
 `web`. Invalid saved account-only central registrations require a new endpoint
@@ -42,3 +55,7 @@ storage/events, service rollback, connection/disposal races and Android ownershi
 permission, descriptor and tile boundaries. These are mocked IPC boundary tests;
 they do not create a host TUN, contact production or establish a real Android or
 Windows VPN. Device/platform integration must be tested separately.
+
+`ET_GUI_QA_URL=http://127.0.0.1:19420 pnpm --dir easytier-gui exec node --test tests/runtime-routes.browser.test.mjs`
+checks actual omitted-field protobuf JSON fixtures through the GUI API and the
+Routes, Connections, Events and Overview tabs, with synthetic Tauri IPC only.

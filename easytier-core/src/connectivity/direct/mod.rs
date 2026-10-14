@@ -1,6 +1,6 @@
 use std::{
-    collections::HashSet,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    collections::{BTreeSet, HashSet},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6},
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -19,7 +19,7 @@ use crate::{
     connectivity::hole_punch::policy::{should_background_p2p_with_peer, should_try_p2p_with_peer},
     connectivity::stun::{StunInfoProvider, StunSocketMapper},
     connectivity::{
-        LocalListenerUrls, NoLocalListeners,
+        LocalListenerUrls,
         protocol::{
             ClientProtocolUpgrader, ProtocolTransport, protocol_transport, protocol_uses_udp,
         },
@@ -67,8 +67,10 @@ const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const DIRECT_TASK_LOOP_INTERVAL_MS: u64 = 5000;
 const IPV6_HEAD_START: Duration = Duration::from_millis(250);
 const IPV6_UPGRADE_RETRY: Duration = Duration::from_secs(60);
+const IPV6_PORT_MAPPING_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_IPV6_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
 const MAX_UDP_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
+const MAX_UDP_HOLE_PUNCH_LISTENER_PORTS: usize = 16;
 
 /// Give v6 a bounded head start. Once v4 has established it can already carry
 /// packets, while the bounded v6 attempt finishes and may upgrade that peer.
@@ -106,6 +108,41 @@ where
             Err(error) => ipv6.await.map(|()| true).map_err(|_| error),
         },
     }
+}
+
+async fn ipv6_udp_punch_addrs<M, C>(local_port: u16, mapping: M, candidates: C) -> Vec<SocketAddr>
+where
+    M: std::future::Future<Output = anyhow::Result<SocketAddrV6>>,
+    C: std::future::Future<Output = anyhow::Result<Vec<Ipv6Addr>>>,
+{
+    let mapped = match crate::foundation::time::timeout(IPV6_PORT_MAPPING_TIMEOUT, mapping).await {
+        Ok(Ok(addr)) => Some(addr),
+        Ok(Err(error)) => {
+            tracing::debug!(?error, "IPv6 socket STUN mapping unavailable");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("IPv6 socket STUN mapping timed out");
+            None
+        }
+    };
+    let mut addrs = mapped.map(SocketAddr::V6).into_iter().collect::<Vec<_>>();
+    match candidates.await {
+        Ok(ips) => {
+            for ip in ips {
+                // A complete mapping supersedes the local-port guess for its IP.
+                if mapped.is_some_and(|addr| *addr.ip() == ip) {
+                    continue;
+                }
+                let addr = SocketAddr::new(IpAddr::V6(ip), local_port);
+                if !addrs.contains(&addr) && addrs.len() < MAX_IPV6_HOLE_PUNCH_CONNECTOR_ADDRS {
+                    addrs.push(addr);
+                }
+            }
+        }
+        Err(error) => tracing::debug!(?error, "IPv6 fallback address collection failed"),
+    }
+    addrs
 }
 
 #[async_trait]
@@ -937,22 +974,16 @@ where
 
     async fn connect_to_url_once(&self, dst_peer_id: PeerId, raw_url: &str) -> anyhow::Result<()> {
         let url = Url::parse(raw_url)?;
-        let (peer_id, conn_id) = if url.scheme() == "udp" {
-            match url.host() {
-                Some(Host::Ipv6(_)) => self.connect_public_ipv6(dst_peer_id, &url).await?,
-                Some(Host::Ipv4(ip)) if is_public_ipv4(ip) => {
-                    match self.connect_public_ipv4(dst_peer_id, &url).await {
-                        Ok(result) => result,
-                        Err(error) => {
-                            tracing::debug!(?error, %url, "public IPv4 UDP punch failed; fallback");
-                            self.connect_ordinary(dst_peer_id, url.clone()).await?
-                        }
-                    }
+        let (peer_id, conn_id) = match public_udp_punch_family(&url) {
+            Some(IpVersion::V6) => self.connect_public_ipv6(dst_peer_id, &url).await?,
+            Some(IpVersion::V4) => match self.connect_public_ipv4(dst_peer_id, &url).await {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::debug!(?error, %url, "public IPv4 UDP punch failed; fallback");
+                    self.connect_ordinary(dst_peer_id, url.clone()).await?
                 }
-                _ => self.connect_ordinary(dst_peer_id, url.clone()).await?,
-            }
-        } else {
-            self.connect_ordinary(dst_peer_id, url.clone()).await?
+            },
+            _ => self.connect_ordinary(dst_peer_id, url.clone()).await?,
         };
 
         if peer_id != dst_peer_id && !self.options.testing {
@@ -1077,13 +1108,28 @@ where
                     .with_local_addr(Some("[::]:0".parse().unwrap())),
             )
             .await?;
-        let connector_ips = self.collect_ipv6_hole_punch_candidates().await?;
-        if !connector_ips.is_empty() {
-            let port = socket.local_addr()?.port();
-            let connector_addrs = connector_ips
-                .into_iter()
-                .map(|ip| SocketAddr::new(IpAddr::V6(ip), port))
-                .collect();
+        let connector_addrs = ipv6_udp_punch_addrs(
+            socket.local_addr()?.port(),
+            async {
+                match self
+                    .stun
+                    .get_udp_port_mapping_with_socket(socket.clone())
+                    .await?
+                {
+                    SocketAddr::V6(addr)
+                        if addr.port() != 0
+                            && addr.ip().to_ipv4_mapped().is_none()
+                            && self.is_usable_public_ipv6(addr.ip()).await =>
+                    {
+                        Ok(addr)
+                    }
+                    addr => anyhow::bail!("no usable IPv6 UDP mapping: {addr}"),
+                }
+            },
+            self.collect_ipv6_hole_punch_candidates(),
+        )
+        .await;
+        if !connector_addrs.is_empty() {
             let preferred_src = match url.host() {
                 Some(Host::Ipv6(ip)) => Some(ip),
                 _ => None,
@@ -1232,8 +1278,8 @@ where
         host: Arc<H>,
         socket_context: SocketContext,
         stun: Option<Arc<dyn StunInfoProvider>>,
+        running_listeners: Arc<dyn LocalListenerUrls>,
     ) -> Self {
-        let running_listeners = Arc::new(NoLocalListeners);
         Self {
             host,
             peer_manager: None,
@@ -1312,14 +1358,23 @@ where
 {
     host: Arc<H>,
     stun: Arc<dyn StunInfoProvider>,
+    running_listeners: Arc<dyn LocalListenerUrls>,
 }
 
 impl<H> ForeignDirectConnectorRpcRegistrar<H>
 where
     H: DirectConnectorHost,
 {
-    pub fn new(host: Arc<H>, stun: Arc<dyn StunInfoProvider>) -> Self {
-        Self { host, stun }
+    pub fn new(
+        host: Arc<H>,
+        stun: Arc<dyn StunInfoProvider>,
+        running_listeners: Arc<dyn LocalListenerUrls>,
+    ) -> Self {
+        Self {
+            host,
+            stun,
+            running_listeners,
+        }
     }
 }
 
@@ -1339,6 +1394,7 @@ where
                     self.host.clone(),
                     socket_context,
                     Some(self.stun.clone()),
+                    self.running_listeners.clone(),
                 ),
             ),
             network_name,
@@ -1374,7 +1430,12 @@ where
             .host
             .mapped_listeners()
             .into_iter()
-            .chain(self.running_listeners.local_listener_urls())
+            .chain(
+                self.running_listeners
+                    .local_listener_urls()
+                    .into_iter()
+                    .filter(|_| !self.foreign_network),
+            )
             .map(Into::into)
             .collect();
         Ok(response)
@@ -1387,6 +1448,17 @@ where
     ) -> rpc_types::error::Result<Void> {
         let (listener_port, connector_addrs, preferred_src_ipv6) =
             connector_addrs_from_request(request)?;
+        let family = if connector_addrs[0].is_ipv6() {
+            IpVersion::V6
+        } else {
+            IpVersion::V4
+        };
+        let listener_ports = udp_hole_punch_listener_ports(
+            listener_port,
+            family,
+            &self.running_listeners.local_listener_urls(),
+            &self.host.mapped_listeners(),
+        )?;
         let peer_manager = self.peer_manager.as_ref().and_then(Weak::upgrade);
         let preferred_source = match preferred_src_ipv6.map(Ipv6Addr::from) {
             Some(ip) => {
@@ -1408,36 +1480,127 @@ where
         };
 
         for _ in 0..3 {
-            for connector_addr in &connector_addrs {
-                let result = match connector_addr {
-                    SocketAddr::V4(addr) => {
-                        send_v4_hole_punch_control_packet(
-                            self.host.as_ref(),
-                            self.socket_context.clone(),
+            for listener_port in &listener_ports {
+                for connector_addr in &connector_addrs {
+                    let result = match connector_addr {
+                        SocketAddr::V4(addr) => {
+                            send_v4_hole_punch_control_packet(
+                                self.host.as_ref(),
+                                self.socket_context.clone(),
+                                *listener_port,
+                                *addr,
+                            )
+                            .await
+                        }
+                        SocketAddr::V6(addr) => {
+                            send_v6_hole_punch_control_packet(
+                                self.host.as_ref(),
+                                self.socket_context.clone(),
+                                *listener_port,
+                                *addr,
+                                preferred_source,
+                            )
+                            .await
+                        }
+                    };
+                    if let Err(error) = result {
+                        tracing::debug!(
+                            ?error,
+                            ?connector_addr,
                             listener_port,
-                            *addr,
-                        )
-                        .await
+                            "send UDP punch packet failed"
+                        );
                     }
-                    SocketAddr::V6(addr) => {
-                        send_v6_hole_punch_control_packet(
-                            self.host.as_ref(),
-                            self.socket_context.clone(),
-                            listener_port,
-                            *addr,
-                            preferred_source,
-                        )
-                        .await
-                    }
-                };
-                if let Err(error) = result {
-                    tracing::debug!(?error, ?connector_addr, "send UDP punch packet failed");
                 }
             }
             crate::foundation::time::sleep(Duration::from_millis(30)).await;
         }
         Ok(Void::default())
     }
+}
+
+fn udp_hole_punch_listener_ports(
+    requested_port: u16,
+    family: IpVersion,
+    running_listeners: &[Url],
+    mapped_listeners: &[Url],
+) -> anyhow::Result<Vec<u16>> {
+    anyhow::ensure!(
+        requested_port != 0,
+        "UDP punch listener port must be nonzero"
+    );
+    let same_family_udp = |url: &Url| {
+        url.scheme() == "udp"
+            && matches!(
+                (literal_url_ip(url), family),
+                (Some(IpAddr::V4(_)), IpVersion::V4) | (Some(IpAddr::V6(_)), IpVersion::V6)
+            )
+    };
+    let actual_ports = running_listeners
+        .iter()
+        .filter(|url| same_family_udp(url))
+        .filter_map(mapped_listener_port)
+        .filter(|port| *port != 0)
+        .collect::<BTreeSet<_>>();
+    if actual_ports.contains(&requested_port) {
+        return Ok(vec![requested_port]);
+    }
+    anyhow::ensure!(
+        mapped_listeners.iter().any(|url| {
+            same_family_udp(url) && mapped_listener_port(url) == Some(requested_port)
+        }),
+        "UDP punch port {requested_port} is not a known {family:?} listener or mapped advertisement"
+    );
+    anyhow::ensure!(
+        !actual_ports.is_empty(),
+        "mapped UDP advertisement has no running {family:?} listener"
+    );
+    anyhow::ensure!(
+        actual_ports.len() <= MAX_UDP_HOLE_PUNCH_LISTENER_PORTS,
+        "mapped UDP advertisement has too many possible local listeners: {}",
+        actual_ports.len()
+    );
+    Ok(actual_ports.into_iter().collect())
+}
+
+#[cfg(feature = "test-utils")]
+pub async fn send_udp_hole_punch_packet_for_test<H>(
+    host: Arc<H>,
+    running_listeners: Vec<Url>,
+    socket_context: SocketContext,
+    request: SendUdpHolePunchPacketRequest,
+    foreign_network: bool,
+) -> rpc_types::error::Result<Void>
+where
+    H: DirectConnectorHost,
+{
+    #[derive(Debug)]
+    struct TestListeners(Vec<Url>);
+    impl LocalListenerUrls for TestListeners {
+        fn local_listener_urls(&self) -> Vec<Url> {
+            self.0.clone()
+        }
+    }
+    let listeners = Arc::new(TestListeners(running_listeners));
+    let handler = if foreign_network {
+        DirectConnectorRpcHandler::new_for_foreign_network_with_stun(
+            host,
+            socket_context,
+            None,
+            listeners,
+        )
+    } else {
+        DirectConnectorRpcHandler::new_with_running_listeners_and_stun(
+            host,
+            None,
+            listeners,
+            socket_context,
+            None,
+        )
+    };
+    handler
+        .send_udp_hole_punch_packet(BaseController::default(), request)
+        .await
 }
 
 fn connector_addrs_from_request(
@@ -1456,6 +1619,15 @@ fn connector_addrs_from_request(
                 .connector_addr
                 .ok_or_else(|| anyhow::anyhow!("connector_addr is required"))?
                 .into(),
+        );
+    }
+    let use_ipv6 = connector_addrs[0].is_ipv6();
+    if connector_addrs
+        .iter()
+        .any(|addr| addr.is_ipv6() != use_ipv6)
+    {
+        return Err(
+            anyhow::anyhow!("UDP punch connector addresses must use one address family").into(),
         );
     }
     let mut deduped = Vec::with_capacity(connector_addrs.len());
@@ -1494,14 +1666,32 @@ async fn resolve_mapped_listener_addrs(
 fn resolve_literal_url(url: &Url, ip_version: IpVersion) -> anyhow::Result<SocketAddr> {
     let port =
         mapped_listener_port(url).ok_or_else(|| anyhow::anyhow!("listener has no port: {url}"))?;
-    match (url.host(), ip_version) {
-        (Some(Host::Ipv4(ip)), IpVersion::V4 | IpVersion::Both) => {
-            Ok(SocketAddr::new(IpAddr::V4(ip), port))
-        }
-        (Some(Host::Ipv6(ip)), IpVersion::V6 | IpVersion::Both) => {
-            Ok(SocketAddr::new(IpAddr::V6(ip), port))
+    match (literal_url_ip(url), ip_version) {
+        (Some(ip @ IpAddr::V4(_)), IpVersion::V4 | IpVersion::Both)
+        | (Some(ip @ IpAddr::V6(_)), IpVersion::V6 | IpVersion::Both) => {
+            Ok(SocketAddr::new(ip, port))
         }
         _ => anyhow::bail!("URL host does not match {ip_version:?}: {url}"),
+    }
+}
+
+fn literal_url_ip(url: &Url) -> Option<IpAddr> {
+    match url.host()? {
+        Host::Ipv4(ip) => Some(IpAddr::V4(ip)),
+        Host::Ipv6(ip) => Some(IpAddr::V6(ip)),
+        // Non-special schemes retain IPv4 literals as Domain hosts.
+        Host::Domain(host) => host.parse::<Ipv4Addr>().ok().map(IpAddr::V4),
+    }
+}
+
+fn public_udp_punch_family(url: &Url) -> Option<IpVersion> {
+    if url.scheme() != "udp" {
+        return None;
+    }
+    match literal_url_ip(url) {
+        Some(IpAddr::V4(ip)) if is_public_ipv4(ip) => Some(IpVersion::V4),
+        Some(IpAddr::V6(_)) => Some(IpVersion::V6),
+        _ => None,
     }
 }
 
@@ -1516,6 +1706,7 @@ fn is_public_ipv4(ip: Ipv4Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connectivity::NoLocalListeners;
 
     #[test]
     fn ipv6_preference_is_opt_in() {
@@ -1549,6 +1740,47 @@ mod tests {
         assert!(state.should_attempt(9, false, false));
         state.completed(10, false, false);
         assert!(state.should_attempt(10, false, false));
+    }
+
+    #[tokio::test]
+    async fn ipv6_udp_punch_uses_full_mapping_before_native_candidates() {
+        let mapped = "[2001:db8::7]:2862".parse::<SocketAddrV6>().unwrap();
+        let native = "2001:db8::8".parse::<Ipv6Addr>().unwrap();
+        let addrs = ipv6_udp_punch_addrs(40000, async { Ok(mapped) }, async {
+            Ok(vec![*mapped.ip(), native])
+        })
+        .await;
+
+        assert_eq!(
+            addrs,
+            vec![
+                SocketAddr::V6(mapped),
+                SocketAddr::new(native.into(), 40000)
+            ]
+        );
+        assert!(!addrs.contains(&SocketAddr::new((*mapped.ip()).into(), 40000)));
+    }
+
+    #[tokio::test]
+    async fn ipv6_udp_punch_without_stun_preserves_native_fallback() {
+        let native = "2001:db8::8".parse::<Ipv6Addr>().unwrap();
+        let addrs = ipv6_udp_punch_addrs(
+            40000,
+            async { anyhow::bail!("no IPv6 STUN servers") },
+            async { Ok(vec![native]) },
+        )
+        .await;
+        assert_eq!(addrs, vec![SocketAddr::new(native.into(), 40000)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ipv6_udp_punch_mapping_timeout_keeps_fallback_bounded() {
+        let native = "2001:db8::8".parse::<Ipv6Addr>().unwrap();
+        let started = tokio::time::Instant::now();
+        let addrs =
+            ipv6_udp_punch_addrs(40000, std::future::pending(), async { Ok(vec![native]) }).await;
+        assert_eq!(addrs, vec![SocketAddr::new(native.into(), 40000)]);
+        assert_eq!(started.elapsed(), IPV6_PORT_MAPPING_TIMEOUT);
     }
 
     #[tokio::test]
@@ -1680,6 +1912,128 @@ mod tests {
         assert_eq!(transport, DirectTransport::Tcp(TcpSocketPurpose::FakeTcp));
         assert!(!transport.supports_interface_bind());
         assert!(!transport.is_udp());
+    }
+
+    #[test]
+    fn parsed_udp_literals_select_punch_without_treating_dns_as_literal() {
+        for (raw_url, expected_family) in [
+            ("udp://198.51.100.7:2862", Some(IpVersion::V4)),
+            ("udp://[2001:db8::7]:2862", Some(IpVersion::V6)),
+            ("udp://192.168.1.7:2862", None),
+            ("udp://peer.example:2862", None),
+            ("tcp://198.51.100.7:2862", None),
+        ] {
+            // Use the same parse after serialization as connect_to_url_once.
+            let url = Url::parse(raw_url).unwrap();
+            assert_eq!(public_udp_punch_family(&url), expected_family, "{raw_url}");
+        }
+        let v4 = Url::parse("udp://198.51.100.7:2862").unwrap();
+        assert!(matches!(v4.host(), Some(Host::Domain(_))));
+        assert_eq!(
+            resolve_literal_url(&v4, IpVersion::V4).unwrap(),
+            "198.51.100.7:2862".parse().unwrap()
+        );
+        assert!(resolve_literal_url(&v4, IpVersion::V6).is_err());
+        let v6 = Url::parse("udp://[2001:db8::7]:2862").unwrap();
+        assert_eq!(
+            resolve_literal_url(&v6, IpVersion::V6).unwrap(),
+            "[2001:db8::7]:2862".parse().unwrap()
+        );
+        assert!(resolve_literal_url(&v6, IpVersion::V4).is_err());
+        let dns = Url::parse("udp://peer.example:2862").unwrap();
+        assert_eq!(literal_url_ip(&dns), None);
+        assert!(resolve_literal_url(&dns, IpVersion::Both).is_err());
+    }
+
+    #[test]
+    fn udp_punch_mapped_port_selects_actual_listener_in_each_family() {
+        for (family, local, wrong_family, mapped) in [
+            (
+                IpVersion::V4,
+                "udp://0.0.0.0:40000",
+                "udp://[::]:2862",
+                "udp://198.51.100.7:2862",
+            ),
+            (
+                IpVersion::V6,
+                "udp://[::]:40000",
+                "udp://0.0.0.0:2862",
+                "udp://[2001:db8::7]:2862",
+            ),
+        ] {
+            let ports = udp_hole_punch_listener_ports(
+                2862,
+                family,
+                &[local.parse().unwrap(), wrong_family.parse().unwrap()],
+                &[mapped.parse().unwrap()],
+            )
+            .unwrap();
+            assert_eq!(ports, vec![40000]);
+        }
+    }
+
+    #[test]
+    fn udp_punch_exact_local_port_takes_precedence_over_mapped_candidates() {
+        let listeners = ["udp://[::]:40000", "udp://[::]:40001"].map(|url| url.parse().unwrap());
+        assert_eq!(
+            udp_hole_punch_listener_ports(40000, IpVersion::V6, &listeners, &[]).unwrap(),
+            vec![40000]
+        );
+    }
+
+    #[test]
+    fn udp_punch_rejects_unknown_and_ambiguous_advertisements() {
+        let running = ["udp://[::]:40000".parse().unwrap()];
+        for mapped in [
+            Vec::new(),
+            vec!["udp://[2001:db8::7]:2863".parse().unwrap()],
+            vec!["udp://198.51.100.7:2862".parse().unwrap()],
+            vec!["tcp://[2001:db8::7]:2862".parse().unwrap()],
+            vec!["udp://mapped.example:2862".parse().unwrap()],
+        ] {
+            assert!(udp_hole_punch_listener_ports(2862, IpVersion::V6, &running, &mapped).is_err());
+        }
+        assert!(
+            udp_hole_punch_listener_ports(
+                2862,
+                IpVersion::V6,
+                &[],
+                &["udp://[2001:db8::7]:2862".parse().unwrap()]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn udp_punch_mapped_candidates_are_deduplicated_and_bounded_without_truncation() {
+        let mapped = ["udp://[2001:db8::7]:2862".parse().unwrap()];
+        let mut running = (40000..40016)
+            .map(|port| format!("udp://[::]:{port}").parse().unwrap())
+            .collect::<Vec<_>>();
+        running.push("udp://[::1]:40000".parse().unwrap());
+        let ports = udp_hole_punch_listener_ports(2862, IpVersion::V6, &running, &mapped).unwrap();
+        assert_eq!(ports, (40000..40016).collect::<Vec<_>>());
+        running.push("udp://[::]:40016".parse().unwrap());
+        assert!(udp_hole_punch_listener_ports(2862, IpVersion::V6, &running, &mapped).is_err());
+        assert_eq!(
+            udp_hole_punch_listener_ports(40016, IpVersion::V6, &running, &mapped).unwrap(),
+            vec![40016]
+        );
+    }
+
+    #[test]
+    fn udp_punch_request_rejects_mixed_families_before_address_cap() {
+        let mut request = SendUdpHolePunchPacketRequest {
+            listener_port: 40000,
+            connector_addrs: (1..=MAX_UDP_HOLE_PUNCH_CONNECTOR_ADDRS)
+                .map(|port| SocketAddr::from(([127, 0, 0, 1], port as u16)).into())
+                .collect(),
+            ..Default::default()
+        };
+        request
+            .connector_addrs
+            .push("[2001:db8::7]:40000".parse::<SocketAddr>().unwrap().into());
+        assert!(connector_addrs_from_request(request).is_err());
     }
 
     #[test]

@@ -14,7 +14,7 @@
     "lint:fix": "eslint . --ignore-pattern src-tauri --fix",
     "typecheck": "tsc --noEmit",
     "test:react": "vitest run src/react/lib/*.test.ts --silent",
-    "test:browser": "node --test tests/react-browser.test.mjs",
+    "test:browser": "node --test tests/*browser.test.mjs",
     "test:native": "vitest run src/native/*.test.ts --silent",
     "lint:react": "eslint --config eslint.react.config.js src/react src/main.tsx vite.config.ts tests/react-browser.test.mjs tests/mock-tauri.mjs"
   },

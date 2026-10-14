@@ -335,6 +335,7 @@ where
         let socket_context = self.udp_socket_context.clone();
         let stun_servers_v6 = self.stun_servers_v6.clone();
         let public_ipv6 = self.public_ipv6.clone();
+        let nat_test_time = self.nat_test_result_time.clone();
         let redetect_notify = self.redetect_notify.clone();
         self.tasks.lock().unwrap().spawn(async move {
             loop {
@@ -347,6 +348,7 @@ where
                 )
                 .await
                 {
+                    *nat_test_time.write().unwrap() = unix_timestamp();
                     *public_ipv6.write().unwrap() = Some(ip);
                 }
 
@@ -374,7 +376,8 @@ where
         self.start_stun_routine();
         let udp_result = self.udp_nat_test_result.read().unwrap().clone();
         let tcp_result = self.tcp_nat_test_result.read().unwrap().clone();
-        if udp_result.is_none() && tcp_result.is_none() {
+        let public_ipv6 = *self.public_ipv6.read().unwrap();
+        if udp_result.is_none() && tcp_result.is_none() && public_ipv6.is_none() {
             return StunInfo::default();
         }
 
@@ -385,7 +388,7 @@ where
         if let Some(result) = &tcp_result {
             public_ip.extend(result.public_ips().into_iter().map(|ip| ip.to_string()));
         }
-        if let Some(ip) = *self.public_ipv6.read().unwrap() {
+        if let Some(ip) = public_ipv6 {
             public_ip.insert(ip.to_string());
         }
 
@@ -487,23 +490,38 @@ where
         &self,
         socket: Arc<<R as VirtualUdpSocketFactory>::Socket>,
     ) -> anyhow::Result<SocketAddr> {
+        let use_ipv6 = socket.local_addr()?.is_ipv6();
+        let ip_version = if use_ipv6 {
+            IpVersion::V6
+        } else {
+            IpVersion::V4
+        };
         self.start_stun_routine();
-        let mut servers = self
-            .udp_nat_test_result
-            .read()
-            .unwrap()
-            .clone()
-            .map(|result| result.collect_available_stun_server())
-            .unwrap_or_default();
+        let mut servers = if use_ipv6 {
+            Vec::new()
+        } else {
+            self.udp_nat_test_result
+                .read()
+                .unwrap()
+                .clone()
+                .map(|result| result.collect_available_stun_server())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(SocketAddr::is_ipv4)
+                .collect::<Vec<_>>()
+        };
         if servers.is_empty() {
+            let hosts = if use_ipv6 {
+                self.stun_servers_v6.read().unwrap().clone()
+            } else {
+                self.stun_servers.read().unwrap().clone()
+            };
             let mut resolver = HostResolverIter::new(
                 self.dns.clone(),
-                self.udp_socket_context
-                    .clone()
-                    .with_ip_version(IpVersion::V4),
-                self.stun_servers.read().unwrap().clone(),
+                self.udp_socket_context.clone().with_ip_version(ip_version),
+                hosts,
                 2,
-                false,
+                use_ipv6,
             );
             while let Some(addr) = resolver.next().await {
                 servers.push(addr);
@@ -516,7 +534,9 @@ where
         for server in servers {
             match udp_bind_request(socket.clone(), server).await {
                 Ok(response) => {
-                    if let Some(mapped_addr) = response.mapped_socket_addr {
+                    if let Some(mapped_addr) = response.mapped_socket_addr
+                        && mapped_addr.is_ipv6() == use_ipv6
+                    {
                         return Ok(mapped_addr);
                     }
                 }
@@ -559,10 +579,13 @@ mod tests {
     use crate::socket::{
         NetNamespace,
         tcp::{TcpConnectOptions, VirtualTcpSocket, VirtualTcpSocketFactory},
-        udp::{UdpBindOptions, UdpSocketPurpose},
+        udp::{
+            UdpBindOptions, UdpSessionLayer, UdpSessionSocket, UdpSocketPurpose, is_stun_packet,
+            new_sack_packet, parse_udp_session_datagram,
+        },
     };
 
-    use crate::packet::stun::Attribute;
+    use crate::packet::{UdpPacketType, stun::Attribute};
     use stun_codec::rfc5389::{attributes::XorMappedAddress, methods::BINDING};
     use stun_codec::{Message, MessageClass, MessageDecoder, MessageEncoder};
 
@@ -571,8 +594,25 @@ mod tests {
     struct MockUdpSocket {
         local_addr: SocketAddr,
         mapped_addr: SocketAddr,
+        respond_to_stun: bool,
+        recv_started: AtomicBool,
+        sent_servers: Mutex<Vec<SocketAddr>>,
         responses: Mutex<VecDeque<(Vec<u8>, SocketAddr)>>,
         response_ready: tokio::sync::Notify,
+    }
+
+    impl MockUdpSocket {
+        fn new(local_addr: SocketAddr, mapped_addr: SocketAddr) -> Self {
+            Self {
+                local_addr,
+                mapped_addr,
+                respond_to_stun: true,
+                recv_started: AtomicBool::new(false),
+                sent_servers: Mutex::new(Vec::new()),
+                responses: Mutex::new(VecDeque::new()),
+                response_ready: tokio::sync::Notify::new(),
+            }
+        }
     }
 
     #[async_trait]
@@ -582,6 +622,25 @@ mod tests {
         }
 
         async fn send_to(&self, data: &[u8], addr: SocketAddr) -> io::Result<usize> {
+            self.sent_servers.lock().unwrap().push(addr);
+            if !is_stun_packet(data) {
+                let packet = parse_udp_session_datagram(bytes::BytesMut::from(data), false)
+                    .map_err(io::Error::other)?;
+                let header = packet.udp_tunnel_header().unwrap();
+                if header.msg_type == UdpPacketType::Syn as u8 && packet.udp_payload().len() == 8 {
+                    let conn_id = header.conn_id.get();
+                    let magic = u64::from_le_bytes(packet.udp_payload()[..8].try_into().unwrap());
+                    self.responses
+                        .lock()
+                        .unwrap()
+                        .push_back((new_sack_packet(conn_id, magic).into_bytes().to_vec(), addr));
+                    self.response_ready.notify_one();
+                }
+                return Ok(data.len());
+            }
+            if !self.respond_to_stun {
+                return Ok(data.len());
+            }
             let request = MessageDecoder::<Attribute>::new()
                 .decode_from_bytes(data)
                 .map_err(|error| io::Error::other(format!("{error:?}")))?
@@ -603,6 +662,7 @@ mod tests {
         }
 
         async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+            self.recv_started.store(true, Ordering::Release);
             loop {
                 if let Some((bytes, addr)) = self.responses.lock().unwrap().pop_front() {
                     buf[..bytes.len()].copy_from_slice(&bytes);
@@ -656,6 +716,7 @@ mod tests {
     #[derive(Default)]
     struct MockRuntime {
         udp_binds: Mutex<Vec<UdpBindOptions>>,
+        fail_ipv4_binds: bool,
     }
 
     #[async_trait]
@@ -663,13 +724,27 @@ mod tests {
         type Socket = MockUdpSocket;
 
         async fn bind_udp(&self, options: UdpBindOptions) -> anyhow::Result<Arc<Self::Socket>> {
+            let is_ipv6 = options.context.ip_version == IpVersion::V6;
             self.udp_binds.lock().unwrap().push(options);
-            Ok(Arc::new(MockUdpSocket {
-                local_addr: "0.0.0.0:40000".parse().unwrap(),
-                mapped_addr: "198.51.100.10:40123".parse().unwrap(),
-                responses: Mutex::new(VecDeque::new()),
-                response_ready: tokio::sync::Notify::new(),
-            }))
+            if self.fail_ipv4_binds && !is_ipv6 {
+                anyhow::bail!("IPv4 is unavailable");
+            }
+            Ok(Arc::new(MockUdpSocket::new(
+                if is_ipv6 {
+                    "[::]:40000"
+                } else {
+                    "0.0.0.0:40000"
+                }
+                .parse()
+                .unwrap(),
+                if is_ipv6 {
+                    "[2001:db8::7]:40123"
+                } else {
+                    "198.51.100.10:40123"
+                }
+                .parse()
+                .unwrap(),
+            )))
         }
     }
 
@@ -736,6 +811,63 @@ mod tests {
         assert_eq!(collector.tcp_socket_context, tcp_context);
     }
 
+    #[test]
+    fn collector_reports_ipv6_when_ipv4_nat_detection_has_no_result() {
+        let collector = StunInfoCollector::new(
+            Arc::new(MockRuntime::default()),
+            Arc::new(MockDns),
+            SocketContext::default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        // Keep this snapshot test independent of background detection tasks.
+        collector.started.store(true, Ordering::Release);
+        assert_eq!(collector.get_stun_info(), StunInfo::default());
+
+        *collector.public_ipv6.write().unwrap() = Some("2001:db8::7".parse().unwrap());
+        let info = collector.get_stun_info();
+
+        assert_eq!(info.public_ip, vec!["2001:db8::7"]);
+        assert_eq!(info.udp_nat_type, NatType::Unknown as i32);
+        assert_eq!(info.tcp_nat_type, NatType::Unknown as i32);
+        assert_eq!(info.min_port, 0);
+        assert_eq!(info.max_port, 0);
+    }
+
+    #[tokio::test]
+    async fn successful_ipv6_detection_refreshes_timestamp_without_ipv4() {
+        let collector = StunInfoCollector::new(
+            Arc::new(MockRuntime {
+                fail_ipv4_binds: true,
+                ..Default::default()
+            }),
+            Arc::new(MockDns),
+            SocketContext::default(),
+            Vec::new(),
+            Vec::new(),
+            vec!["[2001:db8::1]:3478".to_owned()],
+        );
+        *collector.nat_test_result_time.write().unwrap() = 0;
+        let detection_started = unix_timestamp();
+        collector.get_stun_info();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while collector.public_ipv6.read().unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("IPv6 STUN detection must complete");
+
+        assert!(collector.udp_nat_test_result.read().unwrap().is_none());
+        assert!(collector.tcp_nat_test_result.read().unwrap().is_none());
+        let info = collector.get_stun_info();
+        assert_eq!(info.public_ip, vec!["2001:db8::7"]);
+        assert_eq!(info.udp_nat_type, NatType::Unknown as i32);
+        assert_eq!(info.tcp_nat_type, NatType::Unknown as i32);
+        assert!(info.last_update_time >= detection_started);
+    }
+
     #[tokio::test]
     async fn udp_mapping_uses_portable_runtime_and_instance_context() {
         let runtime = Arc::new(MockRuntime::default());
@@ -764,5 +896,182 @@ mod tests {
             binds[0].context.netns.as_ref().map(|netns| netns.token()),
             Some("instance-a")
         );
+    }
+
+    fn mapping_collector(
+        udp_servers: &[&str],
+        udp_v6_servers: &[&str],
+    ) -> StunInfoCollector<MockRuntime, MockDns> {
+        let collector = StunInfoCollector::new(
+            Arc::new(MockRuntime::default()),
+            Arc::new(MockDns),
+            SocketContext::default(),
+            udp_servers
+                .iter()
+                .map(|server| (*server).to_owned())
+                .collect(),
+            Vec::new(),
+            udp_v6_servers
+                .iter()
+                .map(|server| (*server).to_owned())
+                .collect(),
+        );
+        // Mapping tests must use only the supplied socket, without background probes.
+        collector.started.store(true, Ordering::Release);
+        collector
+    }
+
+    async fn cache_ipv4_stun_result(
+        collector: &StunInfoCollector<MockRuntime, MockDns>,
+        server: &str,
+    ) {
+        let socket = Arc::new(MockUdpSocket::new(
+            "0.0.0.0:40000".parse().unwrap(),
+            "198.51.100.10:40123".parse().unwrap(),
+        ));
+        let result = UdpNatTypeDetector::new(
+            collector.runtime.clone(),
+            collector.dns.clone(),
+            collector.udp_socket_context.clone(),
+            vec![server.to_owned()],
+            1,
+        )
+        .detect_nat_type_with_socket(socket)
+        .await
+        .unwrap();
+        *collector.udp_nat_test_result.write().unwrap() = Some(result);
+    }
+
+    fn assert_only_stun_server(socket: &MockUdpSocket, server: &str) {
+        assert_eq!(
+            socket
+                .sent_servers
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([server.parse::<SocketAddr>().unwrap()])
+        );
+    }
+
+    #[tokio::test]
+    async fn ipv6_udp_socket_mapping_preserves_reflected_port_and_ignores_ipv4_cache() {
+        let collector = mapping_collector(
+            &["192.0.2.1:3478"],
+            &["192.0.2.2:3478", "[2001:db8::1]:3478"],
+        );
+        cache_ipv4_stun_result(&collector, "192.0.2.3:3478").await;
+        let socket = Arc::new(MockUdpSocket::new(
+            "[::]:40000".parse().unwrap(),
+            "[2001:db8::7]:2862".parse().unwrap(),
+        ));
+
+        let mapped = collector
+            .get_udp_port_mapping_with_socket(socket.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(mapped, "[2001:db8::7]:2862".parse().unwrap());
+        assert_ne!(mapped.port(), socket.local_addr().unwrap().port());
+        assert_only_stun_server(&socket, "[2001:db8::1]:3478");
+        assert!(collector.runtime.udp_binds.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ipv4_udp_socket_mapping_prefers_cached_servers() {
+        let collector = mapping_collector(&["192.0.2.1:3478"], &["[2001:db8::1]:3478"]);
+        cache_ipv4_stun_result(&collector, "192.0.2.3:3478").await;
+        let socket = Arc::new(MockUdpSocket::new(
+            "0.0.0.0:40000".parse().unwrap(),
+            "198.51.100.10:40123".parse().unwrap(),
+        ));
+
+        let mapped = collector
+            .get_udp_port_mapping_with_socket(socket.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(mapped, "198.51.100.10:40123".parse().unwrap());
+        assert_only_stun_server(&socket, "192.0.2.3:3478");
+        assert!(collector.runtime.udp_binds.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ipv6_udp_socket_mapping_never_falls_back_to_ipv4_servers() {
+        let collector = mapping_collector(&["192.0.2.1:3478"], &[]);
+        cache_ipv4_stun_result(&collector, "192.0.2.3:3478").await;
+        let socket = Arc::new(MockUdpSocket::new(
+            "[::]:40000".parse().unwrap(),
+            "[2001:db8::7]:2862".parse().unwrap(),
+        ));
+
+        assert!(
+            collector
+                .get_udp_port_mapping_with_socket(socket.clone())
+                .await
+                .is_err()
+        );
+        assert!(socket.sent_servers.lock().unwrap().is_empty());
+        assert!(collector.runtime.udp_binds.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn udp_socket_mapping_rejects_mapped_addresses_from_other_family() {
+        for (local_addr, mapped_addr, server) in [
+            ("[::]:40000", "198.51.100.10:2862", "[2001:db8::1]:3478"),
+            ("0.0.0.0:40000", "[2001:db8::7]:2862", "192.0.2.1:3478"),
+        ] {
+            let collector = mapping_collector(
+                &["[2001:db8::2]:3478", "192.0.2.1:3478"],
+                &["192.0.2.2:3478", "[2001:db8::1]:3478"],
+            );
+            let socket = Arc::new(MockUdpSocket::new(
+                local_addr.parse().unwrap(),
+                mapped_addr.parse().unwrap(),
+            ));
+
+            assert!(
+                collector
+                    .get_udp_port_mapping_with_socket(socket.clone())
+                    .await
+                    .is_err()
+            );
+            assert_only_stun_server(&socket, server);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_ipv6_udp_mapping_releases_same_socket_for_session_handshake() {
+        let collector = mapping_collector(&[], &["[2001:db8::1]:3478"]);
+        let socket = Arc::new(MockUdpSocket {
+            respond_to_stun: false,
+            ..MockUdpSocket::new(
+                "[::]:40000".parse().unwrap(),
+                "[2001:db8::7]:2862".parse().unwrap(),
+            )
+        });
+
+        tokio::time::timeout(
+            Duration::from_millis(10),
+            collector.get_udp_port_mapping_with_socket(socket.clone()),
+        )
+        .await
+        .expect_err("the unresponsive STUN query must be cancelled");
+        assert!(socket.recv_started.load(Ordering::Acquire));
+        assert_only_stun_server(&socket, "[2001:db8::1]:3478");
+
+        // Transfer ownership immediately; no yield or cleanup wait precedes connect.
+        let layer = UdpSessionLayer::new(socket.clone());
+        let remote_addr = "[2001:db8::9]:22020".parse().unwrap();
+        // Finish before the 200 ms SYN retry, so a stolen first SACK fails this test.
+        let session = tokio::time::timeout(Duration::from_millis(100), layer.connect(remote_addr))
+            .await
+            .expect("the session receiver must get the first SACK after cancellation")
+            .expect("the same socket must complete the IPv6 UDP handshake");
+
+        assert_eq!(session.peer_addr().unwrap(), remote_addr);
+        assert_eq!(layer.local_addr().unwrap(), "[::]:40000".parse().unwrap());
+        assert!(collector.runtime.udp_binds.lock().unwrap().is_empty());
     }
 }

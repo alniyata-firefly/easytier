@@ -3,6 +3,7 @@ import * as Network from '../../../easytier-web/frontend-lib/src/types/network'
 import type * as Api from '../../../easytier-web/frontend-lib/src/modules/api'
 import * as backend from './backend'
 import { prepareVpnService, syncMobileVpnService } from './mobile_vpn'
+import { normalizeGuiMetas, normalizeGuiRuntime } from './runtime'
 
 export class GUIRemoteClient implements Api.RemoteClient {
   validate_config = backend.validateConfig
@@ -11,7 +12,7 @@ export class GUIRemoteClient implements Api.RemoteClient {
     try { await backend.runNetworkInstance(config, save) }
     catch { if (osType() === 'android') await syncMobileVpnService().catch(() => undefined); throw new Error('network_start_failed') }
   }
-  async get_network_info(id: string) { return (await backend.collectNetworkInfo(id)).info?.map?.[id] }
+  async get_network_info(id: string) { return normalizeGuiRuntime((await backend.collectNetworkInfo(id)).info?.map?.[id]) }
   get_vpn_portal_info = backend.getVpnPortalInfo
   async add_vpn_portal_client(id: string, client: { name: string; virtual_ip: string; groups: string[] }): Promise<undefined> { await backend.addVpnPortalClient(id, client) }
   async remove_vpn_portal_client(id: string, name: string): Promise<undefined> { await backend.removeVpnPortalClient(id, name) }
@@ -33,5 +34,5 @@ export class GUIRemoteClient implements Api.RemoteClient {
     try { return { config: await backend.generateNetworkConfig(toml) } }
     catch { return { error: 'config_parse_failed' } }
   }
-  get_network_metas = backend.getNetworkMetas
+  async get_network_metas(ids: string[]) { return normalizeGuiMetas(await backend.getNetworkMetas(ids)) }
 }

@@ -1,7 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import { NativeSession, Api, NetworkTypes, Utils, loadLastNetworkInstanceId, saveLastNetworkInstanceId, initializeDesktopTray, updateDesktopTray, copyText, type Mode } from '../native/bridge';
-import { normalizeNetworkRuntime } from '../../../easytier-web/frontend-lib/src/modules/runtimeDisplay';
 import { Alert, Button, Dialog, Empty, Field, Icon, LanguageSwitch, Panel, Status, useNotice } from './components/ui';
 import { RuntimePanel } from './components/RuntimePanel';
 const NetworkEditor = lazy(() => import('./components/NetworkEditor').then(module => ({ default: module.NetworkEditor })));
@@ -42,7 +41,7 @@ export function App() {
         if (id !== selectedRef.current) { selectedRef.current = id; setSelected(id); }
         if (id && running.has(id)) {
           const runtime = await client.get_network_info(id);
-          if (alive && selectedRef.current === id) setInfo(normalizeNetworkRuntime(runtime));
+          if (alive && selectedRef.current === id) setInfo(runtime);
         } else if (alive) setInfo(undefined);
       } catch { if (alive) { setLoadingError(true); setInfo(undefined); } }
       if (alive) timer = setTimeout(refresh, 3000);

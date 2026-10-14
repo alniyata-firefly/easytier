@@ -1261,6 +1261,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ephemeral_dual_stack_listeners_advertise_unique_bound_ports() -> anyhow::Result<()> {
+        use crate::listener::plan::{ListenerRuntimeConfig, prepare_listener_plan};
+
+        let host = Arc::new(MockHost::new());
+        let config = ListenerRuntimeConfig::new(
+            vec!["udp://0.0.0.0:0".parse()?],
+            true,
+            SocketContext::default(),
+        );
+        let mut instances = Vec::new();
+        for _ in 0..2 {
+            let plan = prepare_listener_plan::<AcceptedTransport<MockTcpSocket>, MockTcpSocket>(
+                Some(&config),
+                uuid::Uuid::new_v4(),
+                None,
+                None,
+            )?;
+            let registry = Arc::new(RunningListenerRegistry::default());
+            let runtime = CoreListenerRuntime::new_with_events(
+                host.clone(),
+                Arc::new(MockDns),
+                Arc::new(RingTunnelRegistry::default()),
+                plan.transports,
+                Vec::new(),
+                plan.failures,
+                Arc::new(|_: AcceptedTransport<MockTcpSocket>| async { Ok(()) }),
+                Arc::new(()),
+                registry.clone(),
+            );
+            runtime.start().await?;
+            instances.push((runtime, registry));
+        }
+
+        crate::foundation::time::timeout(Duration::from_secs(1), async {
+            while instances.iter().any(|(_, registry)| {
+                registry
+                    .running_listeners()
+                    .iter()
+                    .filter(|url| url.scheme() == "udp")
+                    .count()
+                    != 2
+            }) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+
+        let mut ports = std::collections::HashSet::new();
+        for (_, registry) in &instances {
+            let urls = registry.running_listeners();
+            for host in ["0.0.0.0", "[::]"] {
+                let listener = urls
+                    .iter()
+                    .find(|url| url.scheme() == "udp" && url.host_str() == Some(host))
+                    .expect("both address families must be advertised");
+                let port = listener.port().unwrap();
+                assert_ne!(port, 0);
+                assert!(
+                    ports.insert(port),
+                    "instances must publish independently assigned ports"
+                );
+            }
+        }
+        assert_eq!(ports.len(), 4);
+        for (runtime, registry) in instances {
+            runtime.stop().await;
+            assert!(registry.running_listeners().is_empty());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn tcp_listener_applies_protocol_upgrade_limit() -> anyhow::Result<()> {
         let host = Arc::new(MockHost::new());
         let mut listener = TcpTransportListener::new(

@@ -1,5 +1,6 @@
 export * as nativeApi from './backend'
 export { GUIRemoteClient } from './client'
+export { normalizeGuiRuntime } from './runtime'
 export { NativeSession } from './session'
 export { buildConfigServerUrl, splitConfigServerUrl } from './config_server_credentials'
 export { loadMode, saveMode, loadLastNetworkInstanceId, saveLastNetworkInstanceId } from './storage'

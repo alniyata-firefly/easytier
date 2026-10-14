@@ -148,8 +148,9 @@ pub fn compile(intent: &CentralNetworkIntent) -> Result<CompiledNetwork, Compile
                 acl: acl.get(&member.id).cloned().flatten(),
                 ..Default::default()
             };
-            let network_config =
+            let mut network_config =
                 apply_member_override(base_config, member.config_override.as_ref());
+            ensure_p2p_listener(&mut network_config);
             validate_member_config(&network_config).map_err(|error| {
                 CompileError::InvalidMemberConfig {
                     member_id: member.id,
@@ -168,6 +169,14 @@ pub fn compile(intent: &CentralNetworkIntent) -> Result<CompiledNetwork, Compile
     Ok(CompiledNetwork {
         members: compiled_members,
     })
+}
+
+fn ensure_p2p_listener(config: &mut NetworkConfig) {
+    if config.listener_urls.iter().all(String::is_empty) && config.disable_p2p != Some(true) {
+        // Each instance gets its own OS-assigned port. Core adds an IPv6 shadow
+        // when enabled and advertises both listeners' actual bound ports.
+        config.listener_urls = vec!["udp://0.0.0.0:0".to_owned()];
+    }
 }
 
 fn validate_member_config(config: &NetworkConfig) -> anyhow::Result<()> {
@@ -1245,6 +1254,69 @@ mod tests {
             compile(&duplicate_public_key),
             Err(CompileError::InvalidMemberCredential { .. })
         ));
+    }
+
+    #[test]
+    fn central_members_default_to_independent_dual_stack_udp_listeners() {
+        let mut intent = intent();
+        intent.prefer_ipv6 = true;
+        intent.members[1].config_override = Some(NetworkConfig {
+            mtu: Some(1300),
+            listener_urls: vec![String::new()],
+            ..Default::default()
+        });
+
+        for member in compile(&intent).unwrap().members {
+            assert_eq!(member.network_config.listener_urls, vec!["udp://0.0.0.0:0"]);
+            let normalized =
+                CoreInstanceConfig::from_toml(&member.network_config.gen_config().unwrap())
+                    .unwrap();
+            let listeners = normalized.connectivity.listeners.unwrap();
+            assert_eq!(listeners.urls, vec!["udp://0.0.0.0:0".parse().unwrap()]);
+            assert!(listeners.enable_ipv6);
+            assert!(normalized.connectivity.direct.prefer_ipv6);
+        }
+    }
+
+    #[test]
+    fn automatic_listeners_respect_member_p2p_and_ipv6_settings() {
+        let mut intent = intent();
+        intent.prefer_ipv6 = true;
+        intent.members[1].config_override = Some(NetworkConfig {
+            disable_ipv6: Some(true),
+            ..Default::default()
+        });
+        intent.members[0].config_override = Some(NetworkConfig {
+            disable_p2p: Some(true),
+            ..Default::default()
+        });
+
+        let compiled = compile(&intent).unwrap();
+        let v4_only = &compiled.members[0].network_config;
+        assert_eq!(v4_only.listener_urls, vec!["udp://0.0.0.0:0"]);
+        let normalized = CoreInstanceConfig::from_toml(&v4_only.gen_config().unwrap()).unwrap();
+        assert!(!normalized.connectivity.listeners.unwrap().enable_ipv6);
+        assert!(compiled.members[1].network_config.listener_urls.is_empty());
+        assert_eq!(compiled.members[1].network_config.disable_p2p, Some(true));
+    }
+
+    #[test]
+    fn explicit_listener_ports_are_preserved_per_member() {
+        let mut intent = intent();
+        intent.members[1].config_override = Some(NetworkConfig {
+            listener_urls: vec!["udp://0.0.0.0:22020".to_owned()],
+            ..Default::default()
+        });
+
+        let compiled = compile(&intent).unwrap();
+        assert_eq!(
+            compiled.members[0].network_config.listener_urls,
+            vec!["udp://0.0.0.0:22020"]
+        );
+        assert_eq!(
+            compiled.members[1].network_config.listener_urls,
+            vec!["udp://0.0.0.0:0"]
+        );
     }
 
     #[test]
