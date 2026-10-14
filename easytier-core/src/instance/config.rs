@@ -380,7 +380,7 @@ impl CoreInstanceConfig {
                     ..Default::default()
                 },
                 manual: ManualConnectorOptions {
-                    prefer_ipv6: flags.prefer_ipv6,
+                    prefer_ipv6: flags.enable_ipv6 && flags.prefer_ipv6,
                     bind_device: flags.bind_device,
                     allow_interface_bind: host.allow_interface_bind,
                     tcp_bind: tcp_bind.clone(),
@@ -434,7 +434,7 @@ mod tests {
             .unwrap();
             let normalized = CoreInstanceConfig::from_toml(&config).unwrap();
             assert!(normalized.connectivity.direct.prefer_ipv6);
-            assert!(normalized.connectivity.manual.prefer_ipv6);
+            assert_eq!(normalized.connectivity.manual.prefer_ipv6, enable_ipv6);
             assert_eq!(normalized.connectivity.direct.enable_ipv6, enable_ipv6);
         }
     }
