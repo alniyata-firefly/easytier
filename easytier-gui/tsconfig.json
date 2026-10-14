@@ -1,45 +1,39 @@
 {
   "compilerOptions": {
-    "target": "ESNext",
-    "jsx": "preserve",
+    "target": "ES2022",
     "lib": [
       "DOM",
-      "ESNext"
+      "DOM.Iterable",
+      "ES2022"
     ],
-    "baseUrl": ".",
+    "jsx": "react-jsx",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "baseUrl": ".",
     "paths": {
       "~/*": [
         "src/*"
       ]
     },
-    "resolveJsonModule": true,
     "types": [
-      "vite/client",
-      "vite-plugin-vue-layouts/client",
-      "unplugin-vue-macros/macros-global",
-      "unplugin-vue-router/client"
+      "vite/client"
     ],
-    "allowImportingTsExtensions": true,
-    "allowJs": true,
+    "resolveJsonModule": true,
     "strict": true,
-    "strictNullChecks": true,
-    "noUnusedLocals": true,
     "noEmit": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "isolatedModules": true,
     "skipLibCheck": true
   },
-  "vueCompilerOptions": {
-    "plugins": [
-      "@vue-macros/volar/define-models",
-      "@vue-macros/volar/define-slots"
-    ]
-  },
+  "include": [
+    "src/react",
+    "src/native",
+    "src/main.tsx"
+  ],
   "exclude": [
     "dist",
-    "node_modules"
+    "node_modules",
+    "**/*.test.ts"
   ]
 }

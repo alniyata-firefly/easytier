@@ -32,8 +32,8 @@ use easytier::{
 };
 use easytier_core::management::config_source_to_rpc;
 use easytier_core::management::remote_client::{
-    GetNetworkMetasResponse, ListNetworkInstanceIdsJsonResp, ListNetworkProps, RemoteClientManager,
-    Storage,
+    GetNetworkMetasResponse, ListNetworkInstanceIdsJsonResp, ListNetworkProps, RemoteClientError,
+    RemoteClientManager, Storage,
 };
 use easytier_core::{
     connectivity::protocol::raw::TunnelDialer as _, process_runtime::CoreProcessRuntime,
@@ -131,11 +131,23 @@ async fn run_network_instance(
     let client_manager = get_client_manager!()?;
     let toml_config = cfg.gen_config().map_err(|e| e.to_string())?;
     let _mutation = client_manager.config_mutation.lock().await;
+    let source = match client_manager
+        .handle_get_network_config_with_source(app.clone(), toml_config.get_id())
+        .await
+    {
+        Ok((_, source)) => source,
+        Err(RemoteClientError::NotFound(_)) => ConfigSource::User,
+        Err(error) => return Err(error.to_string()),
+    };
     client_manager
-        .pre_run_network_instance_hook(&app, &toml_config, manager::PersistedConfigSource::User)
+        .pre_run_network_instance_hook(
+            &app,
+            &toml_config,
+            manager::PersistedConfigSource::from_runtime_source(source),
+        )
         .await?;
     client_manager
-        .handle_run_network_instance(app.clone(), cfg, save)
+        .handle_run_network_instance_with_source(app.clone(), cfg, save, source)
         .await
         .map_err(|e| e.to_string())?;
     client_manager

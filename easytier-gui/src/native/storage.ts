@@ -1,0 +1,75 @@
+import { type as osType } from '@tauri-apps/plugin-os'
+import * as Network from '../../../easytier-web/frontend-lib/src/types/network'
+import type { ConfigSource, Mode } from './types'
+import { buildConfigServerUrl, splitConfigServerUrl } from './config_server_credentials'
+
+export interface StoredGuiConfig { config: Network.NetworkConfig; source: ConfigSource }
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export function normalizeConfigSource(source: unknown): ConfigSource {
+  return source === 'web' || source === 'webhook' ? 'web' : source === 'user' ? 'user' : 'legacy'
+}
+
+export function parseStoredConfigs(raw: string | null): StoredGuiConfig[] {
+  let parsed: unknown
+  try { parsed = JSON.parse(raw || '[]') } catch { return [] }
+  if (!Array.isArray(parsed)) return []
+  const configs = new Map<string, StoredGuiConfig>()
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== 'object') continue
+    const value = 'config' in entry ? entry.config : entry
+    if (!value || typeof value !== 'object' || typeof value.instance_id !== 'string'
+      || !uuidPattern.test(value.instance_id)) continue
+    try {
+      const config = Network.normalizeNetworkConfig(value)
+      const source = normalizeConfigSource(entry.source)
+      const previous = configs.get(config.instance_id)
+      configs.set(config.instance_id, { config, source: previous?.source === 'web' ? 'web' : source })
+    } catch { /* Keep the original storage intact if an individual entry is invalid. */ }
+  }
+  return [...configs.values()]
+}
+
+export function loadStoredConfigs(): StoredGuiConfig[] {
+  return parseStoredConfigs(localStorage.getItem('networkList'))
+}
+export function saveStoredConfigs(configs: unknown): void {
+  const normalized = parseStoredConfigs(JSON.stringify(configs))
+  localStorage.setItem('networkList', JSON.stringify(normalized))
+}
+export function loadEnabledNetworks(): string[] {
+  try {
+    const ids: unknown = JSON.parse(localStorage.getItem('enabled_networks') || '[]')
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string' && uuidPattern.test(id)) : []
+  } catch { return [] }
+}
+export function saveEnabledNetworks(ids: unknown): void {
+  if (!Array.isArray(ids)) return
+  localStorage.setItem('enabled_networks', JSON.stringify([...new Set(ids.filter(id => typeof id === 'string' && uuidPattern.test(id)))]))
+}
+export function loadLastNetworkInstanceId(): string | null { return localStorage.getItem('last_network_instance_id') }
+export function saveLastNetworkInstanceId(id: string): void { localStorage.setItem('last_network_instance_id', id) }
+export function saveMode(mode: Mode): void { localStorage.setItem('app_mode', JSON.stringify(mode)) }
+
+export function loadMode(platform = osType()): Mode {
+  let mode: Mode
+  try {
+    const value = JSON.parse(localStorage.getItem('app_mode') || '{}')
+    mode = value && ['normal', 'service', 'remote'].includes(value.mode) ? value : { mode: 'normal' }
+  } catch { mode = { mode: 'normal' } }
+  if (mode.config_server_url && typeof mode.config_server_url !== 'string') {
+    mode.config_server_url = undefined
+    mode.config_server_needs_credentials = true
+  }
+  if (mode.config_server_url) {
+    const credentials = splitConfigServerUrl(mode.config_server_url)
+    if (credentials.legacy) {
+      mode.config_server_url = undefined
+      mode.config_server_needs_credentials = true
+    } else {
+      try { mode.config_server_url = buildConfigServerUrl(credentials.address, credentials.token) }
+      catch { mode.config_server_url = undefined; mode.config_server_needs_credentials = true }
+    }
+  }
+  return platform === 'android' ? { ...mode, mode: 'normal' } : mode
+}

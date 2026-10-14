@@ -1,0 +1,26 @@
+import antfu from '@antfu/eslint-config'
+export default antfu({
+  react: true,
+  vue: false,
+  typescript: true,
+  stylistic: false,
+  formatters: false,
+  ignores: ['src-tauri/**', 'dist/**', 'src/composables/**', 'src/modules/**', 'src/pages/**', 'src/layouts/**', 'src/components/**'],
+  rules: {
+    'antfu/if-newline': 'off',
+    'antfu/consistent-list-newline': 'off',
+    'antfu/top-level-function': 'off',
+    'curly': 'off',
+    'one-var': 'off',
+    'perfectionist/sort-imports': 'off',
+    'perfectionist/sort-named-imports': 'off',
+    'perfectionist/sort-exports': 'off',
+    'unicorn/number-literal-case': 'off',
+    'unicorn/prefer-number-properties': 'off',
+    'regexp/prefer-w': 'off',
+    'regexp/use-ignore-case': 'off',
+    'ts/consistent-type-definitions': 'off',
+    'test/no-import-node-test': 'off',
+    'node/prefer-global/process': 'off',
+  },
+})
