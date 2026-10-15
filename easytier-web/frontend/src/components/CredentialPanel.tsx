@@ -7,6 +7,7 @@ import { RuntimeDisplay } from '../lib/shared';
 import { Alert, Button, Dialog, Empty, Field, Panel, Status, useNotice } from './ui';
 import { errorMessage, NetworkValidationError, splitList } from './NetworkSettingsForm';
 import { MAX_JOIN_CREDENTIAL_SECONDS, resolveLifetime } from '../lib/lifetime';
+import { networkCredentialSnapshot } from '../lib/credential-export';
 
 type GrantForm = { id: string; ttl: string; groups: string; cidrs: string; reusable: boolean; relay: boolean; rotate: boolean };
 const blankForm = (): GrantForm => ({ id: '', ttl: '1', groups: '', cidrs: '', reusable: true, relay: false, rotate: false });
@@ -52,10 +53,8 @@ export function CredentialPanel({ api, network, gateway, onChanged }: { api: Api
         catch (failure) { setError(failure); }
         finally { setBusy(false); }
     };
-    const peers = network.networking_method === 'Gateway' && gateway?.peer_url ? [gateway.peer_url] : network.networking_method === 'PublicServer' ? [network.public_server_url].filter((value): value is string => !!value) : network.peer_urls;
-    const joinCommand = revealed ? ['easytier-core', `--network-name ${RuntimeDisplay.shellQuote(network.network_name)}`, '--secure-mode', `--credential ${RuntimeDisplay.shellQuote(revealed.credential_secret)}`, ...peers.map(peer => `-p ${RuntimeDisplay.shellQuote(peer)}`)].join(' ') : '';
-    const joinToml = revealed ? ['[network_identity]', `network_name = ${JSON.stringify(network.network_name)}`, '', ...peers.flatMap(peer => ['[[peer]]', `uri = ${JSON.stringify(peer)}`, '']), '[secure_mode]', 'enabled = true', `local_private_key = ${JSON.stringify(revealed.credential_secret)}`].join('\n') : '';
-    const joinText = format === 'toml' ? joinToml : format === 'secret' ? revealed?.credential_secret ?? '' : joinCommand;
+    const snapshot = revealed ? networkCredentialSnapshot(network, revealed.credential_secret, gateway?.peer_url) : undefined;
+    const joinText = format === 'toml' ? snapshot?.toml ?? '' : format === 'secret' ? revealed?.credential_secret ?? '' : snapshot?.cli ?? '';
     const copy = async () => { const copied = await RuntimeDisplay.copyText(joinText); notice({ key: copied ? 'credentials.copied' : 'credentials.copyFailed', ns: 'networks' }, copied ? 'success' : 'error'); };
     return <>
         <Panel title={t('credentials.title')} action={<Button icon="plus" onClick={() => openEditor('new')}>{t('credentials.generate')}</Button>}>

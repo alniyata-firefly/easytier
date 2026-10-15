@@ -1213,6 +1213,35 @@ impl Session {
         self.data.read().await.req()
     }
 
+    pub(crate) async fn ensure_config_supported(
+        &self,
+        config: &easytier::proto::api::manage::NetworkConfig,
+    ) -> anyhow::Result<()> {
+        let heartbeat = self.get_heartbeat_req().await;
+        let version = heartbeat
+            .as_ref()
+            .map(|request| request.easytier_version.as_str());
+        if super::runtime_reconcile::ensure_extended_config_supported(config, None, version).is_ok()
+        {
+            return Ok(());
+        }
+        // A backported client can advertise the actual runtime marker even if
+        // its release label predates 2.7.2. A new instance has no such marker,
+        // so its authenticated heartbeat version is required before running.
+        let current = if let Some(instance_id) = config.instance_id.as_deref() {
+            super::runtime_reconcile::get_runtime_config(&mut self.scoped_rpc_client(), instance_id)
+                .await
+                .ok()
+        } else {
+            None
+        };
+        super::runtime_reconcile::ensure_extended_config_supported(
+            config,
+            current.as_ref(),
+            version,
+        )
+    }
+
     pub(crate) async fn reconciliation_error(&self) -> Option<String> {
         let data = self.data.read().await;
         data.managed_runtime().last_reconciliation_error.clone()

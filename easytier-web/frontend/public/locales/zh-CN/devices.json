@@ -183,7 +183,7 @@
     "tomlWarning": "配置包含网络凭据，显示后请注意屏幕及剪贴板安全。",
     "hideToml": "隐藏配置",
     "showToml": "显示只读 TOML",
-    "logTitle": "设备日志级别",
+    "logTitle": "设备文件日志",
     "logUnavailable": "未能读取日志级别，请重试。",
     "logOff": "关闭",
     "logError": "错误",
@@ -199,7 +199,10 @@
     "prefixLength": "前缀长度",
     "noInterfaces": "设备未提供带前缀的接口地址。",
     "currentLevel": "当前级别：",
-    "peerLabel": "节点 {{id}}"
+    "peerLabel": "节点 {{id}}",
+    "fileLogLevel": "文件日志级别",
+    "saveLogLevel": "保存文件日志级别",
+    "logSaveFailed": "保存日志级别失败：{{error}}"
   },
   "notice": {
     "deleted": "实例已删除。",

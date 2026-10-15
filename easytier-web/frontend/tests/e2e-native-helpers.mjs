@@ -87,7 +87,7 @@ export function startCore(configDir,gatewayHost,configPort,token,options={}) {
         '--console-log-level',options.logLevel || 'info'];
     if (options.rpcPort) args.push('--rpc-portal',`127.0.0.1:${options.rpcPort}`);
     args.push(...(options.extraArgs || []));
-    return start(coreBinary,args,{cwd:configDir});
+    return start(options.binary || coreBinary,args,{cwd:configDir});
 }
 
 export function startCredentialCore(configDir,networkName,credential,peerUrl,hostname,rpcPort) {

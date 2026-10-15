@@ -24,7 +24,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::central_network::model::{CentralNetworkIntent, NetworkMode};
+use crate::central_network::model::{CentralNetworkIntent, NetworkMode, NetworkTransportSettings};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayConfig {
@@ -71,6 +71,7 @@ pub(crate) struct GatewayRuntimeSpec {
     secure_mode: bool,
     relay_data: bool,
     prefer_ipv6: bool,
+    transport: NetworkTransportSettings,
     mapped_peer_url: Option<String>,
     credentials: Vec<ManagedCredentialConfig>,
 }
@@ -114,6 +115,7 @@ impl GatewayRuntimeSpec {
             secure_mode: intent.secure_mode,
             relay_data,
             prefer_ipv6: intent.prefer_ipv6,
+            transport: intent.transport.clone(),
             mapped_peer_url: match &intent.mode {
                 NetworkMode::Gateway { peer_url } => Some(peer_url.clone()),
                 _ => None,
@@ -200,6 +202,7 @@ struct NativeGatewayRuntimeFactory {
 
 impl GatewayRuntimeFactory for NativeGatewayRuntimeFactory {
     fn build(&self, spec: &GatewayRuntimeSpec) -> anyhow::Result<Arc<dyn GatewayRuntime>> {
+        spec.transport.validate().map_err(anyhow::Error::msg)?;
         let config = TomlConfigLoader::default();
         #[cfg(test)]
         {
@@ -236,6 +239,7 @@ impl GatewayRuntimeFactory for NativeGatewayRuntimeFactory {
         flags.disable_relay_data = !spec.relay_data;
         flags.bind_device = false;
         flags.prefer_ipv6 = spec.prefer_ipv6;
+        spec.transport.apply_to_flags(&mut flags);
         config.set_flags(flags);
 
         if spec.secure_mode {
@@ -744,6 +748,7 @@ mod tests {
             virtual_cidr: None,
             secure_mode: false,
             prefer_ipv6: false,
+            transport: NetworkTransportSettings::default(),
             members: Vec::new(),
             credentials: Vec::new(),
             acl_policy: None,
@@ -816,6 +821,53 @@ mod tests {
                 .await
                 .running
         );
+        manager.remove(intent.user_id, intent.id).await;
+    }
+
+    #[tokio::test]
+    async fn network_transport_reaches_gateway_and_changes_replace_runtime() {
+        let factory = Arc::new(FakeFactory::default());
+        let manager = manager(factory.clone());
+        let mut intent = gateway_intent(Uuid::new_v4(), "transport-replacement");
+        intent.transport = NetworkTransportSettings {
+            data_compress_algo: Some(1),
+            enable_kcp_proxy: Some(true),
+            disable_kcp_input: Some(false),
+            enable_quic_proxy: Some(false),
+            disable_quic_input: Some(true),
+            encryption_algorithm: Some("aes-gcm".to_owned()),
+            disable_encryption: Some(false),
+            default_protocol: Some("udp".to_owned()),
+            tld_dns_zone: Some("transport.mesh.".to_owned()),
+        };
+        manager.reconcile(&intent).await;
+        assert_eq!(factory.built.lock().unwrap()[0].transport, intent.transport);
+        manager.reconcile(&intent).await;
+        assert_eq!(factory.built.lock().unwrap().len(), 1);
+        intent.transport.data_compress_algo = Some(2);
+        manager.reconcile(&intent).await;
+        assert_eq!(factory.built.lock().unwrap().len(), 2);
+        assert_eq!(factory.built.lock().unwrap()[1].transport, intent.transport);
+        assert_eq!(*factory.stopped.lock().unwrap(), vec![intent.id]);
+        assert!(factory.patched.lock().unwrap().is_empty());
+        let mut replacement = intent.transport.clone();
+        replacement.encryption_algorithm = Some("aes-256-gcm".to_owned());
+        let mut policies = vec![replacement.clone()];
+        replacement.disable_encryption = Some(true);
+        policies.push(replacement.clone());
+        replacement.default_protocol = Some("tcp".to_owned());
+        policies.push(replacement.clone());
+        replacement.tld_dns_zone = Some("replacement.mesh.".to_owned());
+        policies.push(replacement);
+        for (index, policy) in policies.into_iter().enumerate() {
+            intent.transport = policy;
+            manager.reconcile(&intent).await;
+            assert_eq!(factory.built.lock().unwrap().len(), index + 3);
+            assert_eq!(
+                factory.built.lock().unwrap().last().unwrap().transport,
+                intent.transport
+            );
+        }
         manager.remove(intent.user_id, intent.id).await;
     }
 

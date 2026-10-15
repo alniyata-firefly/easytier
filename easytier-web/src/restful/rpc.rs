@@ -63,6 +63,32 @@ pub(crate) async fn handle_proxy_rpc_by_session(
         scope,
     } = req;
 
+    if service_name == "api.manage.WebClientService"
+        && matches!(
+            method_name.as_str(),
+            "run_network_instance" | "RunNetworkInstance"
+        )
+    {
+        let request: RunNetworkInstanceRequest =
+            serde_json::from_value(payload.clone()).map_err(|error| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    other_error(format!("Invalid RPC payload: {error}")).into(),
+                )
+            })?;
+        if let Some(config) = &request.config {
+            session
+                .ensure_config_supported(config)
+                .await
+                .map_err(|error| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        other_error(error.to_string()).into(),
+                    )
+                })?;
+        }
+    }
+
     let mutates_runtime_config = proxy_rpc_mutates_runtime_config(&service_name, &method_name);
     if mutates_runtime_config {
         session

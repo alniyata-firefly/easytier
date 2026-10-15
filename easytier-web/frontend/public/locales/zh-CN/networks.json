@@ -118,7 +118,8 @@
     "rotateHint": "保存时轮换并重新下发给成员。",
     "save": "保存网络设置",
     "saved": "网络设置已保存，正在下发给成员。",
-    "restore": "恢复为最近读取的设置"
+    "restore": "恢复为最近读取的设置",
+    "restoreFailed": "恢复设置失败：{{error}}"
   },
   "members": {
     "title": "网络成员",
@@ -377,5 +378,23 @@
       "cidr": "请填写目标子网 CIDR。",
       "port": "端口无效：{{port}}。请输入 1–65535 内的端口或范围。"
     }
+  },
+  "transport": {
+    "title": "传输设置",
+    "data_compress_algo": "数据压缩",
+    "enable_kcp_proxy": "发起 KCP 代理",
+    "disable_kcp_input": "接收 KCP 代理",
+    "enable_quic_proxy": "发起 QUIC 代理",
+    "disable_quic_input": "接收 QUIC 代理",
+    "inherit": "默认（沿用节点）",
+    "disabled": "关闭",
+    "enabled": "启用",
+    "zstd": "启用 Zstd",
+    "encryption_algorithm": "加密算法",
+    "disable_encryption": "数据加密",
+    "default_protocol": "默认连接协议",
+    "tld_dns_zone_mode": "Magic DNS 域名后缀设置",
+    "tld_dns_zone": "Magic DNS 域名后缀",
+    "custom": "自定义"
   }
 }

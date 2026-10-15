@@ -50,10 +50,32 @@
     "client_name": "客户端名称",
     "client_virtual_ip": "客户端 IPv4 / 前缀长度",
     "client_groups": "客户端 ACL 组",
-    "ipv6_public_addr_provider": "提供 IPv6 公网前缀",
-    "ipv6_public_addr_prefix": "IPv6 公网前缀",
+    "ipv6_public_addr_provider": "提供公网 IPv6 地址",
+    "ipv6_public_addr_prefix": "公网 IPv6 前缀",
     "uplink_mode": "上联网卡选择",
-    "uplink_interfaces": "允许使用的接口"
+    "uplink_interfaces": "允许使用的接口",
+    "data_compress_algo": "数据压缩",
+    "encryption_algorithm": "加密算法",
+    "default_protocol": "默认连接协议",
+    "tld_dns_zone": "Magic DNS 域名后缀",
+    "socket_mark": "Linux 套接字标记",
+    "disable_relay_data": "禁止中继数据",
+    "prefer_peer_relay": "优先使用节点中继",
+    "disable_relay_kcp": "禁止中继 KCP",
+    "disable_relay_quic": "禁止中继 QUIC",
+    "enable_relay_foreign_network_kcp": "允许跨网络中继 KCP",
+    "enable_relay_foreign_network_quic": "允许跨网络中继 QUIC",
+    "foreign_relay_bps_limit": "跨网络中继速率上限（B/s）",
+    "stun_servers": "UDP STUN 服务器",
+    "tcp_stun_servers": "TCP STUN 服务器",
+    "stun_servers_v6": "IPv6 STUN 服务器",
+    "tcp_whitelist": "TCP 端口白名单",
+    "udp_whitelist": "UDP 端口白名单",
+    "virtual_ipv6": "虚拟 IPv6 地址 / 前缀长度",
+    "instance_name": "实例名称",
+    "netns": "Linux 网络命名空间",
+    "socks5_mode": "SOCKS5 监听方式",
+    "socks5_proxy": "SOCKS5 完整监听地址"
   },
   "sections": {
     "connection": "连接与运行",
@@ -61,7 +83,10 @@
     "addressing": "代理与路由",
     "listeners": "监听",
     "forwards": "端口转发",
-    "portal": "VPN 门户"
+    "portal": "VPN 门户",
+    "relay": "中继",
+    "discovery": "地址发现",
+    "ports": "端口访问"
   },
   "preference": {
     "inherit": "跟随网络设置",
@@ -103,9 +128,18 @@
     "invalid": "节点参数无效",
     "forwardIpv6": "IPv6 地址须使用 [IPv6] 格式",
     "ipv4Cidr": "请输入有效的 IPv4 CIDR",
-    "ipv6Cidr": "请输入有效的 IPv6 前缀",
+    "ipv6Cidr": "请输入有效的 IPv6 地址 / 前缀长度",
     "uplinkMode": "请选择自动识别或手动指定",
-    "uplinkInterfaces": "手动模式至少指定一个接口；名称不能重复、包含控制字符或首尾空白"
+    "uplinkInterfaces": "手动模式至少指定一个接口；名称不能重复、包含控制字符或首尾空白",
+    "compression": "请选择关闭或 Zstd 压缩",
+    "namespace": "命名空间须不超过 255 字节，不能为路径、点号或包含首尾空白",
+    "encryption": "请选择有效的加密算法",
+    "transport": "请选择有效的连接协议",
+    "dnsZone": "请输入有效的 ASCII DNS 域名",
+    "optionalList": "必须为包含 values 文本数组的对象",
+    "portList": "请输入 0–65535 之间的端口或递增端口范围",
+    "stunServer": "请输入有效的 STUN 主机、主机:端口或 txt:域名",
+    "socksUrl": "请输入 socks5://IP:端口或 socks5://[IPv6]:端口"
   },
   "uplink": {
     "auto": "自动识别",
@@ -137,5 +171,21 @@
       "virtual": "虚拟接口",
       "unknown": "未知类型"
     }
+  },
+  "compression": {
+    "default": "默认",
+    "none": "关闭",
+    "disabled": "关闭",
+    "zstd": "Zstd"
+  },
+  "lists": {
+    "default": "Core 默认",
+    "disabled": "关闭",
+    "custom": "自定义",
+    "entries": "{{field}}列表"
+  },
+  "socks": {
+    "port": "端口模式",
+    "custom": "自定义监听地址"
   }
 }

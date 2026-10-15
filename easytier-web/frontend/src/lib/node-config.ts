@@ -12,8 +12,13 @@ export const NODE_BOOLEAN_FLAGS = [
     'relay_all_peer_rpc', 'need_p2p', 'multi_thread', 'proxy_forward_by_system',
     'disable_encryption', 'disable_tcp_hole_punching', 'disable_udp_hole_punching',
     'enable_udp_broadcast_relay', 'disable_upnp', 'disable_sym_hole_punching',
-    'enable_magic_dns', 'enable_private_mode',
+    'enable_magic_dns', 'enable_private_mode', 'disable_relay_data', 'prefer_peer_relay',
+    'disable_relay_kcp', 'disable_relay_quic', 'enable_relay_foreign_network_kcp', 'enable_relay_foreign_network_quic',
 ] as const;
+
+export const ENCRYPTION_ALGORITHMS = ['aes-gcm', 'aes-256-gcm', 'chacha20', 'xor'] as const;
+export const NODE_PROTOCOLS = ['tcp', 'udp', 'wg', 'quic', 'ws', 'wss', 'faketcp'] as const;
+const encryptionAliases = new Set([...ENCRYPTION_ALGORITHMS, 'openssl-aes-gcm', 'openssl-aes-256-gcm', 'openssl-chacha20', 'chacha20-poly1305']);
 
 export function isConfigRecord(value: unknown): value is NodeConfigRecord {
     return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -63,7 +68,7 @@ export function parseUint64Input(input: string): { valid: true; value?: string }
     try {
         const value = BigInt(text);
         if (value > UINT64_MAX) return { valid: false };
-        return value === 0n ? { valid: true } : { valid: true, value: value.toString() };
+        return { valid: true, value: value.toString() };
     } catch { return { valid: false }; }
 }
 
@@ -96,12 +101,40 @@ const validSocket = (value: unknown): boolean => {
     return !!match && validIp(match[1].replace(/^\[|\]$/g, '')) && integerIn(Number(match[2]), 0, 65535);
 };
 
+const validDnsZone = (value: string): boolean => {
+    const zone = value.endsWith('.') ? value.slice(0, -1) : value;
+    return zone.length > 0 && zone.length <= 253 && zone.split('.').every(label => label.length > 0 && label.length <= 63 && /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label));
+};
+const validPortSpec = (value: string): boolean => {
+    const parts = value.split('-');
+    return parts.length <= 2 && parts.every(part => /^\d+$/.test(part) && Number(part) <= 65535)
+        && (parts.length === 1 || Number(parts[0]) <= Number(parts[1]));
+};
+const validStunEndpoint = (value: string): boolean => {
+    if (!value || value.trim() !== value) return false;
+    if (value.startsWith('txt:')) return validDnsZone(value.slice(4));
+    if (validIp(value)) return true;
+    const socket = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(value);
+    if (socket) return (validIp(socket[1].replace(/^\[|\]$/g, '')) || validDnsZone(socket[1])) && integerIn(Number(socket[2]), 1, 65535);
+    return validDnsZone(value);
+};
+const validSocksProxy = (value: string): boolean => {
+    try {
+        const url = new URL(value);
+        return url.protocol === 'socks5:' && validIp(url.hostname.replace(/^\[|\]$/g, ''))
+            && !!url.port && integerIn(Number(url.port), 1, 65535) && !url.username && !url.password
+            && !url.search && !url.hash && (!url.pathname || url.pathname === '/');
+    } catch { return false; }
+};
+
 export function validateNodeParameters(value: NodeConfigRecord): NodeParameterIssue[] {
     const issues: NodeParameterIssue[] = [];
     const add = (path: string, key: string, values?: NodeParameterIssue['values']) => issues.push({ path, key, values });
-    for (const key of [...NODE_BOOLEAN_FLAGS, 'prefer_ipv6', 'enable_relay_network_whitelist', 'enable_manual_routes', 'enable_socks5']) {
+    for (const key of [...NODE_BOOLEAN_FLAGS, 'prefer_ipv6', 'ipv6_public_addr_provider', 'enable_relay_network_whitelist', 'enable_manual_routes', 'enable_socks5']) {
         if (present(value[key]) && typeof value[key] !== 'boolean') add(key, 'errors.boolean');
     }
+    if (value.data_compress_algo !== undefined && value.data_compress_algo !== null
+        && value.data_compress_algo !== 1 && value.data_compress_algo !== 2) add('data_compress_algo', 'errors.compression');
     if (value.uplink !== undefined && value.uplink !== null) {
         const uplink = value.uplink;
         if (!isConfigRecord(uplink)) add('uplink', 'errors.object');
@@ -116,13 +149,23 @@ export function validateNodeParameters(value: NodeConfigRecord): NodeParameterIs
             }
         }
     }
-    if (present(value.dev_name) && typeof value.dev_name !== 'string') add('dev_name', 'errors.text');
+    for (const key of ['dev_name', 'instance_name', 'netns']) {
+        if (present(value[key]) && (typeof value[key] !== 'string' || /\p{Cc}/u.test(value[key] as string) || (key === 'instance_name' && new TextEncoder().encode(value[key] as string).length > 255))) add(key, 'errors.text');
+    }
+    if (typeof value.netns === 'string' && (value.netns.includes('/') || ['.', '..'].includes(value.netns) || value.netns !== value.netns.trim() || new TextEncoder().encode(value.netns).length > 255)) add('netns', 'errors.namespace');
+    if (present(value.encryption_algorithm) && (typeof value.encryption_algorithm !== 'string' || !encryptionAliases.has(value.encryption_algorithm.toLowerCase()))) add('encryption_algorithm', 'errors.encryption');
+    if (present(value.default_protocol) && !(NODE_PROTOCOLS as readonly unknown[]).includes(value.default_protocol)) add('default_protocol', 'errors.transport');
+    if (value.tld_dns_zone !== undefined && value.tld_dns_zone !== null && (typeof value.tld_dns_zone !== 'string' || !validDnsZone(value.tld_dns_zone))) add('tld_dns_zone', 'errors.dnsZone');
+    if (present(value.socket_mark) && !integerIn(value.socket_mark, 0, 4294967295)) add('socket_mark', 'errors.range', { min: 0, max: 4294967295 });
+    if (present(value.virtual_ipv6) && (typeof value.virtual_ipv6 !== 'string' || !value.virtual_ipv6.includes(':') || !validCidr(value.virtual_ipv6))) add('virtual_ipv6', 'errors.ipv6Cidr');
+    if (value.ipv6_public_addr_provider === true && (typeof value.ipv6_public_addr_prefix !== 'string' || !value.ipv6_public_addr_prefix.includes(':') || !validCidr(value.ipv6_public_addr_prefix))) add('ipv6_public_addr_prefix', 'errors.ipv6Cidr');
     if (present(value.mtu) && !integerIn(value.mtu, 400, 1380)) add('mtu', 'errors.range', { min: 400, max: 1380 });
-    if (present(value.instance_recv_bps_limit)) {
-        const limit = value.instance_recv_bps_limit;
+    for (const key of ['instance_recv_bps_limit', 'foreign_relay_bps_limit']) {
+        if (!present(value[key])) continue;
+        const limit = value[key];
         if ((typeof limit !== 'string' && typeof limit !== 'number')
             || (typeof limit === 'number' && (!Number.isSafeInteger(limit) || limit < 0))
-            || !parseUint64Input(String(limit)).valid) add('instance_recv_bps_limit', 'errors.uint64');
+            || !parseUint64Input(String(limit)).valid) add(key, 'errors.uint64');
     }
     const list = (key: string, validate?: (entry: string) => boolean, error = 'errors.text') => {
         if (value[key] === undefined || value[key] === null) return;
@@ -138,7 +181,15 @@ export function validateNodeParameters(value: NodeConfigRecord): NodeParameterIs
     list('relay_network_whitelist');
     list('routes', value.enable_manual_routes === true ? entry => validCidr(entry, true) : undefined, 'errors.ipv4Cidr');
     list('exit_nodes', entry => validIp(entry), 'errors.ip');
-    if (value.enable_socks5 === true && !integerIn(value.socks5_port, 0, 65535)) add('socks5_port', 'errors.range', { min: 0, max: 65535 });
+    for (const key of ['stun_servers', 'tcp_stun_servers', 'stun_servers_v6', 'tcp_whitelist', 'udp_whitelist']) {
+        const wrapped = value[key];
+        if (wrapped === undefined || wrapped === null) continue;
+        if (!isConfigRecord(wrapped) || !Array.isArray(wrapped.values) || wrapped.values.some(entry => typeof entry !== 'string')) { add(key, 'errors.optionalList'); continue; }
+        const validate = key.endsWith('whitelist') ? validPortSpec : validStunEndpoint;
+        if (wrapped.values.some(entry => !validate(entry as string))) add(key, key.endsWith('whitelist') ? 'errors.portList' : 'errors.stunServer');
+    }
+    if (value.socks5_proxy !== undefined && value.socks5_proxy !== null && (typeof value.socks5_proxy !== 'string' || (value.socks5_proxy !== '' && !validSocksProxy(value.socks5_proxy)))) add('socks5_proxy', 'errors.socksUrl');
+    if (value.socks5_proxy == null && value.enable_socks5 === true && !integerIn(value.socks5_port, 1, 65535)) add('socks5_port', 'errors.range', { min: 1, max: 65535 });
     if (value.port_forwards !== undefined && value.port_forwards !== null) {
         if (!Array.isArray(value.port_forwards)) add('port_forwards', 'errors.rows');
         else {

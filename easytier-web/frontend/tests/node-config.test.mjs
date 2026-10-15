@@ -16,11 +16,21 @@ test('Node parameter contracts use synthetic configuration only', async context 
     const outfile = join(temporary, 'node-config.cjs');
     await esbuild.build({ entryPoints: [join(frontend, 'src/lib/node-config.ts')], outfile, bundle: true, platform: 'node', format: 'cjs', logLevel: 'silent' });
     const { NODE_BOOLEAN_FLAGS, MAX_VPN_PORTAL_CLIENTS, applyNodePatch, patchNodeRecord, patchNodeRow, prepareNodeParametersForBackend, nodeList, parseUint64Input, validateNodeParameters } = require(outfile);
-    await context.test('all 26 original non-preference boolean flags are available', () => {
-        assert.equal(NODE_BOOLEAN_FLAGS.length, 26);
-        assert.equal(new Set(NODE_BOOLEAN_FLAGS).size, 26);
+    await context.test('all 32 non-preference boolean flags are available', () => {
+        assert.equal(NODE_BOOLEAN_FLAGS.length, 32);
+        assert.equal(new Set(NODE_BOOLEAN_FLAGS).size, 32);
         assert.equal(NODE_BOOLEAN_FLAGS.includes('prefer_ipv6'), false);
         for (const key of ['use_smoltcp', 'enable_quic_proxy', 'disable_tcp_hole_punching', 'enable_private_mode']) assert.equal(NODE_BOOLEAN_FLAGS.includes(key), true);
+    });
+    await context.test('compression accepts only the supported numeric enum without filling node defaults', () => {
+        for (const value of [undefined, null, 1, 2]) assert.deepEqual(validateNodeParameters({ data_compress_algo: value }), []);
+        for (const value of [0, 3, -1, 1.5, '2', 'Zstd', '', false, {}, []]) {
+            assert.deepEqual(validateNodeParameters({ data_compress_algo: value }), [{ path: 'data_compress_algo', key: 'errors.compression', values: undefined }]);
+        }
+        const original = { data_compress_algo: 2, enable_kcp_proxy: false, future: { preserved: true } };
+        const reset = applyNodePatch(original, { data_compress_algo: undefined });
+        assert.deepEqual(prepareNodeParametersForBackend(reset), { enable_kcp_proxy: false, future: { preserved: true } });
+        assert.equal(original.data_compress_algo, 2);
     });
     await context.test('receive limits preserve every uint64 digit and reject overflow or unsafe numbers', () => {
         assert.deepEqual(parseUint64Input('9007199254740993'), { valid: true, value: '9007199254740993' });
@@ -28,7 +38,7 @@ test('Node parameter contracts use synthetic configuration only', async context 
         assert.deepEqual(parseUint64Input('18446744073709551616'), { valid: false });
         assert.deepEqual(parseUint64Input('-1'), { valid: false });
         assert.deepEqual(parseUint64Input('1.5'), { valid: false });
-        assert.deepEqual(parseUint64Input('0'), { valid: true });
+        assert.deepEqual(parseUint64Input('0'), { valid: true, value: '0' });
         assert.deepEqual(parseUint64Input(''), { valid: true });
         assert.equal(validateNodeParameters({ instance_recv_bps_limit: '18446744073709551615' }).length, 0);
         assert.equal(validateNodeParameters({ instance_recv_bps_limit: 9007199254740992 })[0].key, 'errors.uint64');

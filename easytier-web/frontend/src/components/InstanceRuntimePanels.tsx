@@ -2,7 +2,7 @@ import { useTranslation } from 'react-i18next';
 import { useState } from 'react';
 import { currentLocale } from '../lib/i18n';
 import type ApiClient from '../lib/api';
-import { useResource } from '../lib/hooks';
+import { errorMessage, useResource } from '../lib/hooks';
 import { RuntimeDisplay, Utils } from '../lib/shared';
 import { Alert, Button, Empty, Field, Panel } from './ui';
 
@@ -69,7 +69,27 @@ export function InstanceLogger({ api, deviceId }: { api: ApiClient; deviceId: st
   const { t } = useTranslation('devices');
   const resource = useResource(() => api.get_node_logger_level(deviceId), `logger:${deviceId}`);
   const names = ['runtime.logOff', 'runtime.logError', 'runtime.logWarn', 'runtime.logInfo', 'runtime.logDebug', 'runtime.logTrace'];
-  return <Panel title={t('runtime.logTitle')} action={<Button icon="refresh" tone="ghost" busy={resource.loading} onClick={resource.refresh}>{t('actions.refresh')}</Button>}>{resource.error && <Alert tone="error">{resource.error}</Alert>}{resource.data === undefined ? resource.loading ? <Loading/> : <p className="muted">{t('runtime.logUnavailable')}</p> : <p>{t('runtime.currentLevel')}<strong>{t(names[resource.data] ?? 'labels.unknown')}</strong></p>}</Panel>;
+  return <Panel title={t('runtime.logTitle')} action={<Button icon="refresh" tone="ghost" busy={resource.loading} onClick={resource.refresh}>{t('actions.refresh')}</Button>}>{resource.error && <Alert tone="error">{resource.error}</Alert>}{resource.data === undefined ? resource.loading ? <Loading/> : <p className="muted">{t('runtime.logUnavailable')}</p> : <div className="form-stack"><p>{t('runtime.currentLevel')}<strong>{t(names[resource.data] ?? 'labels.unknown')}</strong></p><FileLoggerForm key={deviceId} api={api} deviceId={deviceId} currentLevel={resource.data} onSaved={resource.refresh}/></div>}</Panel>;
+}
+
+function FileLoggerForm({ api, deviceId, currentLevel, onSaved }: { api: ApiClient; deviceId: string; currentLevel: number; onSaved: () => void }) {
+  const { t } = useTranslation('devices');
+  const [level, setLevel] = useState<number>(), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null);
+  const selected = level ?? currentLevel;
+  const names = ['runtime.logOff', 'runtime.logError', 'runtime.logWarn', 'runtime.logInfo', 'runtime.logDebug', 'runtime.logTrace'];
+  return <form className="form-stack" onSubmit={async event => {
+    event.preventDefault(); if (busy || selected < 0 || selected > 5) return;
+    setBusy(true); setError(null);
+    try { await api.set_node_logger_level(deviceId, selected); setLevel(undefined); onSaved(); }
+    catch (failure) { setError(failure); }
+    finally { setBusy(false); }
+  }}>
+    {error !== null && <Alert tone="error">{t('runtime.logSaveFailed', { error: errorMessage(error) })}</Alert>}
+    <Field label={t('runtime.fileLogLevel')}><select aria-label={t('runtime.fileLogLevel')} value={selected} disabled={busy} onChange={event => setLevel(Number(event.target.value))}>
+      {names.map((name, index) => <option key={name} value={index}>{t(name)}</option>)}
+    </select></Field>
+    <div className="form-actions"><Button type="submit" busy={busy} disabled={selected === currentLevel || selected < 0}>{t('runtime.saveLogLevel')}</Button></div>
+  </form>;
 }
 
 export function InstanceNodeInfo({ api, deviceId, instanceId }: { api: ApiClient; deviceId: string; instanceId: string }) {

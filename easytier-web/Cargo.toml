@@ -1,6 +1,6 @@
 [package]
 name = "easytier-web"
-version = "2.7.1"
+version = "2.7.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Config server for easytier. easytier-core gets config from this and web frontend use it as restful api server."

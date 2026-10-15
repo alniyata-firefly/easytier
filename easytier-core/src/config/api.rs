@@ -5,7 +5,7 @@ use easytier_proto::api::manage::{
 };
 
 use super::{
-    api_input::managed_credential_to_proto,
+    api_input::{managed_credential_to_proto, populate_extended_config},
     toml::{ConfigLoader as _, TomlConfig},
 };
 
@@ -182,6 +182,7 @@ pub fn network_config_from_toml(config: &TomlConfig) -> NetworkConfig {
             .collect();
     }
 
+    populate_extended_config(config, &mut result);
     result
 }
 

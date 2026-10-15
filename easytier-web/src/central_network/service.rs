@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use super::model::{
     AclPolicy, CentralNetworkIntent, CredentialGrant, NetworkCredentialIntent, NetworkMemberIntent,
-    NetworkMode, member_group_name,
+    NetworkMode, NetworkTransportSettings, member_group_name,
 };
 pub use super::temporary_peers::TemporaryPeerInfo;
 use crate::{
@@ -82,6 +82,8 @@ pub struct NetworkSettings {
     pub secure_mode: bool,
     #[serde(default)]
     pub prefer_ipv6: Option<bool>,
+    #[serde(default)]
+    pub transport: Option<NetworkTransportSettings>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -167,6 +169,7 @@ pub struct NetworkDetail {
     pub virtual_cidr: Option<String>,
     pub secure_mode: bool,
     pub prefer_ipv6: bool,
+    pub transport: NetworkTransportSettings,
     pub public_server_url: Option<String>,
     pub peer_urls: Vec<String>,
     pub member_count: usize,
@@ -444,6 +447,7 @@ impl CentralNetworkService {
             virtual_cidr: settings.virtual_cidr,
             secure_mode: settings.secure_mode,
             prefer_ipv6: settings.prefer_ipv6.unwrap_or(false),
+            transport: settings.transport.unwrap_or_default(),
             members: Vec::new(),
             credentials: Vec::new(),
             acl_policy: None,
@@ -470,6 +474,7 @@ impl CentralNetworkService {
             virtual_cidr: intent.virtual_cidr,
             secure_mode: intent.secure_mode,
             prefer_ipv6: intent.prefer_ipv6,
+            transport: intent.transport,
             public_server_url,
             peer_urls,
             member_count: intent.members.len(),
@@ -493,6 +498,9 @@ impl CentralNetworkService {
         intent.mode = mode;
         if let Some(prefer_ipv6) = request.settings.prefer_ipv6 {
             intent.prefer_ipv6 = prefer_ipv6;
+        }
+        if let Some(transport) = request.settings.transport {
+            intent.transport = transport;
         }
         if intent.virtual_cidr != request.settings.virtual_cidr {
             for member in &mut intent.members {
@@ -2577,6 +2585,7 @@ mod tests {
             virtual_cidr: Some("10.88.0.0/24".to_owned()),
             secure_mode: true,
             prefer_ipv6: None,
+            transport: None,
         }
     }
 
@@ -2585,6 +2594,187 @@ mod tests {
             networking_method: "Gateway".to_owned(),
             peer_urls,
             ..standalone_settings()
+        }
+    }
+
+    #[tokio::test]
+    async fn network_transport_update_publish_omit_and_explicit_clear_preserve_members() {
+        use easytier_core::management::remote_client::{PersistentConfig as _, Storage as _};
+        let (service, user_id, _) = service().await;
+        let devices = [Uuid::new_v4(), Uuid::new_v4()];
+        for device in devices {
+            register_device(&service, user_id, device).await;
+        }
+        let mut settings = standalone_settings();
+        let created = service
+            .create_network(user_id, settings.clone(), None)
+            .await
+            .unwrap();
+        let network_id = Uuid::parse_str(&created.network_id).unwrap();
+        assert_eq!(created.transport, NetworkTransportSettings::default());
+        service
+            .add_members(
+                user_id,
+                network_id,
+                AddMembersReq {
+                    device_ids: devices.iter().map(ToString::to_string).collect(),
+                    temporary: false,
+                    ttl_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+        for device in devices {
+            service
+                .set_member_config(
+                    user_id,
+                    network_id,
+                    device,
+                    NetworkConfig {
+                        data_compress_algo: Some(1),
+                        enable_kcp_proxy: Some(true),
+                        disable_kcp_input: Some(true),
+                        encryption_algorithm: Some("xor".to_owned()),
+                        disable_encryption: Some(true),
+                        default_protocol: Some("tcp".to_owned()),
+                        tld_dns_zone: Some("old.mesh.".to_owned()),
+                        mtu: Some(1300),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let before = service.load(user_id, network_id).await.unwrap();
+        let policy = NetworkTransportSettings {
+            data_compress_algo: Some(2),
+            enable_kcp_proxy: Some(false),
+            disable_kcp_input: Some(false),
+            enable_quic_proxy: Some(true),
+            disable_quic_input: Some(false),
+            encryption_algorithm: Some("aes-256-gcm".to_owned()),
+            disable_encryption: Some(false),
+            default_protocol: Some("udp".to_owned()),
+            tld_dns_zone: Some("new.mesh.".to_owned()),
+        };
+        settings.transport = Some(policy.clone());
+        let updated = service
+            .update_network(
+                user_id,
+                network_id,
+                UpdateNetworkReq {
+                    settings: settings.clone(),
+                    network_secret: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.transport, policy);
+        for device in devices {
+            let config = service
+                .db
+                .get_network_config((user_id, device), &network_id.to_string())
+                .await
+                .unwrap()
+                .unwrap()
+                .get_network_config()
+                .unwrap();
+            assert_eq!(config.data_compress_algo, Some(2));
+            assert_eq!(config.enable_kcp_proxy, Some(false));
+            assert_eq!(config.disable_kcp_input, Some(false));
+            assert_eq!(config.enable_quic_proxy, Some(true));
+            assert_eq!(config.disable_quic_input, Some(false));
+            assert_eq!(config.encryption_algorithm.as_deref(), Some("aes-256-gcm"));
+            assert_eq!(config.disable_encryption, Some(false));
+            assert_eq!(config.default_protocol.as_deref(), Some("udp"));
+            assert_eq!(config.tld_dns_zone.as_deref(), Some("new.mesh."));
+            assert_eq!(config.mtu, Some(1300));
+        }
+        let mut omitted = serde_json::to_value(&settings).unwrap();
+        omitted.as_object_mut().unwrap().remove("transport");
+        let omitted: NetworkSettings = serde_json::from_value(omitted).unwrap();
+        let retained = service
+            .update_network(
+                user_id,
+                network_id,
+                UpdateNetworkReq {
+                    settings: omitted,
+                    network_secret: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(retained.transport, policy);
+        settings.transport = Some(serde_json::from_str("{}").unwrap());
+        let cleared = service
+            .update_network(
+                user_id,
+                network_id,
+                UpdateNetworkReq {
+                    settings: settings.clone(),
+                    network_secret: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared.transport, NetworkTransportSettings::default());
+        for device in devices {
+            let config = service
+                .db
+                .get_network_config((user_id, device), &network_id.to_string())
+                .await
+                .unwrap()
+                .unwrap()
+                .get_network_config()
+                .unwrap();
+            assert_eq!(config.data_compress_algo, Some(1));
+            assert_eq!(config.enable_kcp_proxy, Some(true));
+            assert_eq!(config.disable_kcp_input, Some(true));
+            assert_eq!(config.encryption_algorithm.as_deref(), Some("xor"));
+            assert_eq!(config.disable_encryption, Some(true));
+            assert_eq!(config.default_protocol.as_deref(), Some("tcp"));
+            assert_eq!(config.tld_dns_zone.as_deref(), Some("old.mesh."));
+            assert_eq!(config.mtu, Some(1300));
+        }
+        let after = service.load(user_id, network_id).await.unwrap();
+        assert_eq!(after.members, before.members);
+        assert_eq!(after.credentials, before.credentials);
+        for invalid in [
+            NetworkTransportSettings {
+                data_compress_algo: Some(3),
+                ..Default::default()
+            },
+            NetworkTransportSettings {
+                encryption_algorithm: Some("bad-cipher".to_owned()),
+                ..Default::default()
+            },
+            NetworkTransportSettings {
+                default_protocol: Some("https".to_owned()),
+                ..Default::default()
+            },
+            NetworkTransportSettings {
+                tld_dns_zone: Some("bad..zone".to_owned()),
+                ..Default::default()
+            },
+        ] {
+            settings.transport = Some(invalid);
+            assert!(matches!(
+                service
+                    .update_network(
+                        user_id,
+                        network_id,
+                        UpdateNetworkReq {
+                            settings: settings.clone(),
+                            network_secret: None,
+                        }
+                    )
+                    .await,
+                Err(CentralNetworkServiceError::Invalid(_))
+            ));
+            let stored = service.load(user_id, network_id).await.unwrap();
+            assert_eq!(stored.transport, NetworkTransportSettings::default());
+            assert_eq!(stored.members, before.members);
+            assert_eq!(stored.credentials, before.credentials);
         }
     }
 

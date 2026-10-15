@@ -58,6 +58,10 @@ const BOOLEAN_CONFIG_FIELDS = [
   'disable_relay_data',
   'enable_udp_broadcast_relay',
   'disable_tcp_hole_punching',
+  'disable_relay_kcp',
+  'disable_relay_quic',
+  'enable_relay_foreign_network_kcp',
+  'enable_relay_foreign_network_quic',
 ]
 
 const LEGACY_VPN_PORTAL_FIELDS = [
@@ -258,6 +262,23 @@ function allFieldFixture() {
     disable_relay_data: true,
     enable_udp_broadcast_relay: true,
     socket_mark: 1234,
+    default_protocol: 'udp',
+    stun_servers: { values: [] },
+    tcp_stun_servers: { values: ['tcp-stun.example:3478'] },
+    stun_servers_v6: { values: ['[2001:db8::1]:3478'] },
+    foreign_relay_bps_limit: '18446744073709551615',
+    disable_relay_kcp: false,
+    disable_relay_quic: true,
+    enable_relay_foreign_network_kcp: true,
+    enable_relay_foreign_network_quic: false,
+    tld_dns_zone: 'vpn.example.',
+    virtual_ipv6: 'fd00:1234::2/64',
+    tcp_whitelist: { values: [] },
+    udp_whitelist: { values: ['53', '3478'] },
+    socks5_proxy: 'socks5://[::1]:1080',
+    instance_name: 'full-field-instance',
+    netns: 'fixture-ns',
+    uplink: { mode: 'manual', interfaces: ['fixture-uplink'] },
   }
 }
 
@@ -571,11 +592,11 @@ function assertNumberBoundaries() {
     ...DEFAULT_NETWORK_CONFIG(),
     instance_recv_bps_limit: '0',
   })
-  assert.equal(zeroLimit.instance_recv_bps_limit, null)
+  assert.equal(zeroLimit.instance_recv_bps_limit, 0)
   assert.equal(toBackendNetworkConfig({
     ...DEFAULT_NETWORK_CONFIG(),
     instance_recv_bps_limit: 0,
-  }).instance_recv_bps_limit, undefined)
+  }).instance_recv_bps_limit, '0')
 
   const oversizedLimit = normalizeNetworkConfig({
     ...DEFAULT_NETWORK_CONFIG(),

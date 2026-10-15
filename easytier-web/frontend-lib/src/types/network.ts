@@ -31,7 +31,7 @@ import {
   type PeerFeatureFlag,
   type SecureModeConfig,
 } from '../generated/proto/common'
-import { prepareNetworkConfigForProtoJson } from './networkCompat'
+import { prepareNetworkConfigForProtoJson, preserveUnknownNetworkConfigFields } from './networkCompat'
 
 export { AclAction, AclChainType, AclProtocol, CompressionAlgoPb, NatType, NetworkingMethod }
 export { VpnPortalClientState }
@@ -41,12 +41,14 @@ export type NetworkConfig = Omit<
   ProtoNetworkConfig,
   | 'instance_id'
   | 'instance_recv_bps_limit'
+  | 'foreign_relay_bps_limit'
   | 'mtu'
   | 'networking_method'
 > & {
   instance_id: string
   mtu: number | null
   instance_recv_bps_limit: number | string | null
+  foreign_relay_bps_limit?: number | string | null
   networking_method: NetworkingMethod | string
   /// Form-only field: an admin-issued credential secret for joining as a
   /// temporary device. Saved as secure_mode.local_private_key with an empty
@@ -149,6 +151,7 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     socks5_port: 1080,
     mtu: null,
     instance_recv_bps_limit: null,
+    foreign_relay_bps_limit: undefined,
     mapped_listeners: [],
     enable_magic_dns: false,
     enable_private_mode: false,
@@ -245,10 +248,11 @@ function isAclEmpty(acl: Acl | undefined): boolean {
 
 function normalizeUint64ForInput(v: bigint | number | string | null | undefined): number | string | null {
   if (v == null) return null
+  if (typeof v === 'number' && !Number.isSafeInteger(v)) return null
 
   try {
     const n = typeof v === 'bigint' ? v : BigInt(v)
-    if (n === 0n || n > UINT64_MAX) return null
+    if (n < 0n || n > UINT64_MAX) return null
     return n <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(n) : n.toString()
   } catch {
     return null
@@ -263,9 +267,10 @@ function normalizeNumberForInput(v: number | string | null | undefined): number 
 
 function toBackendUint64(v: number | bigint | string | null | undefined): bigint | undefined {
   if (v == null || v === '') return undefined
+  if (typeof v === 'number' && !Number.isSafeInteger(v)) return undefined
   try {
     const n = typeof v === 'bigint' ? v : BigInt(v)
-    return n > 0n && n <= UINT64_MAX ? n : undefined
+    return n >= 0n && n <= UINT64_MAX ? n : undefined
   } catch {
     return undefined
   }
@@ -313,6 +318,9 @@ export function normalizeNetworkConfig(config: NetworkConfig): NetworkConfig {
   normalized.instance_recv_bps_limit = normalizeUint64ForInput(
     normalized.instance_recv_bps_limit as any,
   )
+  if (normalized.foreign_relay_bps_limit !== undefined) {
+    normalized.foreign_relay_bps_limit = normalizeUint64ForInput(normalized.foreign_relay_bps_limit)
+  }
   normalized.proxy_cidrs ??= []
   normalized.prefer_ipv6 ??= false
   normalized.listener_urls ??= []
@@ -338,7 +346,7 @@ export function normalizeNetworkConfig(config: NetworkConfig): NetworkConfig {
     normalized.secure_mode = { enabled: true }
   }
 
-  return normalized
+  return preserveUnknownNetworkConfigFields(config, normalized)
 }
 
 export function toBackendNetworkConfig(config: NetworkConfig): NetworkConfig {
@@ -348,7 +356,8 @@ export function toBackendNetworkConfig(config: NetworkConfig): NetworkConfig {
 
   applyNetworkingMethod(backend)
   backend.mtu = normalizeNumberForInput(config.mtu) ?? undefined
-  backend.instance_recv_bps_limit = toBackendUint64(config.instance_recv_bps_limit)
+  backend.instance_recv_bps_limit = toBackendUint64(backend.instance_recv_bps_limit)
+  backend.foreign_relay_bps_limit = toBackendUint64(backend.foreign_relay_bps_limit)
   if (config.acl === undefined || isAclEmpty(config.acl)) {
     backend.acl = undefined
   }
@@ -362,9 +371,16 @@ export function toBackendNetworkConfig(config: NetworkConfig): NetworkConfig {
     backend.secure_mode = { enabled: true, local_private_key: credentialSecret }
   }
 
-  return NetworkConfigPb.toJson(backend, {
+  const json = NetworkConfigPb.toJson(backend, {
     useProtoFieldName: true,
   }) as unknown as NetworkConfig
+  // Message presence distinguishes inheritance from an explicitly empty list.
+  // Retain values:[] in exported JSON rather than protobuf's equivalent {}.
+  for (const key of ['stun_servers', 'tcp_stun_servers', 'stun_servers_v6', 'tcp_whitelist', 'udp_whitelist'] as const) {
+    const list = backend[key]
+    if (list !== undefined) json[key] = { values: [...list.values] }
+  }
+  return preserveUnknownNetworkConfigFields(config, json)
 }
 
 /// Central member forms edit optional overrides rather than effective defaults.

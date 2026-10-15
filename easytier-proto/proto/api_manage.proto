@@ -108,6 +108,30 @@ message NetworkConfig {
   optional bool prefer_peer_relay = 72;
   optional bool prefer_ipv6 = 73;
   optional UplinkConfig uplink = 74;
+
+  optional string default_protocol = 75;
+  // Message presence distinguishes inherited defaults from an explicitly empty list.
+  ConfigStringList stun_servers = 76;
+  ConfigStringList tcp_stun_servers = 77;
+  ConfigStringList stun_servers_v6 = 78;
+  optional uint64 foreign_relay_bps_limit = 79;
+  optional bool disable_relay_kcp = 80;
+  optional bool disable_relay_quic = 81;
+  optional bool enable_relay_foreign_network_kcp = 82;
+  optional bool enable_relay_foreign_network_quic = 83;
+  optional string tld_dns_zone = 84;
+  // Explicit virtual IPv6 address with prefix, independent of public address discovery.
+  optional string virtual_ipv6 = 85;
+  ConfigStringList tcp_whitelist = 86;
+  ConfigStringList udp_whitelist = 87;
+  // Overrides legacy enable_socks5/socks5_port; an empty string explicitly disables it.
+  optional string socks5_proxy = 88;
+  optional string instance_name = 89;
+  optional string netns = 90;
+}
+
+message ConfigStringList {
+  repeated string values = 1;
 }
 
 message UplinkConfig {

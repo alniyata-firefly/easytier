@@ -12,6 +12,7 @@ mod m20261001_000010_member_ip_allocation;
 mod m20261012_000011_device_access_tokens;
 mod m20261012_000012_purge_revoked_device_access_tokens;
 mod m20261014_000013_prefer_ipv6;
+mod m20261015_000014_network_transport;
 
 pub struct Migrator;
 
@@ -30,6 +31,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261012_000011_device_access_tokens::Migration),
             Box::new(m20261012_000012_purge_revoked_device_access_tokens::Migration),
             Box::new(m20261014_000013_prefer_ipv6::Migration),
+            Box::new(m20261015_000014_network_transport::Migration),
         ]
     }
 }

@@ -44,6 +44,8 @@ pub enum CompileError {
     EmptyNetworkName,
     #[error("network secret must not be empty")]
     EmptyNetworkSecret,
+    #[error("invalid network transport settings: {0}")]
+    InvalidTransport(String),
     #[error("invalid network URL: {0}")]
     InvalidUrl(String),
     #[error("manual networking requires at least one peer URL")]
@@ -150,6 +152,7 @@ pub fn compile(intent: &CentralNetworkIntent) -> Result<CompiledNetwork, Compile
             };
             let mut network_config =
                 apply_member_override(base_config, member.config_override.as_ref());
+            intent.transport.apply_to_config(&mut network_config);
             ensure_p2p_listener(&mut network_config);
             validate_member_config(&network_config).map_err(|error| {
                 CompileError::InvalidMemberConfig {
@@ -221,6 +224,10 @@ fn apply_member_override(
 }
 
 fn validate_network(intent: &CentralNetworkIntent) -> Result<(), CompileError> {
+    intent
+        .transport
+        .validate()
+        .map_err(CompileError::InvalidTransport)?;
     if intent.display_name.trim().is_empty() {
         return Err(CompileError::EmptyDisplayName);
     }
@@ -864,6 +871,7 @@ mod tests {
             virtual_cidr: Some("10.42.0.0/29".to_owned()),
             secure_mode: true,
             prefer_ipv6: false,
+            transport: Default::default(),
             members: vec![temporary.clone(), member(1, "device-a", None)],
             credentials: vec![
                 credential("temporary", Some(temporary.id)),
@@ -890,6 +898,106 @@ mod tests {
                 }],
             }),
         }
+    }
+
+    #[test]
+    fn network_transport_overrides_permanent_and_temporary_members_without_losing_node_fields() {
+        let mut intent = intent();
+        for member in &mut intent.members {
+            member.config_override = Some(NetworkConfig {
+                data_compress_algo: Some(1),
+                enable_kcp_proxy: Some(true),
+                disable_kcp_input: Some(true),
+                enable_quic_proxy: Some(true),
+                disable_quic_input: Some(true),
+                encryption_algorithm: Some("xor".to_owned()),
+                disable_encryption: Some(true),
+                default_protocol: Some("tcp".to_owned()),
+                tld_dns_zone: Some("old.mesh.".to_owned()),
+                mtu: Some(1300),
+                ..Default::default()
+            });
+        }
+        intent.transport = super::super::model::NetworkTransportSettings {
+            data_compress_algo: Some(2),
+            enable_kcp_proxy: Some(false),
+            disable_kcp_input: Some(false),
+            enable_quic_proxy: Some(false),
+            disable_quic_input: Some(false),
+            encryption_algorithm: Some("aes-256-gcm".to_owned()),
+            disable_encryption: Some(false),
+            default_protocol: Some("udp".to_owned()),
+            tld_dns_zone: Some("new.mesh.".to_owned()),
+        };
+        let compiled = compile(&intent).unwrap();
+        assert_eq!(compiled.members.len(), 2);
+        for member in compiled.members {
+            let config = member.network_config;
+            assert_eq!(config.data_compress_algo, Some(2));
+            assert_eq!(config.enable_kcp_proxy, Some(false));
+            assert_eq!(config.disable_kcp_input, Some(false));
+            assert_eq!(config.enable_quic_proxy, Some(false));
+            assert_eq!(config.disable_quic_input, Some(false));
+            assert_eq!(config.encryption_algorithm.as_deref(), Some("aes-256-gcm"));
+            assert_eq!(config.disable_encryption, Some(false));
+            assert_eq!(config.default_protocol.as_deref(), Some("udp"));
+            assert_eq!(config.tld_dns_zone.as_deref(), Some("new.mesh."));
+            assert_eq!(config.mtu, Some(1300));
+        }
+    }
+
+    #[test]
+    fn omitted_network_transport_inherits_existing_member_values() {
+        let mut intent = intent();
+        intent.members[0].config_override = Some(NetworkConfig {
+            data_compress_algo: Some(2),
+            enable_kcp_proxy: Some(true),
+            disable_kcp_input: Some(true),
+            enable_quic_proxy: Some(false),
+            disable_quic_input: Some(false),
+            encryption_algorithm: Some("chacha20".to_owned()),
+            disable_encryption: Some(false),
+            default_protocol: Some("udp".to_owned()),
+            tld_dns_zone: Some("inherited.mesh.".to_owned()),
+            ..Default::default()
+        });
+        let inherited = compile(&intent).unwrap();
+        let config = &inherited
+            .members
+            .iter()
+            .find(|member| member.device_id == intent.members[0].device_id)
+            .unwrap()
+            .network_config;
+        assert_eq!(config.data_compress_algo, Some(2));
+        assert_eq!(config.enable_kcp_proxy, Some(true));
+        assert_eq!(config.disable_kcp_input, Some(true));
+        assert_eq!(config.encryption_algorithm.as_deref(), Some("chacha20"));
+        assert_eq!(config.disable_encryption, Some(false));
+        assert_eq!(config.default_protocol.as_deref(), Some("udp"));
+        assert_eq!(config.tld_dns_zone.as_deref(), Some("inherited.mesh."));
+        intent.transport.enable_kcp_proxy = Some(false);
+        let partial = compile(&intent).unwrap();
+        let config = &partial
+            .members
+            .iter()
+            .find(|member| member.device_id == intent.members[0].device_id)
+            .unwrap()
+            .network_config;
+        assert_eq!(config.enable_kcp_proxy, Some(false));
+        assert_eq!(config.disable_kcp_input, Some(true));
+        assert_eq!(config.data_compress_algo, Some(2));
+    }
+
+    #[test]
+    fn invalid_network_compression_is_rejected_even_without_members() {
+        let mut intent = intent();
+        intent.members.clear();
+        intent.credentials.clear();
+        intent.transport.data_compress_algo = Some(0);
+        assert!(matches!(
+            compile(&intent),
+            Err(CompileError::InvalidTransport(_))
+        ));
     }
 
     #[test]

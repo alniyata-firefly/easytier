@@ -195,6 +195,7 @@ enum ConfigActionResult {
     Success,
     Failed,
     UnsupportedIpv6Preference,
+    UnsupportedExtendedConfig,
     StopRound,
 }
 
@@ -265,6 +266,7 @@ struct ReconcileOutcome {
     has_failed: bool,
     managed_revision_failed: bool,
     unsupported_ipv6_preference: bool,
+    unsupported_extended_config: bool,
 }
 
 #[derive(Default)]
@@ -282,6 +284,7 @@ impl ReconcileOutcome {
         self.has_failed |= other.has_failed;
         self.managed_revision_failed |= other.managed_revision_failed;
         self.unsupported_ipv6_preference |= other.unsupported_ipv6_preference;
+        self.unsupported_extended_config |= other.unsupported_extended_config;
     }
 }
 
@@ -1002,7 +1005,9 @@ async fn reconcile_desired_runtime_configs(
                         "Failed to cache runtime config after run: {:?}",
                         e
                     );
-                    if e.is::<runtime_reconcile::UnsupportedIpv6Preference>() {
+                    if e.is::<runtime_reconcile::UnsupportedExtendedConfig>() {
+                        ConfigActionResult::UnsupportedExtendedConfig
+                    } else if e.is::<runtime_reconcile::UnsupportedIpv6Preference>() {
                         ConfigActionResult::UnsupportedIpv6Preference
                     } else {
                         ConfigActionResult::Failed
@@ -1027,6 +1032,11 @@ async fn reconcile_desired_runtime_configs(
                 cache.runtime_configs.forget(&config.network_instance_id);
                 outcome.unsupported_ipv6_preference = true;
                 outcome.record_failure(true);
+            }
+            ConfigActionResult::UnsupportedExtendedConfig => {
+                cache.runtime_configs.forget(&config.network_instance_id);
+                outcome.unsupported_extended_config = true;
+                outcome.record_failure(source == PersistedConfigSource::Web);
             }
             ConfigActionResult::StopRound => {
                 if source == PersistedConfigSource::Web {
@@ -1072,6 +1082,7 @@ async fn reconcile_running_web_config(
                         &config.network_instance_id,
                         desired_config.clone(),
                         true,
+                        Some(&round.req.easytier_version),
                     )
                     .await?
                 }
@@ -1111,7 +1122,13 @@ async fn reconcile_running_web_config(
         ConfigActionResult::Success
     } else {
         runtime_config_cache.forget(&config.network_instance_id);
-        if ret.is_err_and(|error| error.is::<runtime_reconcile::UnsupportedIpv6Preference>()) {
+        if ret
+            .as_ref()
+            .is_err_and(|error| error.is::<runtime_reconcile::UnsupportedExtendedConfig>())
+        {
+            ConfigActionResult::UnsupportedExtendedConfig
+        } else if ret.is_err_and(|error| error.is::<runtime_reconcile::UnsupportedIpv6Preference>())
+        {
             ConfigActionResult::UnsupportedIpv6Preference
         } else {
             ConfigActionResult::Failed
@@ -1137,6 +1154,15 @@ async fn run_missing_network_config(
     }
 
     let source = PersistedConfigSource::from_db(&config.source);
+    if runtime_reconcile::ensure_extended_config_supported(
+        &desired_config,
+        None,
+        Some(&round.req.easytier_version),
+    )
+    .is_err()
+    {
+        return ConfigActionResult::UnsupportedExtendedConfig;
+    }
     if source == PersistedConfigSource::Web
         && !begin_managed_runtime_mutation(session_data, round, mutation_fence).await
     {
@@ -1251,7 +1277,9 @@ async fn mark_config_revision_applied_if_current(
             let mut runtime = data.managed_runtime();
             if runtime.runtime_config_epoch == round.runtime_config_epoch {
                 runtime.last_reconciliation_error = outcome.has_failed.then(|| {
-                    if outcome.unsupported_ipv6_preference {
+                    if outcome.unsupported_extended_config {
+                        runtime_reconcile::UnsupportedExtendedConfig.to_string()
+                    } else if outcome.unsupported_ipv6_preference {
                         runtime_reconcile::UnsupportedIpv6Preference.to_string()
                     } else {
                         "One or more managed network operations failed; retry pending".to_owned()

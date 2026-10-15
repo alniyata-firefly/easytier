@@ -60,6 +60,7 @@ struct PreparedIntent {
     public_server_url: Option<String>,
     peer_urls: String,
     acl_policy: Option<String>,
+    transport_config: String,
     members: Vec<PreparedMember>,
     credentials: Vec<PreparedCredential>,
 }
@@ -127,6 +128,7 @@ fn prepare_intent(intent: CentralNetworkIntent) -> Result<PreparedIntent, Centra
     Ok(PreparedIntent {
         peer_urls: json(&raw_peer_urls)?,
         acl_policy: intent.acl_policy.as_ref().map(json).transpose()?,
+        transport_config: json(&intent.transport)?,
         intent,
         networking_method,
         public_server_url,
@@ -416,8 +418,8 @@ async fn persist_intent(
         INSERT INTO networks (
             user_id, id, display_name, network_name, network_secret,
             networking_method, public_server_url, peer_urls, virtual_cidr,
-            secure_mode, prefer_ipv6, acl_policy, create_time, update_time
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            secure_mode, prefer_ipv6, acl_policy, transport_config, create_time, update_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id, id) DO UPDATE SET
             display_name = excluded.display_name,
             network_name = excluded.network_name,
@@ -428,6 +430,7 @@ async fn persist_intent(
             virtual_cidr = excluded.virtual_cidr,
             secure_mode = excluded.secure_mode,
             prefer_ipv6 = excluded.prefer_ipv6,
+            transport_config = excluded.transport_config,
             acl_policy = excluded.acl_policy,
             update_time = excluded.update_time
         "#,
@@ -444,6 +447,7 @@ async fn persist_intent(
     .bind(prepared.intent.secure_mode)
     .bind(prepared.intent.prefer_ipv6)
     .bind(&prepared.acl_policy)
+    .bind(&prepared.transport_config)
     .bind(now)
     .bind(now)
     .execute(&mut **transaction)
@@ -548,11 +552,12 @@ async fn load_intent(
         bool,
         bool,
         Option<String>,
+        String,
     );
     let row: Option<NetworkRow> = sqlx::query_as(
         r#"
         SELECT display_name, network_name, network_secret, networking_method,
-            public_server_url, peer_urls, virtual_cidr, secure_mode, prefer_ipv6, acl_policy
+            public_server_url, peer_urls, virtual_cidr, secure_mode, prefer_ipv6, acl_policy, transport_config
         FROM networks WHERE user_id = ? AND id = ?
         "#,
     )
@@ -572,12 +577,18 @@ async fn load_intent(
         secure_mode,
         prefer_ipv6,
         acl_policy,
+        transport_config,
     )) = row
     else {
         return Ok(None);
     };
     let peer_urls: Vec<String> = serde_json::from_str(&peer_urls).map_err(|error| {
         CentralIntentError::InvalidStoredData(format!("invalid peer URLs: {error}"))
+    })?;
+    let transport = serde_json::from_str(&transport_config).map_err(|error| {
+        CentralIntentError::InvalidStoredData(format!(
+            "invalid network transport settings: {error}"
+        ))
     })?;
     let mode = match networking_method.as_str() {
         "PublicServer" => NetworkMode::PublicServer {
@@ -721,6 +732,7 @@ async fn load_intent(
         virtual_cidr,
         secure_mode,
         prefer_ipv6,
+        transport,
         members,
         credentials,
         acl_policy,
@@ -770,6 +782,7 @@ mod tests {
             virtual_cidr: Some("10.42.0.0/29".to_owned()),
             secure_mode: true,
             prefer_ipv6: false,
+            transport: Default::default(),
             members: vec![temporary.clone(), permanent],
             credentials: vec![NetworkCredentialIntent {
                 id: "temporary".to_owned(),
@@ -804,6 +817,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn network_transport_roundtrips_and_missing_legacy_json_inherits() {
+        use crate::central_network::model::NetworkTransportSettings;
+        let db = Db::memory_db().await;
+        let user_id = db.auto_create_user("transport-roundtrip").await.unwrap().id;
+        let devices = [Uuid::new_v4(), Uuid::new_v4()];
+        register_devices(&db, user_id, &devices).await;
+        let network_id = Uuid::new_v4();
+        let mut intent = intent(user_id, network_id, devices);
+        intent.transport = NetworkTransportSettings {
+            data_compress_algo: Some(2),
+            enable_kcp_proxy: Some(false),
+            disable_kcp_input: Some(false),
+            enable_quic_proxy: Some(true),
+            disable_quic_input: Some(true),
+            encryption_algorithm: Some("aes-256-gcm".to_owned()),
+            disable_encryption: Some(false),
+            default_protocol: Some("udp".to_owned()),
+            tld_dns_zone: Some("transport.mesh.".to_owned()),
+        };
+        db.save_central_network_intent(intent.clone())
+            .await
+            .unwrap();
+        let loaded = db
+            .load_central_network_intent(user_id, network_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.transport, intent.transport);
+        assert_eq!(loaded.members.len(), 2);
+        assert_eq!(loaded.credentials, intent.credentials);
+        let mut legacy = serde_json::to_value(&intent).unwrap();
+        legacy.as_object_mut().unwrap().remove("transport");
+        let legacy: CentralNetworkIntent = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.transport, NetworkTransportSettings::default());
+        db.save_central_network_intent(legacy).await.unwrap();
+        let inherited = db
+            .load_central_network_intent(user_id, network_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inherited.transport, NetworkTransportSettings::default());
+    }
+
+    #[tokio::test]
     async fn global_prefer_ipv6_legacy_intent_and_migrated_rows_default_false() {
         use sea_orm_migration::MigratorTrait as _;
 
@@ -819,7 +876,7 @@ mod tests {
         assert!(!legacy.prefer_ipv6);
 
         // Create a row against the actual pre-feature schema, then upgrade it.
-        crate::migrator::Migrator::down(db.orm_db(), Some(1))
+        crate::migrator::Migrator::down(db.orm_db(), Some(2))
             .await
             .unwrap();
         sqlx::query(

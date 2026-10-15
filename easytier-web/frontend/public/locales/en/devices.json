@@ -183,7 +183,7 @@
     "tomlWarning": "The configuration contains network credentials. Protect your screen and clipboard when displaying it.",
     "hideToml": "Hide configuration",
     "showToml": "Show read-only TOML",
-    "logTitle": "Device log level",
+    "logTitle": "Device file logging",
     "logUnavailable": "The log level could not be loaded. Try again.",
     "logOff": "Off",
     "logError": "Error",
@@ -199,7 +199,10 @@
     "prefixLength": "Prefix length",
     "noInterfaces": "The device did not report interface addresses with prefix lengths.",
     "currentLevel": "Current level:",
-    "peerLabel": "Peer {{id}}"
+    "peerLabel": "Peer {{id}}",
+    "fileLogLevel": "File log level",
+    "saveLogLevel": "Save file log level",
+    "logSaveFailed": "Could not save log level: {{error}}"
   },
   "notice": {
     "deleted": "Instance deleted.",

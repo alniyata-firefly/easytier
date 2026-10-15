@@ -17,7 +17,7 @@
 
 ## 项目来源与下游改造
 
-本仓库是独立维护的 **[EasyTier](https://github.com/EasyTier/EasyTier) 下游适配版本**。VPN 核心、通信协议、Tauri 客户端基础及上游文档来自 EasyTier 项目及其贡献者。本仓库记录的上游基线为 [`8b7f1f0196edb5b580829ed5f135050fb5853478`](https://github.com/EasyTier/EasyTier/commit/8b7f1f0196edb5b580829ed5f135050fb5853478)，提交日期为 2026 年 10 月 5 日，软件包版本为 `2.7.0`。本仓库的 `2.7.1` 为下游发布版本号，不代表 EasyTier 上游正式发布或认可。
+本仓库是独立维护的 **[EasyTier](https://github.com/EasyTier/EasyTier) 下游适配版本**。VPN 核心、通信协议、Tauri 客户端基础及上游文档来自 EasyTier 项目及其贡献者。本仓库记录的上游基线为 [`8b7f1f0196edb5b580829ed5f135050fb5853478`](https://github.com/EasyTier/EasyTier/commit/8b7f1f0196edb5b580829ed5f135050fb5853478)，提交日期为 2026 年 10 月 5 日，软件包版本为 `2.7.0`。本仓库的 `2.7.2` 为下游发布版本号，不代表 EasyTier 上游正式发布或认可。
 
 本仓库新增和适配的主要内容：
 
@@ -25,6 +25,8 @@
 - React Web 控制台，以及基于 React 的 Windows、Android 界面，保留 EasyTier Core 与 Tauri 的集成。
 - 多实例配置、服务器与节点资源观测、可选历史指标、IPv6 优先与 IPv4 回退，以及支持平台上的自动识别或手动选择上联网卡。
 - Web 与客户端统一使用自行绘制的[蓝色三节点 SVG 标识](assets/brand/easytier.svg)。
+- 网络统一配置压缩、KCP/QUIC、加密、直连协议和 DNS 后缀，向受管成员及服务端网关下发。网络明确值覆盖成员设置，省略的项沿用原值；实际变更可能重建网络实例并短暂重连。
+- 补齐自定义 STUN、中转限速与策略、虚拟 IPv6、完整 SOCKS5 监听地址、端口白名单、实例名及 Linux 命名空间等管理配置接口，参见[配置与下发语义](docs/central-network-connectivity.md)。
 
 平面界面的视觉参考来自 [UniFi Network 10.5 官方介绍](https://blog.ui.com/article/introducing-network-10-5)及 [UniFi Design Center](https://design.ui.com/)。本项目不是 Ubiquiti 官方项目，也未获其官方背书，不主张获得其商标或图标的使用授权。新三节点标识在本仓库中自行绘制，并非从这些网站提取的图标。具体设计约定见 [DESIGN.md](easytier-web/frontend/DESIGN.md)。
 

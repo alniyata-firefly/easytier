@@ -128,6 +128,28 @@ async fn ensure_management_access(
     Ok(())
 }
 
+async fn ensure_client_config_supported(
+    client_mgr: &crate::client_manager::ClientManager,
+    user_id: UserIdInDb,
+    machine_id: uuid::Uuid,
+    config: &NetworkConfig,
+) -> Result<(), HttpHandleError> {
+    // Offline desired state can be prepared for a future upgrade. A live
+    // legacy Core must reject options it would otherwise silently discard.
+    if let Some(session) = client_mgr.get_session_by_machine_id(user_id, &machine_id) {
+        session
+            .ensure_config_supported(config)
+            .await
+            .map_err(|error| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    other_error(error.to_string()).into(),
+                )
+            })?;
+    }
+    Ok(())
+}
+
 fn public_heartbeat(mut request: HeartbeatRequest) -> HeartbeatRequest {
     request.user_token.clear();
     request
@@ -302,6 +324,13 @@ impl NetworkApi {
     ) -> Result<Json<ValidateConfigResponse>, HttpHandleError> {
         ensure_management_access(&client_mgr, Self::get_user_id(&auth_session)?, machine_id)
             .await?;
+        ensure_client_config_supported(
+            &client_mgr,
+            Self::get_user_id(&auth_session)?,
+            machine_id,
+            &payload.config,
+        )
+        .await?;
         Ok(client_mgr
             .handle_validate_config(
                 (Self::get_user_id(&auth_session)?, machine_id),
@@ -321,6 +350,7 @@ impl NetworkApi {
     ) -> Result<Json<Void>, HttpHandleError> {
         let user_id = Self::get_user_id(&auth_session)?;
         ensure_management_access(&client_mgr, user_id, machine_id).await?;
+        ensure_client_config_supported(&client_mgr, user_id, machine_id, &payload.config).await?;
         let instance_id = match payload.config.instance_id.as_deref() {
             Some(raw) => uuid::Uuid::parse_str(raw).map_err(|error| {
                 (
@@ -631,6 +661,13 @@ impl NetworkApi {
         ensure_management_access(&client_mgr, user_id, machine_id).await?;
         ensure_direct_mutation_allowed(&network_service, user_id, machine_id, inst_id, None)
             .await?;
+        if !payload.disabled {
+            let config = client_mgr
+                .handle_get_network_config((user_id, machine_id), inst_id)
+                .await
+                .map_err(convert_error)?;
+            ensure_client_config_supported(&client_mgr, user_id, machine_id, &config).await?;
+        }
         client_mgr
             .invalidate_applied_config_revision(user_id, machine_id)
             .await;
@@ -677,6 +714,8 @@ impl NetworkApi {
             ));
         }
         let user_id = Self::get_user_id(&auth_session)?;
+        ensure_management_access(&client_mgr, user_id, machine_id).await?;
+        ensure_client_config_supported(&client_mgr, user_id, machine_id, &payload.config).await?;
         let _mutation = network_service.lock_mutations().await;
         ensure_direct_mutation_allowed(
             &network_service,
@@ -749,6 +788,7 @@ impl NetworkApi {
         Json(payload): Json<RunNetworkJsonReq>,
     ) -> Result<Json<Void>, HttpHandleError> {
         ensure_management_access(&client_mgr, user_id, machine_id).await?;
+        ensure_client_config_supported(&client_mgr, user_id, machine_id, &payload.config).await?;
         let source = payload
             .source
             .and_then(config_source_from_rpc)

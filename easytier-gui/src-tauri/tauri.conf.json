@@ -8,7 +8,7 @@
   "bundle": {
     "active": true,
     "android": {
-      "versionCode": 2007002
+      "versionCode": 2007003
     },
     "windows": {
       "nsis": {
@@ -25,7 +25,7 @@
     "createUpdaterArtifacts": false
   },
   "productName": "easytier-gui",
-  "version": "2.7.1",
+  "version": "2.7.2",
   "identifier": "com.kkrainbow.easytier",
   "plugins": {
     "shell": {

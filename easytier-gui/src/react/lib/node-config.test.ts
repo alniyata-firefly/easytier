@@ -80,3 +80,12 @@ describe('uplink target capabilities', () => {
     expect(local.future).toBe(source.future);
   });
 });
+
+describe('compression configuration', () => {
+  it('accepts supported wire enums and preserves explicit Off', () => {
+    for (const data_compress_algo of [undefined, 1, 2]) expect(validateNodeParameters({ data_compress_algo })).toEqual([]);
+    for (const data_compress_algo of [0, 3, 'Zstd', true]) expect(validateNodeParameters({ data_compress_algo })[0].key).toBe('errors.compression');
+    expect(applyNodePatch({ data_compress_algo: 2, mtu: 1280 }, { data_compress_algo: 1 })).toEqual({ data_compress_algo: 1, mtu: 1280 });
+    expect(applyNodePatch({ data_compress_algo: 2, mtu: 1280 }, { data_compress_algo: undefined })).toEqual({ mtu: 1280 });
+  });
+});

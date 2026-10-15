@@ -31,6 +31,65 @@ use super::session::{SessionConfigClient, SessionRpcClient};
 #[error("This client Core does not support IPv6 preference; update the client before enabling it")]
 pub(super) struct UnsupportedIpv6Preference;
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "This configuration requires EasyTier Core 2.7.2 or newer; upgrade the target client before applying it"
+)]
+pub(crate) struct UnsupportedExtendedConfig;
+
+pub(crate) fn requires_extended_config(config: &NetworkConfig) -> bool {
+    config.default_protocol.is_some()
+        || config.stun_servers.is_some()
+        || config.tcp_stun_servers.is_some()
+        || config.stun_servers_v6.is_some()
+        || config.foreign_relay_bps_limit.is_some()
+        || config.disable_relay_kcp.is_some()
+        || config.disable_relay_quic.is_some()
+        || config.enable_relay_foreign_network_kcp.is_some()
+        || config.enable_relay_foreign_network_quic.is_some()
+        || config.tld_dns_zone.is_some()
+        || config.virtual_ipv6.is_some()
+        || config.tcp_whitelist.is_some()
+        || config.udp_whitelist.is_some()
+        || config.socks5_proxy.is_some()
+        || config.instance_name.is_some()
+        || config.netns.is_some()
+}
+
+pub(crate) fn ensure_extended_config_supported(
+    desired: &NetworkConfig,
+    current: Option<&NetworkConfig>,
+    client_version: Option<&str>,
+) -> anyhow::Result<()> {
+    if !requires_extended_config(desired)
+        || current.is_some_and(|config| config.default_protocol.is_some())
+        || client_version.is_some_and(supports_extended_config_version)
+    {
+        return Ok(());
+    }
+    Err(UnsupportedExtendedConfig.into())
+}
+
+fn supports_extended_config_version(version: &str) -> bool {
+    let version = version.trim().strip_prefix('v').unwrap_or(version.trim());
+    let release = version.split(['-', '+', ' ']).next().unwrap_or_default();
+    let mut components = release.split('.');
+    let Some(major) = components.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(minor) = components.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    let patch = match components.next() {
+        Some(part) => match part.parse::<u32>() {
+            Ok(patch) => patch,
+            Err(_) => return false,
+        },
+        None => 0,
+    };
+    components.next().is_none() && (major, minor, patch) >= (2, 7, 2)
+}
+
 pub(super) enum RuntimeReconcileAction {
     Unchanged(Box<NetworkConfig>),
     Run {
@@ -484,8 +543,10 @@ pub(super) async fn prepare_web_source_runtime_reconcile(
     inst_id: &str,
     desired_config: NetworkConfig,
     is_running: bool,
+    client_version: Option<&str>,
 ) -> anyhow::Result<RuntimeReconcileAction> {
     if !is_running {
+        ensure_extended_config_supported(&desired_config, None, client_version)?;
         return Ok(RuntimeReconcileAction::Run {
             config: Box::new(desired_config),
             overwrite: false,
@@ -501,6 +562,7 @@ pub(super) fn prepare_web_source_runtime_reconcile_from_current(
     current_config: &NetworkConfig,
     desired_config: NetworkConfig,
 ) -> anyhow::Result<RuntimeReconcileAction> {
+    ensure_extended_config_supported(&desired_config, Some(current_config), None)?;
     // The optional DTO field is also a capability marker: updated Core always
     // reports Some(false/true), while older Core omits it. Avoid repeatedly
     // rebuilding a running legacy instance for a preference it cannot apply.
@@ -597,6 +659,103 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn extended_config_rejects_every_new_field_before_legacy_runtime_mutation() {
+        for (field, value) in [
+            ("default_protocol", serde_json::json!("tcp")),
+            ("stun_servers", serde_json::json!({"values": []})),
+            ("tcp_stun_servers", serde_json::json!({"values": []})),
+            ("stun_servers_v6", serde_json::json!({"values": []})),
+            ("foreign_relay_bps_limit", serde_json::json!("0")),
+            ("disable_relay_kcp", serde_json::json!(false)),
+            ("disable_relay_quic", serde_json::json!(false)),
+            ("enable_relay_foreign_network_kcp", serde_json::json!(false)),
+            (
+                "enable_relay_foreign_network_quic",
+                serde_json::json!(false),
+            ),
+            ("tld_dns_zone", serde_json::json!("et.net.")),
+            ("virtual_ipv6", serde_json::json!("fd00::1/64")),
+            ("tcp_whitelist", serde_json::json!({"values": []})),
+            ("udp_whitelist", serde_json::json!({"values": []})),
+            ("socks5_proxy", serde_json::json!("")),
+            ("instance_name", serde_json::json!("instance")),
+            ("netns", serde_json::json!("")),
+        ] {
+            let desired: NetworkConfig =
+                serde_json::from_value(serde_json::json!({(field): value})).unwrap();
+            let error = prepare_web_source_runtime_reconcile_from_current(
+                &NetworkConfig::default(),
+                desired.clone(),
+            )
+            .err()
+            .expect("legacy Core must not enter a recreate loop for a new DTO field");
+            assert!(error.is::<UnsupportedExtendedConfig>(), "{field}");
+            assert!(error.to_string().contains("2.7.2"));
+            assert!(
+                ensure_extended_config_supported(&desired, None, Some("2.7.1-release")).is_err(),
+                "{field}"
+            );
+            assert!(
+                ensure_extended_config_supported(&desired, None, Some("2.7.2-release")).is_ok(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn extended_config_accepts_runtime_capability_or_new_heartbeat_for_first_instance() {
+        let desired = NetworkConfig {
+            default_protocol: Some("udp".to_owned()),
+            ..Default::default()
+        };
+        let current = NetworkConfig {
+            default_protocol: Some("tcp".to_owned()),
+            ..Default::default()
+        };
+        assert!(
+            ensure_extended_config_supported(&desired, Some(&current), Some("2.7.1-backport"))
+                .is_ok()
+        );
+        assert!(ensure_extended_config_supported(&desired, None, None).is_err());
+        for version in ["2.7.2", "2.7.2-new", "v2.7.2+build", "2.8", "3.0.0"] {
+            assert!(
+                ensure_extended_config_supported(&desired, None, Some(version)).is_ok(),
+                "{version}"
+            );
+        }
+        for version in [
+            "",
+            "unknown",
+            "2.7",
+            "2.7.1",
+            "2.6.99",
+            "2.7.2.1",
+            "bad.2.7.2",
+        ] {
+            assert!(
+                ensure_extended_config_supported(&desired, None, Some(version)).is_err(),
+                "{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_configs_and_preexisting_transport_fields_do_not_require_upgrade() {
+        let desired = NetworkConfig {
+            data_compress_algo: Some(2),
+            enable_kcp_proxy: Some(true),
+            disable_kcp_input: Some(false),
+            enable_quic_proxy: Some(false),
+            disable_quic_input: Some(true),
+            encryption_algorithm: Some("aes-256-gcm".to_owned()),
+            disable_encryption: Some(false),
+            ..Default::default()
+        };
+        assert!(!requires_extended_config(&desired));
+        assert!(ensure_extended_config_supported(&desired, None, Some("2.7.1")).is_ok());
+    }
 
     #[test]
     fn exit_nodes_patch_preserves_order_and_supports_empty_set() {

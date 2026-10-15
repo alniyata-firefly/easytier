@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import ApiClient, { type ConsoleInfo } from '../lib/api';
+import ApiClient, { type CentralNetworkDetail, type ConsoleInfo } from '../lib/api';
 import { useResource } from '../lib/hooks';
 import { navigate } from '../lib/router';
 import { Alert, Button, Dialog, Empty, Panel, Status, Tabs, useNotice } from '../components/ui';
@@ -16,10 +16,38 @@ export function NetworkPage({ api, networkId, consoleInfo, onTitleChange }: { ap
     const members = useResource(() => api.list_network_members(networkId), `network-members:${networkId}`, 5000);
     const gateway = useResource(() => api.get_gateway_info(), 'network-page-gateway');
     const [tab, setTab] = useState('members'), [settingsRevision, setSettingsRevision] = useState(0);
+    const [settingsSnapshot, setSettingsSnapshot] = useState<CentralNetworkDetail>();
+    const [restoring, setRestoring] = useState(false), [restoreError, setRestoreError] = useState<unknown>(null);
+    const restoreRequest = useRef(0);
     const [busy, setBusy] = useState(false), [deleting, setDeleting] = useState(false), [deleteError, setDeleteError] = useState<unknown>(null);
     const notice = useNotice();
-    useEffect(() => { setTab('members'); setDeleting(false); setDeleteError(null); setSettingsRevision(0); }, [networkId]);
+    useEffect(() => {
+        setTab('members'); setDeleting(false); setDeleteError(null); setSettingsRevision(0);
+        setSettingsSnapshot(undefined); setRestoreError(null); setRestoring(false);
+        return () => { restoreRequest.current++; };
+    }, [networkId]);
     const refresh = () => { api.clear_snapshots(); resource.refresh(); members.refresh(); };
+    const changeTab = (next: string) => {
+        if (next !== 'settings') {
+            restoreRequest.current++; setSettingsSnapshot(undefined); setRestoreError(null); setRestoring(false);
+        }
+        setTab(next);
+    };
+    const restoreSettings = async () => {
+        if (busy || restoring) return;
+        const request = ++restoreRequest.current;
+        setRestoring(true); setRestoreError(null);
+        try {
+            const latest = await api.get_network(networkId);
+            if (request !== restoreRequest.current) return;
+            setSettingsSnapshot(latest); setSettingsRevision(value => value + 1);
+            resource.refresh(); gateway.refresh();
+        } catch (failure) {
+            if (request === restoreRequest.current) setRestoreError(failure);
+        } finally {
+            if (request === restoreRequest.current) setRestoring(false);
+        }
+    };
     const network = resource.data;
     useEffect(() => { onTitleChange?.(network?.display_name ?? ''); }, [network?.display_name, onTitleChange]);
     if (consoleInfo.webhook_auth) return <Empty title={t('detail.externalTitle')} />;
@@ -31,18 +59,18 @@ export function NetworkPage({ api, networkId, consoleInfo, onTitleChange }: { ap
         {resource.error && <Alert tone="error">{t('detail.refreshFailed', { error: resource.error })}<Button tone="ghost" onClick={resource.refresh}>{t('actions.retry')}</Button></Alert>}
         <div className="deployment-summary" role="status"><span>{t('detail.deployment')}</span><Status state={network.deployment?.state ?? 'unknown'} />{network.deployment?.gateway && <><span className="muted">{t('detail.gateway')}</span><Status state={network.deployment.gateway.state} /><Status state={network.deployment.gateway.running ? 'running' : 'stopped'} /></>}</div>
         {network.deployment?.gateway?.last_error && <Alert tone="warning">{t('detail.gatewayError', { error: network.deployment.gateway.last_error })}</Alert>}
-        <Tabs items={tabs} value={currentTab} onChange={setTab} />
+        <Tabs items={tabs} value={currentTab} onChange={changeTab} />
         <div className="tab-content" role="tabpanel" aria-label={tabs.find(item => item.id === currentTab)?.label}>
             {currentTab === 'members' && <>{members.error && <Alert tone="error">{t('detail.membersReadFailed', { error: members.error })}<Button tone="ghost" onClick={members.refresh}>{t('actions.retry')}</Button></Alert>}{members.loading && !members.data ? <Panel><p className="loading-lines" role="status">{t('detail.membersLoading')}</p></Panel> : members.data ? <NetworkMembers api={api} network={network} members={members.data.members} temporaryPeers={members.data.temporary_peers} loading={members.loading} onChanged={refresh} onObserve={() => setTab('observability')} /> : <Empty title={t('detail.membersUnavailable')} action={<Button onClick={members.refresh}>{t('actions.retry')}</Button>} />}</>}
             {currentTab === 'observability' && <>{members.error && <Alert tone="warning">{t('detail.membersRefreshFailed')}<Button tone="ghost" onClick={members.refresh}>{t('actions.retry')}</Button></Alert>}<NetworkObservability api={api} networkId={networkId} members={members.data?.members ?? []} gateway={network.networking_method === 'Gateway' ? network.deployment?.gateway : undefined} /></>}
             {currentTab === 'acl' && <AclPolicyPanel api={api} networkId={networkId} members={members.data?.members ?? []} onChanged={refresh} />}
             {currentTab === 'credentials' && <CredentialPanel api={api} network={network} gateway={gateway.data} onChanged={refresh} />}
             {currentTab === 'settings' && <>
-                <Panel title={t('settings.title')}><NetworkSettingsForm key={`${networkId}:${settingsRevision}`} network={network} gateway={gateway.data} busy={busy || gateway.loading} onSave={async (settings, secret) => {
-                    setBusy(true);
+                <Panel title={t('settings.title')}><NetworkSettingsForm key={`${networkId}:${settingsRevision}`} network={settingsSnapshot?.network_id === networkId ? settingsSnapshot : network} gateway={gateway.data} busy={busy || restoring || gateway.loading} onSave={async (settings, secret) => {
+                    setBusy(true); setRestoreError(null);
                     try { await api.update_network(networkId, settings, secret); refresh(); notice({ key: 'settings.saved', ns: 'networks' }, 'success'); }
                     finally { setBusy(false); }
-                }} /><div className="form-actions"><Button tone="ghost" disabled={busy} onClick={() => { resource.refresh(); gateway.refresh(); setSettingsRevision(value => value + 1); }}>{t('settings.restore')}</Button></div>{gateway.error && <Alert tone="warning">{t('detail.gatewayReadFailed', { error: gateway.error })}<Button tone="ghost" onClick={gateway.refresh}>{t('actions.retryRead')}</Button></Alert>}</Panel>
+                }} /><div className="form-actions"><Button tone="ghost" disabled={busy} busy={restoring} onClick={restoreSettings}>{t('settings.restore')}</Button></div>{restoreError !== null && <Alert tone="error">{t('settings.restoreFailed', { error: errorMessage(restoreError) })}</Alert>}{gateway.error && <Alert tone="warning">{t('detail.gatewayReadFailed', { error: gateway.error })}<Button tone="ghost" onClick={gateway.refresh}>{t('actions.retryRead')}</Button></Alert>}</Panel>
                 <Panel title={t('detail.deleteTitle')}><Button tone="danger" icon="trash" onClick={() => { setDeleteError(null); setDeleting(true); }}>{t('detail.deleteAction')}</Button></Panel>
             </>}
         </div>

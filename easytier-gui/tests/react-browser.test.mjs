@@ -55,7 +55,7 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
     const editor = page.getByRole('dialog', { name: '编辑网络' }); await editor.waitFor();
     await editor.getByRole('tab', { name: '节点参数' }).click();
     const flags = ['latency_first','use_smoltcp','disable_ipv6','prefer_ipv6','ipv6_public_addr_auto','enable_kcp_proxy','disable_kcp_input','enable_quic_proxy','disable_quic_input','disable_p2p','p2p_only','lazy_p2p','bind_device','no_tun','enable_exit_node','relay_all_peer_rpc','need_p2p','multi_thread','proxy_forward_by_system','disable_encryption','disable_tcp_hole_punching','disable_udp_hole_punching','enable_udp_broadcast_relay','disable_upnp','disable_sym_hole_punching','enable_magic_dns','enable_private_mode'];
-    for (const flag of flags) assert.equal(await editor.getByRole('checkbox', { name: labels.fields[flag], exact: true }).count(), 1, flag);
+    for (const flag of flags) assert.equal(await editor.getByRole('checkbox', { name: labels.fields[flag], exact: true }).count(), scenario.platform === 'android' && flag === 'bind_device' ? 0 : 1, flag);
     await editor.getByRole('checkbox', { name: labels.fields.prefer_ipv6, exact: true }).check();
     const mtu = editor.getByRole('textbox', { name: labels.fields.mtu, exact: true }); await mtu.fill('1280'); await mtu.focus();
     assert.equal(await mtu.evaluate(el => getComputedStyle(el).fontWeight), '400');

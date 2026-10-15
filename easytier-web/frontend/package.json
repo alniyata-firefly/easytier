@@ -1,18 +1,20 @@
 {
   "name": "easytier-react-console",
   "private": true,
-  "version": "2.7.1",
+  "version": "2.7.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "test": "node --test tests/react-contracts.test.mjs tests/node-config.test.mjs tests/uplink-api-contract.test.mjs tests/lifetime.test.mjs",
+    "test": "node --test tests/react-contracts.test.mjs tests/node-config.test.mjs tests/uplink-api-contract.test.mjs tests/lifetime.test.mjs tests/advanced-node-config.test.mjs",
     "test:browser": "node --test tests/react-browser.test.mjs",
     "test:e2e:native": "node --test --test-concurrency=1 tests/device-auth-e2e.test.mjs tests/central-native-e2e.test.mjs tests/observability-native-e2e.test.mjs",
     "test:browser:layout": "node tests/console-layout-browser.test.mjs",
-    "test:browser:uplink": "node tests/uplink-ui-browser.test.mjs"
+    "test:browser:uplink": "node tests/uplink-ui-browser.test.mjs",
+    "test:browser:transport": "node --test tests/network-transport-browser.test.mjs tests/network-settings-restore-browser.test.mjs tests/advanced-node-browser.test.mjs",
+    "test:e2e:transport": "node --test --test-concurrency=1 tests/network-transport-native-e2e.test.mjs tests/network-transport-legacy-native-e2e.test.mjs"
   },
   "dependencies": {
     "@protobuf-ts/runtime": "2.11.1",

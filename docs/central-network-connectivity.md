@@ -30,6 +30,52 @@ UDP 建链确认通过连接标识及随机校验值关联响应，可以接受�
 
 监听端点修复不改变成员、凭据、网络标识、虚拟地址分配及成员覆盖配置。
 
+## 网络传输配置
+
+Web 的“网络设置 → 传输设置”统一配置数据压缩、KCP 发起和接收、QUIC 发起和接收、加密开关及算法、直连协议偏好、Magic DNS 后缀。保存后，控制器重新生成该网络所有受管成员的期望配置，并同步服务端内嵌网关。在线成员通过现有修订同步流程应用；离线成员在重连后取得最新配置，可在成员部署状态中查看是否已应用。配置更新不是跨节点的原子切换。
+
+每项支持沿用节点原值或明确设置。网络中的明确值在成员覆盖合并后应用，`false` 也会覆盖成员原有的 `true`；未设置的项继续沿用成员历史配置或 Core 默认值。升级既有数据库会将网络策略初始化为 `{}`，不会改变旧节点的行为。API 更新省略 `transport` 时保留旧策略，提交 `transport: {}` 则恢复所有项的继承。
+
+```json
+{
+  "transport": {
+    "data_compress_algo": 2,
+    "enable_kcp_proxy": true,
+    "disable_kcp_input": false,
+    "enable_quic_proxy": false,
+    "disable_quic_input": false
+  }
+}
+```
+
+此对象位于创建或更新网络请求的 `settings` 中。压缩枚举 `1` 为关闭、`2` 为 Zstd；接收开关在 API 中使用 `disable_*_input`，与界面“启用接收”的值相反。独立实例仍在节点参数中配置这些 Core 参数。
+
+这些参数的实际变更需要重建网络实例，可能造成短暂重连。网络密钥、成员标识、虚拟地址分配和成员覆盖记录保持原值。控制器不修改外部公共服务器或仅凭网络凭据接入、未连接管理服务器的客户端；凭据加入页面导出的 CLI/TOML 携带导出时的策略快照，后续策略变更仍需自行更新，并使用编译了相应能力的 Core。
+
+压缩由发送端选择，接收端按报文标记解码，因此接收端需要支持 Zstd。KCP 和 QUIC 的发起、接收能力分别配置，Core 会检查对端的接收能力。这些代理选项处理被包装的 IPv4 TCP 流量，不会把所有 UDP 或 IPv6 隧道都转换成 KCP/QUIC。
+
+## 管理配置的完整转换
+
+2.7.2 为管理接口补齐原生实例配置字段，Web 成员 JSON、独立实例 TOML 和客户端节点参数使用同一转换链路：
+
+| 配置 | 管理字段 |
+| --- | --- |
+| 直连协议偏好 | `default_protocol` |
+| UDP/TCP/IPv6 STUN | `stun_servers`、`tcp_stun_servers`、`stun_servers_v6` |
+| 跨网络中转限速 | `foreign_relay_bps_limit` |
+| 同网络及跨网络 KCP/QUIC 中转 | `disable_relay_kcp`、`disable_relay_quic`、`enable_relay_foreign_network_kcp`、`enable_relay_foreign_network_quic` |
+| Magic DNS 后缀 | `tld_dns_zone` |
+| 虚拟 IPv6 地址及前缀长度 | `virtual_ipv6`，例如 `fd00:7::2/64` |
+| TCP/UDP 端口白名单 | `tcp_whitelist`、`udp_whitelist` |
+| 完整 SOCKS5 监听地址 | `socks5_proxy`，例如 `socks5://127.0.0.1:1080` |
+| 实例显示名及 Linux 网络命名空间 | `instance_name`、`netns` |
+
+五项列表使用 `{"values":[...]}` 消息，省略字段沿用默认配置，存在且 `values: []` 表示明确空列表，避免 Proto3 repeated 字段丢失 presence。限速采用无损的 uint64 十进制字符串，`"0"` 是有效值。`socks5_proxy` 明确给出完整地址时优先于旧启用/端口配置，明确空串表示关闭；省略时继续兼容旧字段。
+
+新 Core 的配置读回会带有 `default_protocol` 能力标记。控制器在应用新增字段前检查该标记或受认证心跳报告的版本；旧 Core 无法接收新增字段时返回升级提示，并保留原运行实例。离线设备可以先保存期望配置，升级并重连后应用。压缩、KCP/QUIC 等旧管理字段不因这项检查要求额外升级。
+
+主机资源采样、管理 RPC 监听、日志目录和轮转、守护进程及配置目录仍属于进程启动配置，不随网络策略下发。Web 的节点日志设置控制现有运行进程的文件日志级别。
+
 ## 可达性边界
 
 绑定本地端口不等于证明该端口从公网可达。连接端 socket 的 STUN 结果也不等于所有目的地都使用同一出口。多出口策略路由可能让节点向 STUN 和对端分别使用不同公网 IPv6；NPT、PAT、防火墙及上游网络需要实际双向 UDP 和隧道验证。

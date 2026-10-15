@@ -118,7 +118,8 @@
     "rotateHint": "Rotate the secret and redeploy it to members when saving.",
     "save": "Save network settings",
     "saved": "Network settings saved. Deploying them to members.",
-    "restore": "Restore last loaded settings"
+    "restore": "Restore last loaded settings",
+    "restoreFailed": "Could not restore settings: {{error}}"
   },
   "members": {
     "title": "Network members",
@@ -377,5 +378,23 @@
       "cidr": "Enter a target subnet CIDR.",
       "port": "Invalid port: {{port}}. Enter a port or range between 1 and 65535."
     }
+  },
+  "transport": {
+    "title": "Transport settings",
+    "data_compress_algo": "Data compression",
+    "enable_kcp_proxy": "Outgoing KCP proxy",
+    "disable_kcp_input": "Incoming KCP proxy",
+    "enable_quic_proxy": "Outgoing QUIC proxy",
+    "disable_quic_input": "Incoming QUIC proxy",
+    "inherit": "Default (keep node settings)",
+    "disabled": "Disabled",
+    "enabled": "Enabled",
+    "zstd": "Enable Zstd",
+    "encryption_algorithm": "Encryption algorithm",
+    "disable_encryption": "Data encryption",
+    "default_protocol": "Default connection protocol",
+    "tld_dns_zone_mode": "Magic DNS zone setting",
+    "tld_dns_zone": "Magic DNS zone",
+    "custom": "Custom"
   }
 }

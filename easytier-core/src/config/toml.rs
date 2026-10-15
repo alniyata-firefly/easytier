@@ -184,6 +184,9 @@ pub trait ConfigLoader: Send + Sync {
 
     fn get_inst_name(&self) -> String;
     fn set_inst_name(&self, name: String);
+    fn get_inst_name_config(&self) -> Option<String> {
+        Some(self.get_inst_name())
+    }
 
     fn get_uplink(&self) -> UplinkConfig;
     fn set_uplink(&self, uplink: UplinkConfig);
@@ -255,9 +258,17 @@ pub trait ConfigLoader: Send + Sync {
 
     fn get_tcp_whitelist(&self) -> Vec<String>;
     fn set_tcp_whitelist(&self, whitelist: Vec<String>);
+    fn get_tcp_whitelist_config(&self) -> Option<Vec<String>> {
+        let values = self.get_tcp_whitelist();
+        (!values.is_empty()).then_some(values)
+    }
 
     fn get_udp_whitelist(&self) -> Vec<String>;
     fn set_udp_whitelist(&self, whitelist: Vec<String>);
+    fn get_udp_whitelist_config(&self) -> Option<Vec<String>> {
+        let values = self.get_udp_whitelist();
+        (!values.is_empty()).then_some(values)
+    }
 
     fn get_stun_servers(&self) -> Option<Vec<String>>;
     fn set_stun_servers(&self, servers: Option<Vec<String>>);
@@ -797,6 +808,10 @@ impl ConfigLoader for TomlConfig {
         self.config.lock().unwrap().instance_name = Some(name);
     }
 
+    fn get_inst_name_config(&self) -> Option<String> {
+        self.config.lock().unwrap().instance_name.clone()
+    }
+
     fn get_hostname(&self) -> String {
         let hostname = self.config.lock().unwrap().hostname.clone();
 
@@ -1116,6 +1131,10 @@ impl ConfigLoader for TomlConfig {
         self.config.lock().unwrap().tcp_whitelist = Some(whitelist);
     }
 
+    fn get_tcp_whitelist_config(&self) -> Option<Vec<String>> {
+        self.config.lock().unwrap().tcp_whitelist.clone()
+    }
+
     fn get_udp_whitelist(&self) -> Vec<String> {
         self.config
             .lock()
@@ -1127,6 +1146,10 @@ impl ConfigLoader for TomlConfig {
 
     fn set_udp_whitelist(&self, whitelist: Vec<String>) {
         self.config.lock().unwrap().udp_whitelist = Some(whitelist);
+    }
+
+    fn get_udp_whitelist_config(&self) -> Option<Vec<String>> {
+        self.config.lock().unwrap().udp_whitelist.clone()
     }
 
     fn get_stun_servers(&self) -> Option<Vec<String>> {

@@ -90,8 +90,11 @@ pub trait NetworkConfigExt {
 ))]
 const FORM_MANAGED_TOML_FIELDS: &[&str] = &[
     "hostname",
+    "instance_name",
     "instance_id",
     "ipv4",
+    "ipv6",
+    "netns",
     "ipv6_public_addr_provider",
     "ipv6_public_addr_auto",
     "ipv6_public_addr_prefix",
@@ -111,6 +114,11 @@ const FORM_MANAGED_TOML_FIELDS: &[&str] = &[
     "credential_file",
     "managed_credentials",
     "uplink",
+    "stun_servers",
+    "tcp_stun_servers",
+    "stun_servers_v6",
+    "tcp_whitelist",
+    "udp_whitelist",
 ];
 
 #[cfg(all(
@@ -118,6 +126,7 @@ const FORM_MANAGED_TOML_FIELDS: &[&str] = &[
     any(test, all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 const FORM_MANAGED_FLAG_FIELDS: &[&str] = &[
+    "default_protocol",
     "latency_first",
     "dev_name",
     "use_smoltcp",
@@ -127,6 +136,12 @@ const FORM_MANAGED_FLAG_FIELDS: &[&str] = &[
     "disable_kcp_input",
     "enable_quic_proxy",
     "disable_quic_input",
+    "disable_relay_kcp",
+    "disable_relay_quic",
+    "enable_relay_foreign_network_kcp",
+    "enable_relay_foreign_network_quic",
+    "foreign_relay_bps_limit",
+    "tld_dns_zone",
     "disable_p2p",
     "p2p_only",
     "lazy_p2p",
@@ -174,7 +189,7 @@ pub(crate) fn merge_network_config_toml(
             generated.insert(key.clone(), value.clone());
         }
     }
-    if !original.contains_key("instance_name") {
+    if config.instance_name.is_none() && !original.contains_key("instance_name") {
         generated.remove("instance_name");
     }
 
@@ -241,6 +256,93 @@ fn parse_peer_urls(peer_urls: &[String]) -> Result<Vec<PeerConfig>, anyhow::Erro
     Ok(peers)
 }
 
+fn valid_dns_name(value: &str) -> bool {
+    let name = value.strip_suffix('.').unwrap_or(value);
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.as_bytes()[0].is_ascii_alphanumeric()
+                && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
+fn validate_stun_servers(servers: &manage::ConfigStringList, field: &str) -> anyhow::Result<()> {
+    for server in &servers.values {
+        let valid = if let Some(domain) = server.strip_prefix("txt:") {
+            valid_dns_name(domain)
+        } else if let Ok(address) = server.parse::<SocketAddr>() {
+            address.port() != 0
+        } else if server.parse::<std::net::IpAddr>().is_ok() {
+            true
+        } else if let Some((host, port)) = server.rsplit_once(':') {
+            valid_dns_name(host) && port.parse::<u16>().is_ok_and(|port| port != 0)
+        } else {
+            valid_dns_name(server)
+        };
+        anyhow::ensure!(
+            valid,
+            "invalid {field} endpoint; use host[:port], IP[:port] or txt:domain"
+        );
+    }
+    Ok(())
+}
+
+fn parse_socks5_proxy(value: &str) -> anyhow::Result<Option<url::Url>> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let url = url::Url::parse(value).context("invalid socks5_proxy URL")?;
+    anyhow::ensure!(
+        url.scheme() == "socks5"
+            && matches!(url.host(), Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)))
+            && url.port().is_some_and(|port| port != 0)
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && matches!(url.path(), "" | "/"),
+        "socks5_proxy must be socks5://IP:port with no authentication, path, query or fragment"
+    );
+    Ok(Some(url))
+}
+
+/// Shared by native and portable management projections. Lists retain their
+/// TOML presence so absent defaults cannot turn into explicitly disabled STUN.
+pub(crate) fn populate_extended_config(config: &impl ConfigLoader, result: &mut NetworkConfig) {
+    let flags = config.get_flags();
+    result.default_protocol = Some(flags.default_protocol);
+    result.stun_servers = config
+        .get_stun_servers()
+        .map(|values| manage::ConfigStringList { values });
+    result.tcp_stun_servers = config
+        .get_tcp_stun_servers()
+        .map(|values| manage::ConfigStringList { values });
+    result.stun_servers_v6 = config
+        .get_stun_servers_v6()
+        .map(|values| manage::ConfigStringList { values });
+    result.foreign_relay_bps_limit = Some(flags.foreign_relay_bps_limit);
+    result.disable_relay_kcp = Some(flags.disable_relay_kcp);
+    result.disable_relay_quic = Some(flags.disable_relay_quic);
+    result.enable_relay_foreign_network_kcp = Some(flags.enable_relay_foreign_network_kcp);
+    result.enable_relay_foreign_network_quic = Some(flags.enable_relay_foreign_network_quic);
+    result.tld_dns_zone = Some(flags.tld_dns_zone);
+    result.virtual_ipv6 = config.get_ipv6().map(|address| address.to_string());
+    result.tcp_whitelist = config
+        .get_tcp_whitelist_config()
+        .map(|values| manage::ConfigStringList { values });
+    result.udp_whitelist = config
+        .get_udp_whitelist_config()
+        .map(|values| manage::ConfigStringList { values });
+    result.socks5_proxy = config.get_socks5_portal().map(|url| url.to_string());
+    result.instance_name = config.get_inst_name_config();
+    result.netns = config.get_netns();
+}
+
 impl NetworkConfigExt for NetworkConfig {
     #[allow(deprecated)]
     fn gen_config(&self) -> Result<TomlConfigLoader, anyhow::Error> {
@@ -255,7 +357,80 @@ impl NetworkConfigExt for NetworkConfig {
         cfg.set_uplink(self.uplink.clone().unwrap_or_default().try_into()?);
         cfg.set_hostname(self.hostname.clone());
         cfg.set_dhcp(self.dhcp.unwrap_or_default());
-        cfg.set_inst_name(self.network_name.clone().unwrap_or_default());
+        if let Some(instance_name) = &self.instance_name {
+            anyhow::ensure!(
+                instance_name.len() <= 255 && !instance_name.chars().any(char::is_control),
+                "instance_name must contain at most 255 bytes without control characters"
+            );
+        }
+        cfg.set_inst_name(
+            self.instance_name
+                .clone()
+                .unwrap_or_else(|| self.network_name.clone().unwrap_or_default()),
+        );
+        if let Some(netns) = &self.netns {
+            anyhow::ensure!(
+                netns.len() <= 255
+                    && netns == netns.trim()
+                    && !matches!(netns.as_str(), "." | "..")
+                    && !netns.contains('/')
+                    && !netns.chars().any(char::is_control),
+                "invalid netns name"
+            );
+            cfg.set_netns((!netns.is_empty()).then(|| netns.clone()));
+        }
+        if let Some(ipv6) = self.virtual_ipv6.as_ref().filter(|value| !value.is_empty()) {
+            cfg.set_ipv6(Some(
+                ipv6.parse::<cidr::Ipv6Inet>()
+                    .context("invalid virtual_ipv6 CIDR")?,
+            ));
+        }
+        for (field, servers) in [
+            ("stun_servers", self.stun_servers.as_ref()),
+            ("tcp_stun_servers", self.tcp_stun_servers.as_ref()),
+            ("stun_servers_v6", self.stun_servers_v6.as_ref()),
+        ] {
+            if let Some(servers) = servers {
+                validate_stun_servers(servers, field)?;
+            }
+        }
+        cfg.set_stun_servers(
+            self.stun_servers
+                .as_ref()
+                .map(|servers| servers.values.clone()),
+        );
+        cfg.set_tcp_stun_servers(
+            self.tcp_stun_servers
+                .as_ref()
+                .map(|servers| servers.values.clone()),
+        );
+        cfg.set_stun_servers_v6(
+            self.stun_servers_v6
+                .as_ref()
+                .map(|servers| servers.values.clone()),
+        );
+        let whitelist = crate::config::peers::AclRuleConfig {
+            tcp_whitelist: self
+                .tcp_whitelist
+                .as_ref()
+                .map(|list| list.values.clone())
+                .unwrap_or_default(),
+            udp_whitelist: self
+                .udp_whitelist
+                .as_ref()
+                .map(|list| list.values.clone())
+                .unwrap_or_default(),
+            ..Default::default()
+        };
+        whitelist
+            .build()
+            .context("invalid TCP/UDP port whitelist")?;
+        if let Some(list) = &self.tcp_whitelist {
+            cfg.set_tcp_whitelist(list.values.clone());
+        }
+        if let Some(list) = &self.udp_whitelist {
+            cfg.set_udp_whitelist(list.values.clone());
+        }
 
         // The web UI does not expose credential inputs directly, but imported/saved
         // NetworkConfig objects still need to preserve credential-mode instances via
@@ -423,12 +598,16 @@ impl NetworkConfigExt for NetworkConfig {
             cfg.set_exit_nodes(exit_nodes);
         }
 
-        if self.enable_socks5.unwrap_or_default()
+        if let Some(url) = &self.socks5_proxy {
+            cfg.set_socks5_portal(parse_socks5_proxy(url)?);
+        } else if self.enable_socks5.unwrap_or_default()
             && let Some(socks5_port) = self.socks5_port
         {
-            cfg.set_socks5_portal(Some(
-                format!("socks5://0.0.0.0:{}", socks5_port).parse().unwrap(),
-            ));
+            anyhow::ensure!(
+                (1..=65535).contains(&socks5_port),
+                "socks5_port must be between 1 and 65535"
+            );
+            cfg.set_socks5_portal(Some(format!("socks5://0.0.0.0:{}", socks5_port).parse()?));
         }
 
         if !self.mapped_listeners.is_empty() {
@@ -469,6 +648,35 @@ impl NetworkConfigExt for NetworkConfig {
         }
 
         let mut flags = gen_default_flags();
+        if let Some(protocol) = &self.default_protocol {
+            anyhow::ensure!(
+                matches!(
+                    protocol.as_str(),
+                    "tcp" | "udp" | "wg" | "quic" | "ws" | "wss" | "faketcp"
+                ),
+                "invalid default_protocol"
+            );
+            flags.default_protocol = protocol.clone();
+        }
+        if let Some(zone) = &self.tld_dns_zone {
+            anyhow::ensure!(valid_dns_name(zone), "invalid tld_dns_zone");
+            flags.tld_dns_zone = zone.clone();
+        }
+        if let Some(limit) = self.foreign_relay_bps_limit {
+            flags.foreign_relay_bps_limit = limit;
+        }
+        if let Some(value) = self.disable_relay_kcp {
+            flags.disable_relay_kcp = value;
+        }
+        if let Some(value) = self.disable_relay_quic {
+            flags.disable_relay_quic = value;
+        }
+        if let Some(value) = self.enable_relay_foreign_network_kcp {
+            flags.enable_relay_foreign_network_kcp = value;
+        }
+        if let Some(value) = self.enable_relay_foreign_network_quic {
+            flags.enable_relay_foreign_network_quic = value;
+        }
         if let Some(latency_first) = self.latency_first {
             flags.latency_first = latency_first;
         }
@@ -624,6 +832,12 @@ impl NetworkConfigExt for NetworkConfig {
         }
 
         if let Some(encryption_algorithm) = self.encryption_algorithm.clone() {
+            anyhow::ensure!(
+                encryption_algorithm
+                    .parse::<crate::config::EncryptionAlgorithm>()
+                    .is_ok(),
+                "invalid encryption_algorithm"
+            );
             flags.encryption_algorithm = encryption_algorithm;
         }
 
@@ -832,6 +1046,7 @@ impl NetworkConfigExt for NetworkConfig {
             }
         }
 
+        populate_extended_config(&config, &mut result);
         Ok(result)
     }
 }
@@ -860,6 +1075,325 @@ mod tests {
             networking_method: Some(NetworkingMethod::Standalone as i32),
             ..Default::default()
         }
+    }
+
+    fn list(values: &[&str]) -> Option<manage::ConfigStringList> {
+        Some(manage::ConfigStringList {
+            values: values.iter().map(|value| value.to_string()).collect(),
+        })
+    }
+
+    #[test]
+    fn extended_management_fields_roundtrip_through_real_toml_and_both_projections() {
+        let input = NetworkConfig {
+            network_name: Some("shared-network".into()),
+            instance_name: Some("independent-instance".into()),
+            netns: Some("vpn_namespace".into()),
+            virtual_ipv6: Some("fd00:1234::7/64".into()),
+            default_protocol: Some("udp".into()),
+            stun_servers: list(&["txt:stun.example.com", "192.0.2.1:3478"]),
+            tcp_stun_servers: list(&["stun.example.com:3479"]),
+            stun_servers_v6: list(&["[2001:db8::1]:3478"]),
+            tcp_whitelist: list(&["22", "8000-8100"]),
+            udp_whitelist: list(&["53"]),
+            foreign_relay_bps_limit: Some(u64::MAX - 3),
+            disable_relay_kcp: Some(true),
+            disable_relay_quic: Some(true),
+            enable_relay_foreign_network_kcp: Some(true),
+            enable_relay_foreign_network_quic: Some(true),
+            tld_dns_zone: Some("office.example.".into()),
+            socks5_proxy: Some("socks5://[::1]:1088".into()),
+            ..standalone_config()
+        };
+        let native = input.gen_config().unwrap();
+        let reparsed = TomlConfigLoader::new_from_str(&native.dump()).unwrap();
+        let output = NetworkConfig::new_from_config(&reparsed).unwrap();
+        assert_eq!(output.instance_name, input.instance_name);
+        assert_eq!(output.netns, input.netns);
+        assert_eq!(output.virtual_ipv6, input.virtual_ipv6);
+        assert_eq!(output.default_protocol, input.default_protocol);
+        assert_eq!(output.stun_servers, input.stun_servers);
+        assert_eq!(output.tcp_stun_servers, input.tcp_stun_servers);
+        assert_eq!(output.stun_servers_v6, input.stun_servers_v6);
+        assert_eq!(output.tcp_whitelist, input.tcp_whitelist);
+        assert_eq!(output.udp_whitelist, input.udp_whitelist);
+        assert_eq!(
+            output.foreign_relay_bps_limit,
+            input.foreign_relay_bps_limit
+        );
+        assert_eq!(output.disable_relay_kcp, input.disable_relay_kcp);
+        assert_eq!(output.disable_relay_quic, input.disable_relay_quic);
+        assert_eq!(
+            output.enable_relay_foreign_network_kcp,
+            input.enable_relay_foreign_network_kcp
+        );
+        assert_eq!(
+            output.enable_relay_foreign_network_quic,
+            input.enable_relay_foreign_network_quic
+        );
+        assert_eq!(output.tld_dns_zone, input.tld_dns_zone);
+        assert_eq!(output.socks5_proxy, input.socks5_proxy);
+        assert_eq!(reparsed.get_inst_name(), "independent-instance");
+        assert_eq!(
+            reparsed.get_network_identity().network_name,
+            "shared-network"
+        );
+        #[cfg(feature = "web-client")]
+        assert_eq!(
+            crate::config::api::network_config_from_toml(&reparsed),
+            output
+        );
+    }
+
+    #[test]
+    fn list_message_presence_preserves_inheritance_and_explicit_empty() {
+        for state in [None, list(&[]), list(&["stun.example.com:3478"])] {
+            let input = NetworkConfig {
+                stun_servers: state.clone(),
+                tcp_stun_servers: state.clone(),
+                stun_servers_v6: state.clone(),
+                tcp_whitelist: state.as_ref().map(|value| manage::ConfigStringList {
+                    values: value.values.iter().map(|_| "80".into()).collect(),
+                }),
+                udp_whitelist: state.as_ref().map(|value| manage::ConfigStringList {
+                    values: value.values.iter().map(|_| "53".into()).collect(),
+                }),
+                ..standalone_config()
+            };
+            let native = input.gen_config().unwrap();
+            let reparsed = TomlConfigLoader::new_from_str(&native.dump()).unwrap();
+            let output = NetworkConfig::new_from_config(&reparsed).unwrap();
+            assert_eq!(output.stun_servers, input.stun_servers);
+            assert_eq!(output.tcp_stun_servers, input.tcp_stun_servers);
+            assert_eq!(output.stun_servers_v6, input.stun_servers_v6);
+            assert_eq!(output.tcp_whitelist, input.tcp_whitelist);
+            assert_eq!(output.udp_whitelist, input.udp_whitelist);
+            let json = serde_json::to_value(&output).unwrap();
+            let decoded: NetworkConfig = serde_json::from_value(json).unwrap();
+            assert_eq!(decoded.stun_servers, state);
+            #[cfg(feature = "web-client")]
+            assert_eq!(
+                crate::config::api::network_config_from_toml(&reparsed),
+                output
+            );
+        }
+    }
+
+    #[test]
+    fn socks5_url_override_preserves_binding_and_can_disable_legacy_configuration() {
+        let input = NetworkConfig {
+            enable_socks5: Some(false),
+            socks5_port: Some(1080),
+            socks5_proxy: Some("socks5://127.0.0.2:9090".into()),
+            ..standalone_config()
+        };
+        assert_eq!(
+            input
+                .gen_config()
+                .unwrap()
+                .get_socks5_portal()
+                .unwrap()
+                .as_str(),
+            "socks5://127.0.0.2:9090"
+        );
+        let disabled = NetworkConfig {
+            enable_socks5: Some(true),
+            socks5_proxy: Some(String::new()),
+            ..input.clone()
+        };
+        assert!(disabled.gen_config().unwrap().get_socks5_portal().is_none());
+        let legacy = NetworkConfig {
+            enable_socks5: Some(true),
+            socks5_proxy: None,
+            ..input
+        };
+        assert_eq!(
+            legacy
+                .gen_config()
+                .unwrap()
+                .get_socks5_portal()
+                .unwrap()
+                .as_str(),
+            "socks5://0.0.0.0:1080"
+        );
+    }
+
+    #[test]
+    fn omitted_extended_fields_keep_previous_defaults_and_zero_relay_limit_is_valid() {
+        let input = NetworkConfig {
+            network_name: Some("legacy-name".into()),
+            ..standalone_config()
+        };
+        let native = input.gen_config().unwrap();
+        assert_eq!(native.get_inst_name(), "legacy-name");
+        assert_eq!(native.get_flags(), gen_default_flags());
+        assert_eq!(native.get_stun_servers(), None);
+        assert_eq!(native.get_tcp_stun_servers(), None);
+        assert_eq!(native.get_stun_servers_v6(), None);
+        assert_eq!(native.get_tcp_whitelist_config(), None);
+        assert_eq!(native.get_udp_whitelist_config(), None);
+        assert_eq!(native.get_netns(), None);
+        assert_eq!(native.get_ipv6(), None);
+        assert_eq!(
+            NetworkConfig {
+                foreign_relay_bps_limit: Some(0),
+                ..input
+            }
+            .gen_config()
+            .unwrap()
+            .get_flags()
+            .foreign_relay_bps_limit,
+            0
+        );
+    }
+
+    #[test]
+    fn invalid_extended_management_values_are_rejected_without_starting_an_instance() {
+        let mut invalid = vec![
+            NetworkConfig {
+                default_protocol: Some("invalid".into()),
+                ..standalone_config()
+            },
+            NetworkConfig {
+                virtual_ipv6: Some("192.0.2.1/24".into()),
+                ..standalone_config()
+            },
+            NetworkConfig {
+                virtual_ipv6: Some("fd00::1/129".into()),
+                ..standalone_config()
+            },
+            NetworkConfig {
+                netns: Some("../namespace".into()),
+                ..standalone_config()
+            },
+            NetworkConfig {
+                netns: Some("..".into()),
+                ..standalone_config()
+            },
+            NetworkConfig {
+                netns: Some(".".into()),
+                ..standalone_config()
+            },
+            NetworkConfig {
+                netns: Some(" namespace".into()),
+                ..standalone_config()
+            },
+            NetworkConfig {
+                netns: Some("namespace ".into()),
+                ..standalone_config()
+            },
+            NetworkConfig {
+                instance_name: Some("bad\nname".into()),
+                ..standalone_config()
+            },
+            NetworkConfig {
+                encryption_algorithm: Some("rot13".into()),
+                ..standalone_config()
+            },
+            NetworkConfig {
+                tcp_whitelist: list(&["9000-8000"]),
+                ..standalone_config()
+            },
+            NetworkConfig {
+                udp_whitelist: list(&["65536"]),
+                ..standalone_config()
+            },
+            NetworkConfig {
+                enable_socks5: Some(true),
+                socks5_port: Some(-1),
+                ..standalone_config()
+            },
+        ];
+        for zone in ["", ".", "bad..example", "-bad.example", "bad_.example"] {
+            invalid.push(NetworkConfig {
+                tld_dns_zone: Some(zone.into()),
+                ..standalone_config()
+            });
+        }
+        for endpoint in [
+            "",
+            "https://stun.example.com",
+            "stun.example.com:0",
+            "stun.example.com:65536",
+            "txt:",
+            "[2001:db8::1",
+        ] {
+            invalid.push(NetworkConfig {
+                stun_servers: list(&[endpoint]),
+                ..standalone_config()
+            });
+        }
+        for url in [
+            "http://127.0.0.1:1080",
+            "socks5://127.0.0.1",
+            "socks5://127.0.0.1:0",
+            "socks5://user:secret@127.0.0.1:1080",
+            "socks5://127.0.0.1:1080/path",
+            "socks5://127.0.0.1:1080?unused=true",
+        ] {
+            invalid.push(NetworkConfig {
+                socks5_proxy: Some(url.into()),
+                ..standalone_config()
+            });
+        }
+        for input in invalid {
+            assert!(
+                input.gen_config().is_err(),
+                "invalid configuration was accepted"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "browser-config")]
+    fn browser_merge_updates_and_clears_newly_managed_fields_without_restoring_old_values() {
+        let original = r#"
+instance_name = "before"
+ipv6 = "fd00::1/64"
+netns = "before"
+stun_servers = ["stun.before.example"]
+tcp_whitelist = ["22"]
+socks5_proxy = "socks5://127.0.0.1:1080"
+[flags]
+default_protocol = "udp"
+foreign_relay_bps_limit = "1024"
+disable_relay_kcp = true
+tld_dns_zone = "before.example."
+multi_thread_count = 3
+"#;
+        let mut input =
+            NetworkConfig::new_from_config(&TomlConfigLoader::new_from_str(original).unwrap())
+                .unwrap();
+        input.instance_name = Some("after".into());
+        input.virtual_ipv6 = None;
+        input.netns = None;
+        input.stun_servers = list(&[]);
+        input.tcp_whitelist = list(&[]);
+        input.socks5_proxy = Some(String::new());
+        input.default_protocol = Some("tcp".into());
+        input.foreign_relay_bps_limit = None;
+        input.disable_relay_kcp = Some(false);
+        input.tld_dns_zone = None;
+        let merged = merge_network_config_toml(original, &input).unwrap();
+        let native = TomlConfigLoader::new_from_str(&merged).unwrap();
+        assert_eq!(native.get_inst_name(), "after");
+        assert_eq!(native.get_ipv6(), None);
+        assert_eq!(native.get_netns(), None);
+        assert_eq!(native.get_stun_servers(), Some(vec![]));
+        assert_eq!(native.get_tcp_whitelist_config(), Some(vec![]));
+        assert_eq!(native.get_socks5_portal(), None);
+        assert_eq!(native.get_flags().default_protocol, "tcp");
+        assert_eq!(native.get_flags().foreign_relay_bps_limit, u64::MAX);
+        assert!(!native.get_flags().disable_relay_kcp);
+        assert_eq!(
+            native.get_flags().tld_dns_zone,
+            gen_default_flags().tld_dns_zone
+        );
+        assert_eq!(
+            native.get_flags().multi_thread_count,
+            3,
+            "unmanaged legacy values are still preserved"
+        );
     }
 
     #[test]

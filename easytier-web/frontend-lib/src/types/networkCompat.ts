@@ -4,6 +4,8 @@ import {
   Protocol as AclProtocol,
 } from '../generated/proto/acl'
 import type { NetworkConfig } from './network'
+import type { MessageInfo } from '@protobuf-ts/runtime'
+import { NetworkConfig as NetworkConfigPb } from '../generated/proto/api_manage'
 
 const UINT64_MAX = (1n << 64n) - 1n
 
@@ -12,8 +14,49 @@ type JsonRecord = Record<string, unknown>
 export function prepareNetworkConfigForProtoJson(config: NetworkConfig): NetworkConfig {
   const prepared = dropUnsupportedJsonValues(applyLegacyAclDefaults(config)) as NetworkConfig
   const record = prepared as JsonRecord
-  normalizeLegacyOptionalUint64(record, 'instance_recv_bps_limit')
+  for (const key of ['instance_recv_bps_limit', 'instanceRecvBpsLimit', 'foreign_relay_bps_limit', 'foreignRelayBpsLimit']) {
+    normalizeOptionalUint64(record, key)
+  }
   return prepared
+}
+
+// Protobuf JSON readers deliberately discard fields unknown to this client.
+// Keep them beside the typed fields so an older editor does not silently erase
+// a newer server's options when exporting or saving its JSON configuration.
+export function preserveUnknownNetworkConfigFields(source: NetworkConfig, target: NetworkConfig): NetworkConfig {
+  return mergeUnknownFields(dropUnsupportedJsonValues(source), target, NetworkConfigPb) as NetworkConfig
+}
+
+function mergeUnknownFields(source: unknown, target: unknown, type: MessageInfo): unknown {
+  if (!isJsonRecord(source) || Array.isArray(source)) return target
+  const result: JsonRecord = isJsonRecord(target) && !Array.isArray(target) ? { ...target } : {}
+  const known = new Set(type.fields.flatMap(field => [field.name, field.localName, field.jsonName]))
+  for (const [key, value] of Object.entries(source)) {
+    if (!known.has(key) && !['__proto__', 'constructor', 'prototype', 'credential_secret'].includes(key)) result[key] = value
+  }
+  for (const field of type.fields) {
+    if (field.kind !== 'message') continue
+    const sourceValue = source[field.localName] ?? source[field.name] ?? source[field.jsonName]
+    const targetValue = result[field.localName]
+    if (field.repeat) {
+      if (!Array.isArray(sourceValue) || !Array.isArray(targetValue)) continue
+      result[field.localName] = targetValue.map((value, index) => {
+        // Manual peers can be trimmed/reordered by networking normalization;
+        // match stable identities to keep future peer properties on that peer.
+        let original = sourceValue[index]
+        if (isJsonRecord(value)) {
+          const identity = ['uri', 'credential_id'].find(key => typeof value[key] === 'string' && value[key])
+          if (identity) original = sourceValue.find(item => isJsonRecord(item) && typeof item[identity] === 'string'
+            && (item[identity] as string).trim() === value[identity])
+        }
+        return mergeUnknownFields(original, value, field.T())
+      })
+    } else {
+      const merged = mergeUnknownFields(sourceValue, targetValue, field.T())
+      if (targetValue !== undefined || (isJsonRecord(merged) && Object.keys(merged).length)) result[field.localName] = merged
+    }
+  }
+  return result
 }
 
 function applyLegacyAclDefaults(config: NetworkConfig): NetworkConfig {
@@ -69,12 +112,18 @@ function isJsonRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null
 }
 
-function normalizeLegacyOptionalUint64(obj: JsonRecord, key: string): void {
+function normalizeOptionalUint64(obj: JsonRecord, key: string): void {
   const value = obj[key]
-  if (typeof value !== 'string') return
+  if (value == null) return
 
-  const trimmed = value.trim()
-  if (!isPositiveUint64String(trimmed)) {
+  if (typeof value === 'number' && (!Number.isSafeInteger(value) || value < 0)) {
+    delete obj[key]
+    return
+  }
+  if (typeof value !== 'string' && typeof value !== 'number') return
+
+  const trimmed = String(value).trim()
+  if (!isUint64String(trimmed)) {
     delete obj[key]
     return
   }
@@ -82,9 +131,9 @@ function normalizeLegacyOptionalUint64(obj: JsonRecord, key: string): void {
   obj[key] = trimmed
 }
 
-function isPositiveUint64String(value: string): boolean {
+function isUint64String(value: string): boolean {
   if (!/^\d+$/.test(value)) return false
 
   const n = BigInt(value)
-  return n > 0n && n <= UINT64_MAX
+  return n >= 0n && n <= UINT64_MAX
 }

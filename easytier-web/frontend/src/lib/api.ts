@@ -78,6 +78,18 @@ export interface ParseConfigResponse {
     error?: string;
 }
 
+export interface CentralNetworkTransport {
+    data_compress_algo?: 1 | 2;
+    encryption_algorithm?: string;
+    disable_encryption?: boolean;
+    default_protocol?: string;
+    tld_dns_zone?: string;
+    enable_kcp_proxy?: boolean;
+    disable_kcp_input?: boolean;
+    enable_quic_proxy?: boolean;
+    disable_quic_input?: boolean;
+}
+
 export interface CentralNetworkSettings {
     display_name: string;
     network_name?: string | null;
@@ -87,6 +99,7 @@ export interface CentralNetworkSettings {
     virtual_cidr?: string | null;
     secure_mode?: boolean;
     prefer_ipv6?: boolean;
+    transport?: CentralNetworkTransport;
 }
 
 export interface CentralNetworkSummary {
@@ -119,6 +132,7 @@ export interface CentralNetworkDetail extends Omit<CentralNetworkSummary, 'onlin
     virtual_cidr?: string | null;
     public_server_url?: string | null;
     peer_urls: string[];
+    transport?: CentralNetworkTransport;
 }
 
 export interface CentralNetworkMember {
