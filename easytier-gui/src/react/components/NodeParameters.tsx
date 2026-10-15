@@ -42,7 +42,7 @@ export function NodeParameters({ mode, value, onPatch, busy = false, onValidityC
 }) {
     const { t } = useTranslation('node-config');
     const issues = useMemo(() => validateNodeParameters(value), [value]);
-    const valid = issues.length === 0 && (supportsUplinkSelection || !isConfigRecord(value.uplink) || value.uplink.mode !== 'manual');
+    const valid = issues.length === 0;
     useEffect(() => { onValidityChange?.(valid); }, [valid, onValidityChange]);
     const errorAt = (path: string) => {
         const issue = issues.find(item => item.path === path);
@@ -83,11 +83,11 @@ export function NodeParameters({ mode, value, onPatch, busy = false, onValidityC
         </fieldset>
         <fieldset className="node-parameter-section form-stack" disabled={busy}>
             <legend>{t('sections.interface')}</legend>
-            <Field label={field('uplink_mode')} error={errorAt('uplink') ?? errorAt('uplink.mode')}>
+            {supportsUplinkSelection && <Field label={field('uplink_mode')} error={errorAt('uplink') ?? errorAt('uplink.mode')}>
                 <select aria-label={field('uplink_mode')} value={uplinkMode} onChange={event => onPatch({ uplink: event.target.value === 'manual' ? { mode: 'manual', interfaces: [] } : { mode: 'auto', interfaces: [] } })}>
-                    <option value="auto">{t('uplink.auto')}</option><option value="manual" disabled={!supportsUplinkSelection}>{t('uplink.manual')}</option>
+                    <option value="auto">{t('uplink.auto')}</option><option value="manual">{t('uplink.manual')}</option>
                 </select>
-            </Field>
+            </Field>}
             {supportsUplinkSelection && uplinkMode === 'manual' && <Field label={field('uplink_interfaces')} error={errorAt('uplink.interfaces')}>
                 <TextDraft label={field('uplink_interfaces')} value={listValue(uplink?.interfaces)} multiline busy={busy}
                     onChange={text => onPatch({ uplink: { mode: 'manual', interfaces: text.split('\n').map(name => name.trim()).filter(Boolean) } })} />

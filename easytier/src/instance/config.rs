@@ -35,8 +35,7 @@ pub(crate) fn runtime_core_host_config() -> CoreInstanceHostConfig {
         uplink_policy_supported: cfg!(any(
             all(target_os = "linux", not(target_env = "ohos")),
             target_os = "windows",
-            target_os = "macos",
-            target_os = "ios"
+            all(target_os = "macos", not(feature = "macos-ne"))
         )),
         smoltcp_available: cfg!(feature = "smoltcp"),
         requires_smoltcp: cfg!(any(

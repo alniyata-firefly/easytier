@@ -4,6 +4,7 @@ import { NetworkTypes } from '../lib/shared';
 import { applyNodePatch, nodeList, prepareNodeParametersForBackend, validateNodeParameters, type NodeConfigRecord } from '../lib/node-config';
 import type { GUIRemoteClient } from '../../native/bridge';
 import { NodeParameters } from './NodeParameters';
+import { normalizeUplinkForTarget } from '../lib/uplink-capabilities';
 import { InstanceAclEditor, validateInstanceAcl } from './InstanceAclEditor';
 import { Alert, Button, Dialog, Field, Tabs } from './ui';
 
@@ -12,19 +13,18 @@ export function NetworkEditor({ initial, onClose, onSaved, client, allowRemoteSa
   client: GUIRemoteClient; allowRemoteSave: boolean; supportsUplinkSelection?: boolean;
 }) {
   const { t } = useTranslation('client');
-  const [config, setConfig] = useState<NetworkTypes.NetworkConfig>(() => structuredClone(initial));
+  const [config, setConfig] = useState<NetworkTypes.NetworkConfig>(() => normalizeUplinkForTarget(structuredClone(initial) as unknown as NodeConfigRecord, supportsUplinkSelection) as unknown as NetworkTypes.NetworkConfig);
   const [tab, setTab] = useState('basic'), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [credentialMode, setCredentialMode] = useState(!!initial.credential_secret), [showSecret, setShowSecret] = useState(false);
   const [toml, setToml] = useState('');
   const patch = (next: NodeConfigRecord) => setConfig(old => applyNodePatch(old as unknown as NodeConfigRecord, next) as unknown as NetworkTypes.NetworkConfig);
   const valid = (config.network_name ?? '').trim().length > 0 && (!credentialMode || !!config.credential_secret?.trim())
-    && validateNodeParameters(config as unknown as NodeConfigRecord).length === 0 && !validateInstanceAcl(config.acl)
-    && (supportsUplinkSelection || config.uplink?.mode !== 'manual');
+    && validateNodeParameters(config as unknown as NodeConfigRecord).length === 0 && !validateInstanceAcl(config.acl);
   const save = async (start: boolean) => {
     if (!valid || busy) return;
     setBusy(true); setError('');
     try {
-      const next = prepareNodeParametersForBackend(config as unknown as NodeConfigRecord) as unknown as NetworkTypes.NetworkConfig;
+      const next = prepareNodeParametersForBackend(normalizeUplinkForTarget(config as unknown as NodeConfigRecord, supportsUplinkSelection)) as unknown as NetworkTypes.NetworkConfig;
       await client.validate_config(next);
       if (allowRemoteSave) await client.save_config(next);
       if (start) await client.run_network(next, allowRemoteSave);
@@ -33,7 +33,7 @@ export function NetworkEditor({ initial, onClose, onSaved, client, allowRemoteSa
   };
   const changeTab = async (next: string) => {
     setTab(next);
-    if (next === 'toml') { setBusy(true); try { const result = await client.generate_config(config); if (result.error) throw new Error('config_generation_failed'); setToml(result.toml_config ?? ''); } catch { setError(t('configError')); } finally { setBusy(false); } }
+    if (next === 'toml') { setBusy(true); try { const result = await client.generate_config(normalizeUplinkForTarget(config as unknown as NodeConfigRecord, supportsUplinkSelection) as unknown as NetworkTypes.NetworkConfig); if (result.error) throw new Error('config_generation_failed'); setToml(result.toml_config ?? ''); } catch { setError(t('configError')); } finally { setBusy(false); } }
   };
   return <Dialog open title={t('editNetwork')} onClose={() => { if (!busy) onClose(); }} wide footer={<>
     <Button tone="ghost" disabled={busy} onClick={onClose}>{t('cancel')}</Button>

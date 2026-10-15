@@ -14,16 +14,20 @@ const root = resolve(frontend, '../..');
 const require = createRequire(import.meta.url);
 const esbuild = createRequire(require.resolve('vite'))('esbuild');
 
-for (const target of ['web', 'gui', 'gui-android']) test(`${target} uplink interface editor validates, preserves exact names and resets automatic policy`, { timeout: 60000 }, async context => {
+for (const target of ['web', 'gui', 'gui-android', 'gui-ios']) test(`${target} uplink interface editor validates, preserves exact names and resets automatic policy`, { timeout: 60000 }, async context => {
   const temporary = await mkdtemp(join(tmpdir(), 'et-uplink-ui-'));
   context.after(() => rm(temporary, { recursive: true, force: true }));
   const componentRoot = target === 'web' ? frontend : resolve(root, 'easytier-gui');
   const component = target === 'web' ? join(componentRoot, 'src/components/NodeParameters.tsx') : join(componentRoot, 'src/react/components/NodeParameters.tsx');
   const i18n = target === 'web' ? join(componentRoot, 'src/lib/i18n.ts') : join(componentRoot, 'src/react/lib/i18n.ts');
-  const unsupported = target === 'gui-android';
+  const unsupported = target === 'gui-android' || target === 'gui-ios';
   const initial = unsupported ? { mtu: 1280, uplink: { mode: 'manual', interfaces: ['eth0'] } } : { mtu: 1280 };
   const outfile = join(temporary, 'fixture.js');
-  await esbuild.build({ stdin: { contents: `import React, {useState} from 'react'; import {createRoot} from 'react-dom/client'; import {NodeParameters} from ${JSON.stringify(component)}; import {i18nReady} from ${JSON.stringify(i18n)}; function Fixture(){const[value,setValue]=useState(${JSON.stringify(initial)});const[valid,setValid]=useState(true);return <><NodeParameters supportsUplinkSelection={${!unsupported}} mode=${JSON.stringify(target === 'web' ? 'member' : 'instance')} value={value} onPatch={patch=>setValue(old=>({...old,...patch}))} onValidityChange={setValid}/><button disabled={!valid} id="save">Save fixture</button><pre id="value">{JSON.stringify(value)}</pre></>};i18nReady.then(()=>createRoot(document.getElementById('root')).render(<React.Suspense fallback="Loading"><Fixture/></React.Suspense>));`, resolveDir: frontend, loader: 'tsx' }, outfile, bundle: true, platform: 'browser', format: 'esm', jsx: 'automatic', logLevel: 'silent' });
+  const mobileFixture = `import React from 'react'; import {createRoot} from 'react-dom/client'; import {NetworkEditor} from ${JSON.stringify(join(root, 'easytier-gui/src/react/components/NetworkEditor.tsx'))}; import {NetworkTypes} from ${JSON.stringify(join(root, 'easytier-gui/src/react/lib/shared.ts'))}; import {i18nReady} from ${JSON.stringify(i18n)};
+  const initial={...NetworkTypes.DEFAULT_NETWORK_CONFIG(), network_name:'Mobile fixture',networking_method:NetworkTypes.NetworkingMethod.Standalone,uplink:{mode:'manual',interfaces:['eth0']}};window.__UPLINK_ORIGINAL__=initial;window.__UPLINK_CAPTURE__=[];
+  const client={validate_config:async config=>window.__UPLINK_CAPTURE__.push(config),save_config:async config=>window.__UPLINK_CAPTURE__.push(config)};
+  i18nReady.then(()=>createRoot(document.getElementById('root')).render(<React.Suspense fallback="Loading"><NetworkEditor initial={initial} client={client} allowRemoteSave={true} supportsUplinkSelection={false} onClose={()=>{}} onSaved={()=>{}}/></React.Suspense>));`;
+  await esbuild.build({ stdin: { contents: unsupported ? mobileFixture : `import React, {useState} from 'react'; import {createRoot} from 'react-dom/client'; import {NodeParameters} from ${JSON.stringify(component)}; import {i18nReady} from ${JSON.stringify(i18n)}; function Fixture(){const[value,setValue]=useState(${JSON.stringify(initial)});const[valid,setValid]=useState(true);return <><NodeParameters supportsUplinkSelection={${!unsupported}} mode=${JSON.stringify(target === 'web' ? 'member' : 'instance')} value={value} onPatch={patch=>setValue(old=>({...old,...patch}))} onValidityChange={setValid}/><button disabled={!valid} id="save">Save fixture</button><pre id="value">{JSON.stringify(value)}</pre></>};i18nReady.then(()=>createRoot(document.getElementById('root')).render(<React.Suspense fallback="Loading"><Fixture/></React.Suspense>));`, resolveDir: frontend, loader: 'tsx' }, outfile, bundle: true, platform: 'browser', format: 'esm', jsx: 'automatic', logLevel: 'silent' });
   const bundle = await readFile(outfile);
   const server = createServer(async (request, response) => {
     try {
@@ -39,19 +43,25 @@ for (const target of ['web', 'gui', 'gui-android']) test(`${target} uplink inter
   const page = await browser.newPage();
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.address().port}`);
-  const selector = page.getByRole('combobox', { name: '上联网卡选择', exact: true });
-  await selector.waitFor();
   if (unsupported) {
-    assert.equal(await selector.inputValue(), 'manual');
-    assert.equal(await selector.locator('option[value=manual]').evaluate(option => option.disabled), true, await selector.innerHTML());
-    assert.equal(await page.getByRole('textbox', { name: '允许使用的接口', exact: true }).count(), 0);
-    assert.equal(await page.locator('#save').isDisabled(), true);
-    await selector.selectOption('auto');
-    await page.waitForFunction(() => !document.getElementById('save').disabled);
-    assert.deepEqual(JSON.parse(await page.locator('#value').textContent()), { mtu: 1280, uplink: { mode: 'auto', interfaces: [] } });
+    const editor = page.getByRole('dialog', { name: '编辑网络', exact: true });
+    await editor.waitFor();
+    await editor.getByRole('tab', { name: '节点参数', exact: true }).click();
+    await editor.locator('.node-parameters').waitFor();
+    assert.equal(await editor.getByRole('combobox', { name: '上联网卡选择', exact: true }).count(), 0);
+    assert.equal(await editor.getByRole('textbox', { name: '允许使用的接口', exact: true }).count(), 0);
+    const save = editor.getByRole('button', { name: '保存', exact: true });
+    assert.equal(await save.isEnabled(), true);
+    await save.click();
+    await page.waitForFunction(() => window.__UPLINK_CAPTURE__?.length === 2);
+    const captured = await page.evaluate(() => window.__UPLINK_CAPTURE__);
+    for (const config of captured) { assert.equal(config.uplink, undefined); assert.equal(config.network_name, 'Mobile fixture'); }
+    assert.deepEqual(await page.evaluate(() => window.__UPLINK_ORIGINAL__.uplink), { mode: 'manual', interfaces: ['eth0'] });
     assert.deepEqual(errors, []);
     return;
   }
+  const selector = page.getByRole('combobox', { name: '上联网卡选择', exact: true });
+  await selector.waitFor();
   assert.equal(await selector.inputValue(), 'auto');
   assert.equal(await page.getByRole('textbox', { name: '允许使用的接口', exact: true }).count(), 0);
   await selector.selectOption('manual');

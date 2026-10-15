@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { applyNodePatch, validateNodeParameters, prepareNodeParametersForBackend, parseUint64Input } from './node-config';
 import { NetworkTypes } from './shared';
+import { normalizeUplinkForTarget, supportsUplinkSelectionForTarget } from './uplink-capabilities';
 
 describe('client configuration boundaries', () => {
   it('preserves IPv6 preference, uint64 limits, and peer public keys through native JSON', () => {
@@ -57,5 +58,25 @@ describe('uplink interface policy', () => {
     expect(validateNodeParameters(reset)).toEqual([]);
     expect(reset.uplink).toEqual({ mode: 'auto', interfaces: [] });
     expect(manual.uplink.interfaces).toEqual(['eth0', 'Ethernet 2']);
+  });
+});
+
+
+describe('uplink target capabilities', () => {
+  it('hides local mobile controls without restricting a mobile viewer of a remote Core', () => {
+    for (const platform of ['android', 'ios']) {
+      expect(supportsUplinkSelectionForTarget(platform, { mode: 'normal' })).toBe(false);
+      expect(supportsUplinkSelectionForTarget(platform, { mode: 'service' })).toBe(false);
+      expect(supportsUplinkSelectionForTarget(platform, { mode: 'remote' })).toBe(true);
+    }
+    for (const platform of ['linux', 'windows', 'macos']) expect(supportsUplinkSelectionForTarget(platform, { mode: 'normal' })).toBe(true);
+  });
+  it('drops imported local mobile policy while preserving every remote field and the original object', () => {
+    const source = { uplink: { mode: 'manual', interfaces: ['eth0'] }, mtu: 1280, future: { keep: true } };
+    const local = normalizeUplinkForTarget(source, false);
+    expect(local).toEqual({ mtu: 1280, future: { keep: true } });
+    expect(normalizeUplinkForTarget(source, true)).toEqual(source);
+    expect(source.uplink).toEqual({ mode: 'manual', interfaces: ['eth0'] });
+    expect(local.future).toBe(source.future);
   });
 });
