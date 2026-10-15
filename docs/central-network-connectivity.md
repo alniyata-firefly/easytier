@@ -12,6 +12,8 @@
 - 中央 Web 为多个网关实例共享 UDP socket。只有 Web 成功绑定后的实际端点才授权给网关的反向打洞控制；该授权随监听任务退出或取消撤销。共享端点不进入实例自己的监听广告，跨网络 RPC 仍只返回明确映射的端点。
 - IPv6 STUN 成功的结果独立发布，不要求 IPv4 NAT 探测先成功，并更新探测时间。
 
+Web 启动参数 `--config-server-addr`（环境变量 `ET_CONFIG_SERVER_ADDR`）可指定配置服务器的本地监听 IP，只创建该地址所属的一个地址族；例如 `--config-server-addr 127.0.0.1` 用于本机接入。省略时保留默认的 IPv4/IPv6 双栈通配监听及自动上联策略。该参数不修改 API 监听地址，也不决定 `--advertised-config-server-url` 或 `--gateway-peer-url` 的对外广告地址。
+
 ## 建链与回退
 
 IPv6 优先是每对节点的连接策略。IPv4 已经连接时仍应尝试 IPv6；IPv6 确认可用后才优先使用该连接。IPv6 探测失败时保留可用的 IPv4 或中转连接，后续继续尝试。

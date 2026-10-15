@@ -201,7 +201,7 @@ await test('network transport reaches permanent/temporary native Core and embedd
         return core;
     }
     try {
-        web = startWeb(database, ports.api, ports.config, '127.0.0.1', { protocol: 'tcp', gateway: true, logLevel: 'warn' });
+        web = startWeb(database, ports.api, ports.config, '127.0.0.1', { protocol: 'tcp', configBindAddr: '127.0.0.1', gateway: true, logLevel: 'warn' });
         processes.push(web);
         api = httpApi(`http://127.0.0.1:${ports.api}`);
         await waitFor(() => api.raw('GET', '/auth/config').then(response => response.status === 200), 'native Web startup');

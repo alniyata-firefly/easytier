@@ -70,6 +70,7 @@ export function startWeb(database,apiPort,configPort,gatewayHost='127.0.0.1',opt
     const protocol = options.protocol || 'tcp';
     const args = ['--db',database,'--api-server-addr','127.0.0.1','--api-server-port',String(apiPort),
         '--config-server-protocol',protocol,'--config-server-port',String(configPort),'--console-log-level',options.logLevel || 'info'];
+    if (options.configBindAddr !== undefined) args.push('--config-server-addr',options.configBindAddr);
     if (options.gateway !== false) args.push('--gateway-peer-url',`${protocol}://${gatewayHost}:${configPort}`);
     if (options.registrationDisabled !== false) args.push('--disable-registration');
     if (options.advertisedUrl) args.push('--advertised-config-server-url',options.advertisedUrl);

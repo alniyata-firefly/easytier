@@ -112,7 +112,7 @@ await test('legacy 2.7.1 Core rejects new configuration without runtime restart 
         assert.match(String(response.message), /2\.7\.2/, 'legacy refusal must explain the required upgrade');
     }
     try {
-        web = startWeb(database, ports.api, ports.config, '127.0.0.1', { protocol: 'tcp', gateway: true, logLevel: 'warn' });
+        web = startWeb(database, ports.api, ports.config, '127.0.0.1', { protocol: 'tcp', configBindAddr: '127.0.0.1', gateway: true, logLevel: 'warn' });
         processes.push(web);
         api = httpApi(`http://127.0.0.1:${ports.api}`);
         await waitFor(() => api.raw('GET', '/auth/config').then(response => response.status === 200), 'native Web startup');

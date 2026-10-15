@@ -87,6 +87,10 @@ struct Cli {
     )]
     config_server_port: u16,
 
+    /// Bind the configuration server to this IP; defaults to IPv4 and IPv6 wildcard listeners.
+    #[arg(long, env = "ET_CONFIG_SERVER_ADDR")]
+    config_server_addr: Option<IpAddr>,
+
     #[arg(
         long,
         short='p',
@@ -265,9 +269,8 @@ fn underlay_listener_context(addr: std::net::SocketAddr) -> SocketContext {
         target_os = "macos",
         target_os = "ios"
     ));
-    SocketContext::default().with_uplink(
-        (supported && !addr.ip().is_loopback()).then(Default::default),
-    )
+    SocketContext::default()
+        .with_uplink((supported && !addr.ip().is_loopback()).then(Default::default))
 }
 
 pub fn get_listener_by_url(
@@ -297,6 +300,7 @@ pub fn get_listener_by_url(
 async fn get_dual_stack_listener(
     protocol: &str,
     port: u16,
+    bind_addr: Option<IpAddr>,
 ) -> Result<
     (
         Option<Box<dyn SocketListener<Accepted = Box<dyn Tunnel>>>>,
@@ -307,6 +311,16 @@ async fn get_dual_stack_listener(
     let scheme = protocol
         .parse()
         .map_err(|_| Error::InvalidUrl(protocol.to_string()))?;
+    if let Some(bind_addr) = bind_addr {
+        let local = std::net::SocketAddr::new(bind_addr, port);
+        let listener =
+            get_listener_by_url(scheme, &format!("{protocol}://{local}").parse().unwrap());
+        return Ok(if bind_addr.is_ipv6() {
+            (listener, None)
+        } else {
+            (None, listener)
+        });
+    }
     // Wildcard binding does not require an Internet route (or even a
     // configured global address). Let the actual bind report support for
     // each address family instead of probing an external destination.
@@ -360,6 +374,7 @@ async fn main() {
         api_port = cli.api_server_port,
         config_protocol = %cli.config_server_protocol,
         config_port = cli.config_server_port,
+        config_address = ?cli.config_server_addr,
         heartbeat_min_response_ms = cli.heartbeat_min_response_ms,
         heartbeat_timeout_ms = cli.heartbeat_timeout_ms,
         webhook_enabled = cli.webhook.webhook_url.as_deref().is_some_and(|url| !url.trim().is_empty()),
@@ -450,10 +465,13 @@ async fn main() {
         feature_flags.clone(),
         webhook_config.clone(),
     );
-    let (v6_listener, v4_listener) =
-        get_dual_stack_listener(&cli.config_server_protocol, cli.config_server_port)
-            .await
-            .unwrap();
+    let (v6_listener, v4_listener) = get_dual_stack_listener(
+        &cli.config_server_protocol,
+        cli.config_server_port,
+        cli.config_server_addr,
+    )
+    .await
+    .unwrap();
     for listener in [v6_listener, v4_listener].into_iter().flatten() {
         // add_listener owns listen(). A family that is unavailable must not
         // prevent the other family from serving LAN-only clients.
@@ -562,16 +580,107 @@ async fn main() {
 
 #[cfg(test)]
 mod entry_url_tests {
-    use super::parse_advertised_config_server_url;
+    use std::time::Duration;
+
+    use clap::Parser;
+    use easytier::proto::rpc::standalone::{runtime_rpc_dialer, runtime_udp_tunnel_dialer};
+    use easytier_core::connectivity::protocol::raw::TunnelDialer;
+
+    use super::{Cli, get_dual_stack_listener, parse_advertised_config_server_url};
+
+    #[test]
+    fn configuration_listener_address_is_optional_and_requires_an_ip() {
+        assert!(
+            Cli::try_parse_from(["easytier-web"])
+                .unwrap()
+                .config_server_addr
+                .is_none()
+        );
+        for address in ["127.0.0.1", "::1", "192.0.2.1", "2001:db8::1"] {
+            let cli =
+                Cli::try_parse_from(["easytier-web", "--config-server-addr", address]).unwrap();
+            assert_eq!(cli.config_server_addr, Some(address.parse().unwrap()));
+        }
+        for address in ["localhost", "127.0.0.1:22020", "invalid"] {
+            assert!(
+                Cli::try_parse_from(["easytier-web", "--config-server-addr", address,]).is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(any(
+        all(target_os = "linux", not(target_env = "ohos")),
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "ios"
+    ))]
+    fn configuration_listener_keeps_non_loopback_uplink_restrictions() {
+        for address in ["0.0.0.0:0", "[::]:0", "192.0.2.1:0", "[2001:db8::1]:0"] {
+            let context = super::underlay_listener_context(address.parse().unwrap());
+            assert!(context.uplink.is_some(), "{address}");
+        }
+        for address in ["127.0.0.1:0", "[::1]:0"] {
+            let context = super::underlay_listener_context(address.parse().unwrap());
+            assert!(context.uplink.is_none(), "{address}");
+        }
+    }
+
+    async fn assert_loopback_configuration_sessions(bind_addr: std::net::IpAddr) {
+        for protocol in ["tcp", "udp"] {
+            let (v6, v4) = get_dual_stack_listener(protocol, 0, Some(bind_addr))
+                .await
+                .unwrap();
+            assert_eq!(v6.is_some(), bind_addr.is_ipv6());
+            assert_eq!(v4.is_some(), bind_addr.is_ipv4());
+            let mut listener = v6.or(v4).unwrap();
+            listener.listen().await.unwrap_or_else(|error| {
+                panic!("{protocol} configuration listener on {bind_addr}: {error}")
+            });
+            let local_url = listener.local_url();
+            assert_ne!(local_url.port().unwrap(), 0);
+            let dialer: Box<dyn TunnelDialer> = match protocol {
+                "tcp" => Box::new(runtime_rpc_dialer(local_url.clone())),
+                "udp" => Box::new(runtime_udp_tunnel_dialer(local_url.clone())),
+                _ => unreachable!(),
+            };
+            let (accepted, connected) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::try_join!(listener.accept(), dialer.connect())
+            })
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{protocol} configuration session on {bind_addr}: {error}")
+            })
+            .unwrap();
+            assert_eq!(
+                accepted.info().unwrap().local_addr.unwrap().url,
+                local_url.as_str()
+            );
+            assert_eq!(
+                connected.info().unwrap().remote_addr.unwrap().url,
+                local_url.as_str()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn loopback_configuration_listeners_accept_ipv4_sessions() {
+        assert_loopback_configuration_sessions("127.0.0.1".parse().unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn loopback_configuration_listeners_accept_ipv6_sessions() {
+        assert_loopback_configuration_sessions("::1".parse().unwrap()).await;
+    }
 
     #[tokio::test]
     async fn listener_candidates_do_not_require_external_routes() {
         for protocol in ["tcp", "udp"] {
-            let (v6, v4) = super::get_dual_stack_listener(protocol, 0).await.unwrap();
+            let (v6, v4) = get_dual_stack_listener(protocol, 0, None).await.unwrap();
             assert!(v6.is_some());
             assert!(v4.is_some());
         }
-        let (v6, v4) = super::get_dual_stack_listener("ws", 0).await.unwrap();
+        let (v6, v4) = get_dual_stack_listener("ws", 0, None).await.unwrap();
         assert!(v6.is_none());
         assert!(v4.is_some());
     }
