@@ -122,6 +122,7 @@
     "kinds": {
       "ethernet": "以太网",
       "wifi": "无线网络",
+      "cellular": "蜂窝网络",
       "bridge": "网桥",
       "bond": "聚合接口",
       "vlan": "VLAN",

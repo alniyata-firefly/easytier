@@ -125,6 +125,7 @@
     "kinds": {
       "ethernet": "Ethernet",
       "wifi": "Wi-Fi",
+      "cellular": "Cellular",
       "bridge": "Bridge",
       "bond": "Bond",
       "vlan": "VLAN",

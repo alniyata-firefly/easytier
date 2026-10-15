@@ -527,8 +527,10 @@ fn windows_inventory_kind(
         "ppp"
     } else if !no_tunnel {
         "virtual"
-    } else if matches!(kind, 71 | 243 | 244) {
+    } else if kind == 71 {
         "wifi"
+    } else if matches!(kind, 243 | 244) {
+        "cellular"
     } else if kind == 6 && windows_automatic_uplink(kind, no_tunnel, hardware, &description) {
         "ethernet"
     } else if kind == 6 {
@@ -779,6 +781,8 @@ mod tests {
             "ethernet"
         );
         assert_eq!(windows_inventory_kind(71, true, true, "Wi-Fi"), "wifi");
+        assert_eq!(windows_inventory_kind(243, true, true, "WWAN"), "cellular");
+        assert_eq!(windows_inventory_kind(244, true, true, "WWAN2"), "cellular");
         assert_eq!(
             windows_inventory_kind(6, true, false, "WireGuard Tunnel"),
             "wireguard"
