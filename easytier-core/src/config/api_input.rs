@@ -299,7 +299,12 @@ fn parse_socks5_proxy(value: &str) -> anyhow::Result<Option<url::Url>> {
     let url = url::Url::parse(value).context("invalid socks5_proxy URL")?;
     anyhow::ensure!(
         url.scheme() == "socks5"
-            && matches!(url.host(), Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)))
+            && url.host_str().is_some_and(|host| {
+                host.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok()
+            })
             && url.port().is_some_and(|port| port != 0)
             && url.username().is_empty()
             && url.password().is_none()
