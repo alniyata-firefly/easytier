@@ -6,6 +6,8 @@ mod network;
 pub(crate) mod observability;
 pub(crate) mod oidc;
 mod rpc;
+#[cfg(test)]
+pub(crate) use rpc::{ProxyRpcRequest, handle_proxy_rpc_by_session};
 mod server_resources;
 mod users;
 

@@ -50,6 +50,18 @@ pub trait InstanceFactory: Send + Sync + 'static {
         config: TomlConfig,
         context: Self::CreateContext,
     ) -> Result<Arc<Self::Instance>, Self::Error>;
+
+    /// Host inventory is deliberately independent of an Instance's configured
+    /// uplink allowlist. Hosts without this capability report unsupported.
+    fn network_interfaces(
+        &self,
+        _namespace: Option<String>,
+    ) -> futures::future::BoxFuture<
+        'static,
+        anyhow::Result<crate::host_inventory::NetworkInterfaceInventory>,
+    > {
+        Box::pin(async { Ok(crate::host_inventory::NetworkInterfaceInventory::default()) })
+    }
 }
 
 /// Error returned while constructing or registering an instance.
@@ -261,6 +273,13 @@ pub struct InstanceManager<F: InstanceFactory> {
 }
 
 impl<F: InstanceFactory> InstanceManager<F> {
+    pub async fn network_interfaces(
+        &self,
+        namespace: Option<String>,
+    ) -> anyhow::Result<crate::host_inventory::NetworkInterfaceInventory> {
+        self.factory.network_interfaces(namespace).await
+    }
+
     pub fn new(factory: F, runtime_handle: Option<tokio::runtime::Handle>) -> Self {
         Self {
             factory,
@@ -694,6 +713,14 @@ mod tests {
         let config = TomlConfig::default();
         config.set_id(instance_id);
         config
+    }
+
+    #[tokio::test]
+    async fn host_without_inventory_capability_explicitly_reports_unsupported() {
+        let (manager, _) = manager();
+        let inventory = manager.network_interfaces(None).await.unwrap();
+        assert!(!inventory.supported);
+        assert!(inventory.interfaces.is_empty());
     }
 
     #[test]

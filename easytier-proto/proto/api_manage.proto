@@ -236,6 +236,34 @@ message ListNetworkInstanceMetaRequest { repeated common.UUID inst_ids = 1; }
 
 message ListNetworkInstanceMetaResponse { repeated NetworkMeta metas = 1; }
 
+message GetNetworkInterfacesRequest {
+  // Uses an existing Instance's namespace. An absent or not-yet-created
+  // Instance selects the managed process's default namespace.
+  common.UUID inst_id = 1;
+}
+
+message NetworkInterfaceAddress {
+  string address = 1;
+  optional uint32 prefix_length = 2;
+}
+
+message NetworkInterfaceInfo {
+  string name = 1;
+  uint32 index = 2;
+  repeated NetworkInterfaceAddress addresses = 3;
+  string kind = 4;
+  optional bool up = 5;
+  bool auto_eligible = 6;
+  bool manual_selectable = 7;
+}
+
+message GetNetworkInterfacesResponse {
+  bool supported = 1;
+  uint64 sampled_at_unix_ms = 2;
+  repeated NetworkInterfaceInfo interfaces = 3;
+  optional string namespace = 4;
+}
+
 service WebClientService {
   rpc ValidateConfig(ValidateConfigRequest) returns (ValidateConfigResponse) {}
   rpc RunNetworkInstance(RunNetworkInstanceRequest)
@@ -252,4 +280,7 @@ service WebClientService {
       returns (GetNetworkInstanceConfigResponse) {}
   rpc ListNetworkInstanceMeta(ListNetworkInstanceMetaRequest)
       returns (ListNetworkInstanceMetaResponse) {}
+  // Append new methods: existing method indices are part of the wire protocol.
+  rpc GetNetworkInterfaces(GetNetworkInterfacesRequest)
+      returns (GetNetworkInterfacesResponse) {}
 }

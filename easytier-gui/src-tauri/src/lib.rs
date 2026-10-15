@@ -14,8 +14,8 @@ use easytier::proto::api::instance::{
     VpnPortalRpcClientFactory, instance_identifier,
 };
 use easytier::proto::api::manage::{
-    CollectNetworkInfoResponse, ValidateConfigResponse, VpnPortalClientConfig, WebClientService,
-    WebClientServiceClientFactory,
+    CollectNetworkInfoResponse, GetNetworkInterfacesResponse, ValidateConfigResponse,
+    VpnPortalClientConfig, WebClientService, WebClientServiceClientFactory,
 };
 use easytier::proto::rpc_types::controller::BaseController;
 use easytier::web_client::{self, WebClient};
@@ -168,6 +168,21 @@ async fn collect_network_info(
         .handle_collect_network_info(app, Some(vec![instance_id]))
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_network_interfaces(
+    app: AppHandle,
+    instance_id: Option<String>,
+) -> Result<GetNetworkInterfacesResponse, String> {
+    let instance_id = instance_id
+        .map(|id| id.parse::<uuid::Uuid>())
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    get_client_manager!()?
+        .handle_get_network_interfaces(app, instance_id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1558,6 +1573,7 @@ pub fn run_gui() -> std::process::ExitCode {
             generate_network_config,
             run_network_instance,
             collect_network_info,
+            get_network_interfaces,
             get_vpn_portal_info,
             patch_vpn_portal_clients,
             set_logging_level,

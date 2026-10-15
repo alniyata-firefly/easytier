@@ -46,7 +46,7 @@ macro_rules! match_service {
     }};
 }
 
-async fn handle_proxy_rpc_by_session(
+pub(crate) async fn handle_proxy_rpc_by_session(
     session: &crate::client_manager::session::Session,
     req: ProxyRpcRequest,
 ) -> Result<Json<serde_json::Value>, HttpHandleError> {
@@ -880,6 +880,8 @@ mod tests {
 
         for (service, method) in [
             ("api.manage.WebClientService", "list_network_instance"),
+            ("api.manage.WebClientService", "get_network_interfaces"),
+            ("api.manage.WebClientService", "GetNetworkInterfaces"),
             ("api.config.ConfigRpcService", "get_config"),
             (
                 "api.instance.CredentialManageRpcService",

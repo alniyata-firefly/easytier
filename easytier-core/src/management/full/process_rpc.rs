@@ -8,7 +8,8 @@ use easytier_proto::{
     api::manage::{
         CollectNetworkInfoRequest, CollectNetworkInfoResponse, DeleteNetworkInstanceRequest,
         DeleteNetworkInstanceResponse, GetNetworkInstanceConfigRequest,
-        GetNetworkInstanceConfigResponse, ListNetworkInstanceMetaRequest,
+        GetNetworkInstanceConfigResponse, GetNetworkInterfacesRequest,
+        GetNetworkInterfacesResponse, ListNetworkInstanceMetaRequest,
         ListNetworkInstanceMetaResponse, ListNetworkInstanceRequest, ListNetworkInstanceResponse,
         NetworkInstanceRunningInfoMap, NetworkMeta, RetainNetworkInstanceRequest,
         RetainNetworkInstanceResponse, RunNetworkInstanceRequest, RunNetworkInstanceResponse,
@@ -815,5 +816,59 @@ where
             });
         }
         Ok(ListNetworkInstanceMetaResponse { metas })
+    }
+
+    async fn get_network_interfaces(
+        &self,
+        _: BaseController,
+        request: GetNetworkInterfacesRequest,
+    ) -> rpc_types::error::Result<GetNetworkInterfacesResponse> {
+        // The caller selects an Instance, never an arbitrary Host namespace.
+        // New and stopped central members may not have a runtime yet, so they
+        // use the managed process's default namespace.
+        let namespace = request
+            .inst_id
+            .and_then(|id| self.management.instances.config(id.into()))
+            .and_then(|config| config.get_netns());
+        let inventory = self
+            .management
+            .instances
+            .network_interfaces(namespace)
+            .await?;
+        Ok(network_interfaces_to_rpc(inventory))
+    }
+}
+
+fn network_interfaces_to_rpc(
+    inventory: crate::host_inventory::NetworkInterfaceInventory,
+) -> GetNetworkInterfacesResponse {
+    GetNetworkInterfacesResponse {
+        supported: inventory.supported,
+        sampled_at_unix_ms: inventory.sampled_at_unix_ms,
+        namespace: inventory.namespace,
+        interfaces: inventory
+            .interfaces
+            .into_iter()
+            .map(
+                |interface| easytier_proto::api::manage::NetworkInterfaceInfo {
+                    name: interface.name,
+                    index: interface.index,
+                    addresses: interface
+                        .addresses
+                        .into_iter()
+                        .map(
+                            |address| easytier_proto::api::manage::NetworkInterfaceAddress {
+                                address: address.address.to_string(),
+                                prefix_length: address.prefix_length,
+                            },
+                        )
+                        .collect(),
+                    kind: interface.kind,
+                    up: interface.up,
+                    auto_eligible: interface.auto_eligible,
+                    manual_selectable: interface.manual_selectable,
+                },
+            )
+            .collect(),
     }
 }

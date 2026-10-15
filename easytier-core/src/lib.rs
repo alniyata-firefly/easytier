@@ -4,6 +4,7 @@ pub mod events;
 pub mod foundation;
 pub mod gateway;
 pub mod host;
+pub mod host_inventory;
 pub mod instance;
 pub mod listener;
 #[cfg(feature = "management-rpc")]

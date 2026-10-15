@@ -489,6 +489,14 @@ impl WebClientService for NearbyWebClientService {
             .list_network_instance_meta(controller, request)
             .await
     }
+
+    async fn get_network_interfaces(
+        &self,
+        controller: BaseController,
+        request: easytier::proto::api::manage::GetNetworkInterfacesRequest,
+    ) -> Result<easytier::proto::api::manage::GetNetworkInterfacesResponse, RpcError> {
+        self.inner.get_network_interfaces(controller, request).await
+    }
 }
 
 struct NearbyManagementHostServer {

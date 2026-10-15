@@ -137,6 +137,23 @@ impl InstanceFactory for NativeInstanceFactory {
     type CreateContext = ();
     type Error = anyhow::Error;
 
+    fn network_interfaces(
+        &self,
+        namespace: Option<String>,
+    ) -> futures::future::BoxFuture<
+        'static,
+        anyhow::Result<easytier_core::host_inventory::NetworkInterfaceInventory>,
+    > {
+        if self.compact_runtime {
+            return Box::pin(async {
+                Ok(easytier_core::host_inventory::NetworkInterfaceInventory::default())
+            });
+        }
+        Box::pin(crate::common::uplink::network_interface_inventory(
+            namespace,
+        ))
+    }
+
     fn create(
         &self,
         config: TomlConfig,
@@ -173,6 +190,113 @@ mod tests {
     use easytier_core::{config::toml::ConfigLoader as _, instance::CoreInstanceState};
 
     use super::*;
+
+    #[cfg(feature = "management")]
+    struct InventoryTestFactory {
+        native: NativeInstanceFactory,
+        namespaces: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    #[cfg(feature = "management")]
+    impl InstanceFactory for InventoryTestFactory {
+        type Instance = NativeCoreInstance;
+        type CreateContext = ();
+        type Error = anyhow::Error;
+
+        fn create(
+            &self,
+            config: TomlConfig,
+            context: (),
+        ) -> anyhow::Result<Arc<NativeCoreInstance>> {
+            self.native.create(config, context)
+        }
+
+        fn network_interfaces(
+            &self,
+            namespace: Option<String>,
+        ) -> futures::future::BoxFuture<
+            'static,
+            anyhow::Result<easytier_core::host_inventory::NetworkInterfaceInventory>,
+        > {
+            self.namespaces.lock().unwrap().push(namespace.clone());
+            Box::pin(async move {
+                Ok(easytier_core::host_inventory::NetworkInterfaceInventory {
+                    supported: true,
+                    sampled_at_unix_ms: 1234,
+                    namespace,
+                    interfaces: Vec::new(),
+                })
+            })
+        }
+    }
+
+    #[cfg(feature = "management")]
+    #[tokio::test]
+    async fn interface_inventory_rpc_uses_instance_namespace_and_supports_new_instances() {
+        use easytier_core::management::{ProcessManagementRpc, UnsupportedConfigFileStorage};
+        use easytier_proto::{
+            api::manage::{GetNetworkInterfacesRequest, WebClientService},
+            rpc_types::controller::BaseController,
+        };
+
+        let namespaces = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let manager = Arc::new(InstanceManager::new(
+            InventoryTestFactory {
+                native: NativeInstanceFactory::new(CoreProcessRuntime::new()),
+                namespaces: namespaces.clone(),
+            },
+            None,
+        ));
+        let rpc = ProcessManagementRpc::new(
+            manager.clone(),
+            Arc::new(()),
+            Arc::new(UnsupportedConfigFileStorage),
+        );
+        // Neither an existing Instance nor a running tunnel is required.
+        for inst_id in [None, Some(uuid::Uuid::new_v4().into())] {
+            let response = rpc
+                .get_network_interfaces(
+                    BaseController::default(),
+                    GetNetworkInterfacesRequest { inst_id },
+                )
+                .await
+                .unwrap();
+            assert!(response.supported);
+            assert_eq!(response.namespace, None);
+        }
+        let config = TomlConfig::default();
+        config.set_netns(Some("inventory-test-namespace".into()));
+        config.set_listeners(Vec::new());
+        let instance = manager.create(config, ()).unwrap();
+        let response = rpc
+            .get_network_interfaces(
+                BaseController::default(),
+                GetNetworkInterfacesRequest {
+                    inst_id: Some(instance.instance_id().into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.namespace.as_deref(),
+            Some("inventory-test-namespace")
+        );
+        assert_eq!(
+            *namespaces.lock().unwrap(),
+            vec![None, None, Some("inventory-test-namespace".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_host_interface_inventory_reports_unsupported() {
+        let inventory = NativeInstanceFactory::new(CoreProcessRuntime::new())
+            .with_compact_runtime()
+            .network_interfaces(None)
+            .await
+            .unwrap();
+        assert!(!inventory.supported);
+        assert!(inventory.interfaces.is_empty());
+    }
 
     #[tokio::test]
     async fn core_manager_stores_and_runs_native_core_instance_directly() {

@@ -488,6 +488,90 @@ mod tests {
         assert!(ret.is_err());
     }
 
+    #[derive(Clone)]
+    struct PreInventoryWebClientHandler;
+
+    #[async_trait::async_trait]
+    impl Handler for PreInventoryWebClientHandler {
+        type Descriptor = WebClientServiceDescriptor;
+        type Controller = BaseController;
+
+        async fn call(
+            &self,
+            _: Self::Controller,
+            method: <Self::Descriptor as ServiceDescriptor>::Method,
+            _: Bytes,
+        ) -> crate::rpc_types::error::Result<Bytes> {
+            assert!(matches!(
+                method,
+                WebClientServiceMethodDescriptor::GetNetworkInterfaces
+            ));
+            // An older Core has no appended method and rejects its index.
+            Err(Error::InvalidMethodIndex(9, "WebClientService".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn interface_inventory_preserves_old_node_unsupported_error() {
+        let client = WebClientServiceClient::new(PreInventoryWebClientHandler);
+        for method in ["GetNetworkInterfaces", "get_network_interfaces"] {
+            let error = client
+                .json_call_method(BaseController::default(), method, serde_json::json!({}))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::InvalidMethodIndex(9, _)));
+        }
+    }
+
+    #[test]
+    fn interface_inventory_method_is_appended_without_renumbering_existing_methods() {
+        use crate::rpc_types::descriptor::MethodDescriptor as _;
+        let methods = WebClientServiceDescriptor.methods();
+        let names = [
+            "validate_config",
+            "run_network_instance",
+            "retain_network_instance",
+            "collect_network_info",
+            "list_network_instance",
+            "delete_network_instance",
+            "get_network_instance_config",
+            "list_network_instance_meta",
+            "get_network_interfaces",
+        ];
+        assert_eq!(methods.len(), names.len());
+        for (index, (method, name)) in methods.iter().zip(names).enumerate() {
+            assert_eq!(method.name(), name);
+            assert_eq!(usize::from(method.index()), index + 1);
+        }
+    }
+
+    #[test]
+    fn interface_inventory_json_preserves_unknown_state_and_prefixes() {
+        let inventory = super::manage::GetNetworkInterfacesResponse {
+            supported: true,
+            sampled_at_unix_ms: 1_800_000_000_123,
+            namespace: Some("branch".into()),
+            interfaces: vec![super::manage::NetworkInterfaceInfo {
+                name: "ethernet with spaces".into(),
+                index: 2,
+                addresses: vec![super::manage::NetworkInterfaceAddress {
+                    address: "2001:db8::2".into(),
+                    prefix_length: Some(64),
+                }],
+                kind: "unknown".into(),
+                up: None,
+                auto_eligible: false,
+                manual_selectable: true,
+            }],
+        };
+        let json = serde_json::to_value(&inventory).unwrap();
+        assert_eq!(json["sampled_at_unix_ms"], "1800000000123");
+        assert!(json["interfaces"][0].get("up").is_none());
+        let decoded: super::manage::GetNetworkInterfacesResponse =
+            serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, inventory);
+    }
+
     #[test]
     fn peer_route_pair_loss_rate_uses_default_conn() {
         let default_conn_id = uuid::Uuid::new_v4();

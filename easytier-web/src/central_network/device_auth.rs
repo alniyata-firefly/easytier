@@ -292,6 +292,18 @@ mod tests {
             .get_session_by_machine_id(owner, &machine_id)
             .unwrap();
         assert!(old_session.management_access_valid().await);
+        // Inventory is a management-only observation, including when a device
+        // has no network Instances. It must obey the same live credential
+        // revocation fence as configuration access.
+        let inventory_request = || crate::restful::ProxyRpcRequest {
+            service_name: "api.manage.WebClientService".to_owned(),
+            method_name: "GetNetworkInterfaces".to_owned(),
+            payload: serde_json::json!({}),
+            scope: None,
+        };
+        crate::restful::handle_proxy_rpc_by_session(old_session.as_ref(), inventory_request())
+            .await
+            .expect("authorized device inventory must work without an Instance");
         let rotated = db
             .rotate_device_access_token(owner, &issued.info.id)
             .await
@@ -299,6 +311,11 @@ mod tests {
             .unwrap();
         // Management authorization expires at the DB commit, before asynchronous stop.
         assert!(!old_session.management_access_valid().await);
+        let denied =
+            crate::restful::handle_proxy_rpc_by_session(old_session.as_ref(), inventory_request())
+                .await
+                .expect_err("revoked device cannot expose Host interface inventory");
+        assert_eq!(denied.0, axum::http::StatusCode::FORBIDDEN);
         manager
             .disconnect_sessions_by_device_token(
                 owner,

@@ -6,9 +6,9 @@ use easytier_proto::{
     api::instance::{InstanceIdentifier, instance_identifier},
     api::manage::{
         CollectNetworkInfoRequest, CollectNetworkInfoResponse, DeleteNetworkInstanceRequest,
-        GetNetworkInstanceConfigRequest, ListNetworkInstanceMetaRequest,
-        ListNetworkInstanceRequest, NetworkConfig, NetworkMeta, RunNetworkInstanceRequest,
-        ValidateConfigRequest, ValidateConfigResponse, WebClientService,
+        GetNetworkInstanceConfigRequest, GetNetworkInterfacesRequest, GetNetworkInterfacesResponse,
+        ListNetworkInstanceMetaRequest, ListNetworkInstanceRequest, NetworkConfig, NetworkMeta,
+        RunNetworkInstanceRequest, ValidateConfigRequest, ValidateConfigResponse, WebClientService,
     },
     rpc_types::controller::BaseController,
 };
@@ -189,6 +189,24 @@ where
         }
 
         Ok(())
+    }
+
+    async fn handle_get_network_interfaces(
+        &self,
+        identify: T,
+        instance_id: Option<uuid::Uuid>,
+    ) -> Result<GetNetworkInterfacesResponse, RemoteClientError<E>> {
+        let client = self
+            .get_rpc_client(identify)
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        Ok(client
+            .get_network_interfaces(
+                BaseController::default(),
+                GetNetworkInterfacesRequest {
+                    inst_id: instance_id.map(Into::into),
+                },
+            )
+            .await?)
     }
 
     async fn handle_collect_network_info(
