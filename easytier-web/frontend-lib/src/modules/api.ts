@@ -1,3 +1,4 @@
+import type { TargetUplinkInventory } from './uplinkInventory'
 import { UUID } from './utils';
 import { NetworkConfig, NetworkInstanceRunningInfo, VpnPortalInfo } from '../types/network';
 
@@ -56,6 +57,7 @@ export interface GetNetworkMetasResponse {
 export interface RuntimeMetric { name: string; value?: number | string; labels?: Record<string, string> }
 
 export interface RemoteClient {
+    get_network_interfaces?(inst_id?: string): Promise<TargetUplinkInventory>;
     get_stats?(inst_id: string): Promise<RuntimeMetric[]>;
     validate_config(config: NetworkConfig): Promise<ValidateConfigResponse>;
     run_network(config: NetworkConfig, save: boolean): Promise<undefined>;

@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { UplinkInventoryError } from '../../../../easytier-web/frontend-lib/src/modules/uplinkInventory';
+import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { NetworkTypes } from '../lib/shared';
 import { applyNodePatch, nodeList, prepareNodeParametersForBackend, validateNodeParameters, type NodeConfigRecord } from '../lib/node-config';
@@ -17,6 +18,7 @@ export function NetworkEditor({ initial, onClose, onSaved, client, allowRemoteSa
   const [tab, setTab] = useState('basic'), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [credentialMode, setCredentialMode] = useState(!!initial.credential_secret), [showSecret, setShowSecret] = useState(false);
   const [toml, setToml] = useState('');
+  const loadUplinkInventory = useCallback(() => client.get_network_interfaces ? client.get_network_interfaces(initial.instance_id) : Promise.reject(new UplinkInventoryError('unsupported')), [client, initial.instance_id]);
   const patch = (next: NodeConfigRecord) => setConfig(old => applyNodePatch(old as unknown as NodeConfigRecord, next) as unknown as NetworkTypes.NetworkConfig);
   const valid = (config.network_name ?? '').trim().length > 0 && (!credentialMode || !!config.credential_secret?.trim())
     && validateNodeParameters(config as unknown as NodeConfigRecord).length === 0 && !validateInstanceAcl(config.acl);
@@ -52,7 +54,7 @@ export function NetworkEditor({ initial, onClose, onSaved, client, allowRemoteSa
       <Field label={t('networkingMethod')}><select value={config.networking_method} onChange={event => patch({ networking_method: Number(event.target.value) })}><option value={NetworkTypes.NetworkingMethod.Manual}>{t('manualPeers')}</option><option value={NetworkTypes.NetworkingMethod.PublicServer}>{t('publicServer')}</option><option value={NetworkTypes.NetworkingMethod.Standalone}>{t('standalone')}</option></select></Field>
       {config.networking_method === NetworkTypes.NetworkingMethod.PublicServer ? <Field label={t('publicServerUrl')}><input value={config.public_server_url ?? ''} onChange={event => patch({ public_server_url: event.target.value })}/></Field> : config.networking_method === NetworkTypes.NetworkingMethod.Manual ? <Field label={t('peers')}><ListInput value={config.peer_urls} onChange={value => patch({ peer_urls: value })}/></Field> : null}
     </fieldset>}
-    {tab === 'parameters' && <NodeParameters supportsUplinkSelection={supportsUplinkSelection} mode="instance" value={config as unknown as NodeConfigRecord} onPatch={patch} busy={busy}/>}
+    {tab === 'parameters' && <NodeParameters loadUplinkInventory={loadUplinkInventory} supportsUplinkSelection={supportsUplinkSelection} mode="instance" value={config as unknown as NodeConfigRecord} onPatch={patch} busy={busy}/>}
     {tab === 'acl' && <InstanceAclEditor value={config.acl} onChange={acl => patch({ acl })} busy={busy}/>}
     {tab === 'toml' && <pre className="code-block">{toml || '—'}</pre>}
   </Dialog>;

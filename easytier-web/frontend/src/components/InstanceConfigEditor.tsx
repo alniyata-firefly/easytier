@@ -1,5 +1,6 @@
+import { UplinkInventoryError } from '../../../frontend-lib/src/modules/uplinkInventory';
 import { useTranslation } from 'react-i18next';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RemoteClient } from '../../../frontend-lib/src/modules/api';
 import { NetworkTypes } from '../lib/shared';
 import { errorDescriptor } from '../lib/hooks';
@@ -36,6 +37,11 @@ export function InstanceConfigEditor({ remote, instanceId, isNew = false, online
   const [peerText, setPeerText] = useState(''), [identity, setIdentity] = useState<IdentityMode>('secret');
   const [tab, setTab] = useState('basic'), [error, setError] = useState<UiError>(), [validated, setValidated] = useState(false);
   const [showSecret, setShowSecret] = useState(false);
+  const loadUplinkInventory = useCallback(() => {
+    if (!online) return Promise.reject(new UplinkInventoryError('offline'));
+    if (!remote.get_network_interfaces) return Promise.reject(new UplinkInventoryError('unsupported'));
+    return remote.get_network_interfaces(instanceId);
+  }, [remote, instanceId, online]);
   const mounted = useRef(true), locked = useRef(false);
   const shownError = error ? t(error.key, { ns: error.ns, ...error.values }) : '';
   const acceptConfig = (next: Config) => { setConfig(next); setPeerText((next.peer_urls ?? []).join('\n')); setIdentity(next.credential_secret ? 'credential' : 'secret'); setShowSecret(false); };
@@ -132,7 +138,7 @@ export function InstanceConfigEditor({ remote, instanceId, isNew = false, online
         <Button tone="ghost" icon="eye" disabled={busy} onClick={() => setShowSecret(value => !value)}>{t(showSecret ? 'editor.hideSecret' : 'editor.showSecret')}</Button>
       </div>
     </>}
-    {tab === 'advanced' && <NodeParameters mode="instance" value={config as unknown as Record<string, unknown>} onPatch={change} busy={busy}/>}
+    {tab === 'advanced' && <NodeParameters loadUplinkInventory={loadUplinkInventory} mode="instance" value={config as unknown as Record<string, unknown>} onPatch={change} busy={busy}/>}
     {tab === 'acl' && <InstanceAclEditor value={config.acl} onChange={acl => change({ acl })} busy={busy}/>}
     {tab === 'toml' && <><Alert tone="warning">{t('runtime.tomlWarning')}</Alert><Field label={t('editor.toml')}><textarea className="code-editor mono" rows={18} value={text} spellCheck={false} autoComplete="off" disabled={busy} onChange={event => { setText(event.target.value); setValidated(false); }}/></Field></>}
     {validated && <Alert tone="success">{online ? t('editor.validated') : t('editor.parsedOffline')}</Alert>}

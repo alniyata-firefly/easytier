@@ -1,3 +1,4 @@
+import { normalizeUplinkInventory } from '../../../easytier-web/frontend-lib/src/modules/uplinkInventoryRpc'
 import { invoke } from '@tauri-apps/api/core'
 import * as Network from '../../../easytier-web/frontend-lib/src/types/network'
 import type * as Api from '../../../easytier-web/frontend-lib/src/modules/api'
@@ -38,3 +39,5 @@ export const initRpcConnection = (isNormalMode: boolean, url?: string) => invoke
 export const isClientRunning = () => invoke<boolean>('is_client_running')
 export const initWebClient = (url?: string) => invoke('init_web_client', { url })
 export const isWebClientConnected = () => invoke<boolean>('is_web_client_connected')
+
+export async function getNetworkInterfaces(instanceId?: string) { return normalizeUplinkInventory(await invoke('get_network_interfaces', { instanceId })) }

@@ -1,4 +1,5 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { UplinkInventoryError } from '../../../frontend-lib/src/modules/uplinkInventory';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import ApiClient, { type CentralNetworkDetail, type CentralNetworkMember } from '../lib/api';
 import { RuntimeDisplay } from '../lib/shared';
@@ -24,6 +25,10 @@ export function MemberEditor({ api, network, member, onClose, onSaved }: {
     const [resetConfirm, setResetConfirm] = useState(false);
     const [loadAttempt, setLoadAttempt] = useState(0);
     const notice = useNotice();
+    const loadUplinkInventory = useCallback(() => {
+        if (!member) return Promise.reject(new UplinkInventoryError('offline'));
+        return api.get_network_interfaces(member.device_id, network.network_id);
+    }, [api, member?.device_id, network.network_id]);
     useEffect(() => {
         let active = true;
         setTab('basic'); setError(null); setConfig(undefined); setResetConfirm(false); setParametersValid(true);
@@ -92,7 +97,7 @@ export function MemberEditor({ api, network, member, onClose, onSaved }: {
             </> : loading ? <p role="status" className="loading-lines">{t('member.loading')}</p> : !config ? <Button tone="ghost" onClick={() => setLoadAttempt(value => value + 1)}>{t('actions.reload')}</Button> : tab === 'json' ? <>
                 
                 <Field label={t('member.json')}><textarea aria-label={t('member.json')} className="mono code-editor" rows={16} value={raw} onChange={event => setRaw(event.target.value)} spellCheck={false} disabled={busy} /></Field>
-            </> : <NodeParameters mode="member" value={config} onPatch={changeConfig} busy={busy} onValidityChange={setParametersValid} />}
+            </> : <NodeParameters loadUplinkInventory={loadUplinkInventory} mode="member" value={config} onPatch={changeConfig} busy={busy} onValidityChange={setParametersValid} />}
             <div className="form-actions"><Button tone="ghost" type="button" onClick={onClose} disabled={busy}>{t('actions.cancel')}</Button><Button type="submit" busy={busy} disabled={tab !== 'basic' && (loading || !config || (tab === 'advanced' && !parametersValid))}>{t('member.save')}</Button></div>
         </form>
         {member?.has_override && <div className="danger-actions">{resetConfirm ? <><p>{t('member.resetExplanation')}</p><Button tone="ghost" onClick={() => setResetConfirm(false)} disabled={busy}>{t('member.cancelReset')}</Button><Button tone="danger" busy={busy} onClick={reset}>{t('member.confirmReset')}</Button></> : <Button tone="ghost" onClick={() => setResetConfirm(true)} disabled={busy}>{t('member.reset')}</Button>}</div>}

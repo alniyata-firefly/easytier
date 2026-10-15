@@ -106,6 +106,32 @@
   },
   "uplink": {
     "auto": "Automatic",
-    "manual": "Manual"
+    "manual": "Manual",
+    "choose": "Choose interfaces",
+    "loading": "Loading interfaces",
+    "offline": "Node is offline",
+    "unsupported": "Node version does not support interface discovery",
+    "failed": "Interface discovery failed",
+    "refresh": "Refresh interfaces",
+    "count": "{{count}} interfaces",
+    "empty": "No interfaces available",
+    "missing": "No longer present",
+    "unverified": "Unverified",
+    "unavailable": "Unavailable",
+    "down": "Disconnected",
+    "kinds": {
+      "ethernet": "Ethernet",
+      "wifi": "Wi-Fi",
+      "bridge": "Bridge",
+      "bond": "Bond",
+      "vlan": "VLAN",
+      "ppp": "PPP",
+      "tun": "TUN",
+      "tap": "TAP",
+      "wireguard": "WireGuard",
+      "loopback": "Loopback",
+      "virtual": "Virtual",
+      "unknown": "Unknown type"
+    }
   }
 }

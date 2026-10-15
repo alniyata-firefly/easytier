@@ -6,6 +6,7 @@ import { prepareVpnService, syncMobileVpnService } from './mobile_vpn'
 import { normalizeGuiMetas, normalizeGuiRuntime } from './runtime'
 
 export class GUIRemoteClient implements Api.RemoteClient {
+  get_network_interfaces = backend.getNetworkInterfaces
   validate_config = backend.validateConfig
   async run_network(config: Network.NetworkConfig, save: boolean): Promise<undefined> {
     if (osType() === 'android') await prepareVpnService(config.instance_id, config)

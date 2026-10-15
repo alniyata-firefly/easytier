@@ -1,3 +1,4 @@
+import { normalizeUplinkInventory } from '../../../frontend-lib/src/modules/uplinkInventoryRpc';
 import axios, { AxiosError, AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 import type * as Api from '../../../frontend-lib/src/modules/api';
 import type * as NetworkTypes from '../../../frontend-lib/src/types/network';
@@ -292,7 +293,7 @@ export class ApiClient {
 
         // 添加请求拦截器
         this.client.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-            const readonlyRpc = config.url?.endsWith('/proxy-rpc') && ['list_route', 'list_peer', 'get_acl_stats', 'show_node_info', 'get_stats', 'get_prometheus_stats', 'get_logger_config', 'get_vpn_portal_info'].includes(config.data?.method_name);
+            const readonlyRpc = config.url?.endsWith('/proxy-rpc') && ['list_route', 'list_peer', 'get_acl_stats', 'show_node_info', 'get_stats', 'get_prometheus_stats', 'get_logger_config', 'get_vpn_portal_info', 'get_network_interfaces'].includes(config.data?.method_name);
             if (config.method && !['get', 'head'].includes(config.method.toLowerCase()) && !readonlyRpc) this.clear_snapshots();
             return config;
         }, (error: any) => {
@@ -666,6 +667,14 @@ export class ApiClient {
         return this.client.defaults.baseURL + '/auth/oidc/login';
     }
 
+    public async get_network_interfaces(machine_id: string, inst_id?: string) {
+        const response = await this.client.post(`/machines/${machine_id}/proxy-rpc`, {
+            service_name: 'api.manage.WebClientService', method_name: 'get_network_interfaces',
+            payload: inst_id ? { inst_id: strToUuid(inst_id) } : {},
+        });
+        return normalizeUplinkInventory(response);
+    }
+
     public get_remote_client(machine_id: string): Api.RemoteClient {
         return new WebRemoteClient(machine_id, this.client);
     }
@@ -678,6 +687,13 @@ class WebRemoteClient implements Api.RemoteClient {
     constructor(machine_id: string, client: AxiosInstance) {
         this.machine_id = machine_id;
         this.client = client;
+    }
+    async get_network_interfaces(inst_id?: string) {
+        const response = await this.client.post(`/machines/${this.machine_id}/proxy-rpc`, {
+            service_name: 'api.manage.WebClientService', method_name: 'get_network_interfaces',
+            payload: inst_id ? { inst_id: strToUuid(inst_id) } : {},
+        });
+        return normalizeUplinkInventory(response);
     }
     async validate_config(config: NetworkTypes.NetworkConfig): Promise<Api.ValidateConfigResponse> {
         const { toBackendNetworkConfig } = await import('../../../frontend-lib/src/types/network');
