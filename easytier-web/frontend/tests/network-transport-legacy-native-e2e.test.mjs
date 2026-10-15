@@ -16,6 +16,12 @@ import {
 const legacyCore = resolve(process.env.ET_LEGACY_CORE_BIN || join(repo, '../runtime/legacy-core/easytier-core-2.7.1'));
 const passwordHash = '$argon2id$v=19$m=4096,t=3,p=1$ZWFzeXRpZXItZTJlLXNhbHQ$FHbDjVElaTXuArgEEQrQrO4AdsnqNOcXGA5PFY8cG/s';
 const field = (value, key) => value?.[key] ?? value?.[key.replace(/_([a-z])/g, (_, c) => c.toUpperCase())];
+function rpcCompression(config) {
+    const value = field(config, 'data_compress_algo');
+    if (value === undefined || value === 1 || value === 'None') return 1;
+    if (value === 2 || value === 'Zstd') return 2;
+    throw new Error(`unexpected RPC compression enum: ${JSON.stringify(value)}`);
+}
 const safe = {
     no_tun: true, disable_upnp: true, bind_device: false, disable_p2p: true,
     disable_ipv6: true, multi_thread: false, disable_udp_hole_punching: true,
@@ -72,7 +78,7 @@ await test('legacy 2.7.1 Core rejects new configuration without runtime restart 
     }
     async function rpc(service, method, payload = {}) {
         return api.post(`machines/${id}/proxy-rpc`, { service_name: service, method_name: method,
-            payload: { instance: { id: protoUuid(networkId) }, ...payload } });
+            payload: service === 'api.manage.WebClientService' ? payload : { instance: { id: protoUuid(networkId) }, ...payload } });
     }
     async function runtimeConfig() {
         return field(await rpc('api.config.ConfigRpcService', 'get_config'), 'config');
@@ -137,14 +143,16 @@ await test('legacy 2.7.1 Core rejects new configuration without runtime restart 
             assert.equal((await runtimeIdentity()).instance_count, 1);
         });
         await step('existing Zstd and KCP/QUIC settings remain supported on 2.7.1', async () => {
-            await api.put(`networks/${networkId}`, { settings: { ...settings, transport: oldPolicy } });
+            await api.patch(`networks/${networkId}`, { settings: { ...settings, transport: oldPolicy } });
             await waitFor(applied, 'legacy compression/KCP policy applied', 45000);
             const config = await runtimeConfig();
-            for (const [key, value] of Object.entries(oldPolicy)) assert.equal(field(config, key), value, key);
+            for (const [key, value] of Object.entries(oldPolicy)) {
+                assert.equal(key === 'data_compress_algo' ? rpcCompression(config) : field(config, key), value, key);
+            }
         });
         const stableRuntime = await runtimeIdentity();
         await step('new DTO policy reports upgrade failure without restarting the legacy instance', async () => {
-            await api.put(`networks/${networkId}`, { settings: { ...settings, transport: { ...oldPolicy, default_protocol: 'udp' } } });
+            await api.patch(`networks/${networkId}`, { settings: { ...settings, transport: { ...oldPolicy, default_protocol: 'udp' } } });
             const rejected = await waitFor(async () => {
                 const network = await api.get(`networks/${networkId}`);
                 const device = network.deployment?.devices.find(device => device.device_id === id);
@@ -179,7 +187,7 @@ await test('legacy 2.7.1 Core rejects new configuration without runtime restart 
             assert.deepEqual(await runtimeIdentity(), stableRuntime);
         });
         await step('clearing the unsupported policy recovers without replacing the preserved old runtime', async () => {
-            await api.put(`networks/${networkId}`, { settings: { ...settings, transport: oldPolicy } });
+            await api.patch(`networks/${networkId}`, { settings: { ...settings, transport: oldPolicy } });
             await waitFor(applied, 'legacy policy recovered', 30000);
             assert.deepEqual(await runtimeIdentity(), stableRuntime);
         });

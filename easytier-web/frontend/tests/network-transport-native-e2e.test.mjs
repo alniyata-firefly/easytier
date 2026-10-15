@@ -15,6 +15,12 @@ import {
 
 const passwordHash = '$argon2id$v=19$m=4096,t=3,p=1$ZWFzeXRpZXItZTJlLXNhbHQ$FHbDjVElaTXuArgEEQrQrO4AdsnqNOcXGA5PFY8cG/s';
 const field = (value, key) => value?.[key] ?? value?.[key.replace(/_([a-z])/g, (_, c) => c.toUpperCase())];
+function rpcCompression(config) {
+    const value = field(config, 'data_compress_algo');
+    if (value === undefined || value === 1 || value === 'None') return 1;
+    if (value === 2 || value === 'Zstd') return 2;
+    throw new Error(`unexpected RPC compression enum: ${JSON.stringify(value)}`);
+}
 const keys = ['data_compress_algo', 'enable_kcp_proxy', 'disable_kcp_input', 'enable_quic_proxy', 'disable_quic_input',
     'encryption_algorithm', 'disable_encryption', 'default_protocol', 'tld_dns_zone'];
 const inherited = [
@@ -50,8 +56,8 @@ async function isolatedNetworkSnapshot() {
 // ConfigRpc converts the native configuration back to its protobuf model. Its
 // default compression (None=1) can be omitted; all directional booleans are set.
 function transportOf(config) {
-    const defaults = { data_compress_algo: 1, encryption_algorithm: 'aes-gcm' };
-    return Object.fromEntries(keys.map(key => [key, field(config, key) ?? defaults[key]]));
+    const defaults = { encryption_algorithm: 'aes-gcm' };
+    return Object.fromEntries(keys.map(key => [key, key === 'data_compress_algo' ? rpcCompression(config) : field(config, key) ?? defaults[key]]));
 }
 function assertSafeConfig(config) {
     for (const key of ['no_tun', 'disable_upnp', 'disable_p2p', 'disable_ipv6',
@@ -173,7 +179,7 @@ await test('network transport reaches permanent/temporary native Core and embedd
     }
     async function saveTransport(value) {
         latestSettings = { ...latestSettings, transport: value };
-        const saved = await api.put(`networks/${networkId}`, { settings: latestSettings });
+        const saved = await api.patch(`networks/${networkId}`, { settings: latestSettings });
         assert.deepEqual(saved.transport, value);
         return saved;
     }
@@ -254,7 +260,7 @@ await test('network transport reaches permanent/temporary native Core and embedd
             const { transport: omitted, ...withoutTransport } = latestSettings;
             assert.deepEqual(omitted, policyA);
             latestSettings = { ...withoutTransport, display_name: 'Transport validation renamed' };
-            const response = await api.put(`networks/${networkId}`, { settings: latestSettings });
+            const response = await api.patch(`networks/${networkId}`, { settings: latestSettings });
             assert.deepEqual(response.transport, policyA);
             await waitFor(applied, 'omitted transport retained', 30000);
             assert.deepEqual(durableSnapshot(), before, 'omitted policy must preserve compiled configurations and revisions');
@@ -291,7 +297,7 @@ await test('network transport reaches permanent/temporary native Core and embedd
             const gatewayBefore = (await gatewayFromPermanent(policyB)).peer_id;
             for (const transport of [{ data_compress_algo: 3 }, { enable_kcp_proxy: true, unknown_transport: true }, { disable_quic_input: 'false' },
                 { encryption_algorithm: 'bad-cipher' }, { default_protocol: 'https' }, { tld_dns_zone: 'bad..example' }]) {
-                await api.put(`networks/${networkId}`, { settings: { ...latestSettings, transport } }, [400, 422]);
+                await api.patch(`networks/${networkId}`, { settings: { ...latestSettings, transport } }, [400, 422]);
                 assert.deepEqual(durableSnapshot(), before, 'invalid transport must not change durable desired state');
                 assert.deepEqual((await api.get(`networks/${networkId}`)).transport, policyB);
             }
