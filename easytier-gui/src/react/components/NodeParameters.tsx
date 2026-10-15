@@ -80,7 +80,7 @@ export function NodeParameters({ mode, value, onPatch, busy = false, loadUplinkI
                     <option value="inherit">{t('preference.inherit')}</option><option value="ipv6">{t('preference.ipv6')}</option><option value="default">{t('preference.default')}</option>
                 </select>
             </Field> : <div className="settings-options">{check('prefer_ipv6')}</div>}
-            <div className="settings-options">{NODE_BOOLEAN_FLAGS.map(key => check(key, key === 'bind_device' || key === 'multi_thread'))}{check('ipv6_public_addr_provider')}</div>
+            <div className="settings-options">{NODE_BOOLEAN_FLAGS.filter(key => supportsUplinkSelection || key !== 'bind_device').map(key => check(key, key === 'bind_device' || key === 'multi_thread'))}{check('ipv6_public_addr_provider')}</div>
             {value.ipv6_public_addr_provider === true && textField('ipv6_public_addr_prefix')}
         </fieldset>
         <fieldset className="node-parameter-section form-stack" disabled={busy}>

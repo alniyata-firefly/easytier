@@ -8,6 +8,7 @@ import { applyServiceConfiguration, ServiceConfigurationError } from './service_
 import { consumePendingMobileVpnTileAction, disposeMobileVpnService, initMobileVpnService, setMobileVpnTileActionHandler, syncMobileVpnService, suspendMobileVpnService, resumeMobileVpnService } from './mobile_vpn'
 import { executeVpnTileAction } from './mobile_vpn_tile'
 import { GUIRemoteClient } from './client'
+import { supportsUplinkSelectionForOs } from '../../../easytier-web/frontend-lib/src/modules/uplinkCapabilities'
 
 function serviceOptions(mode: ServiceMode): ServiceOptions {
   return { config_dir: mode.config_dir, rpc_portal: mode.rpc_portal, file_log_level: mode.file_log_level, file_log_dir: mode.file_log_dir, config_server: mode.config_server_url }
@@ -117,7 +118,7 @@ export class NativeSession {
     const current = await backend.listNetworkInstanceIds().catch(() => undefined)
     const liveIds = (current?.running_inst_ids || []).map(Utils.UuidToStr)
     const enabled = mode.mode === 'normal' ? [...new Set([...liveIds, ...loadEnabledNetworks().filter(id => localIds.has(id))])] : []
-    await backend.sendConfigs(enabled)
+    await backend.sendConfigs(enabled, mode.mode === 'remote' || supportsUplinkSelectionForOs(this.snapshot.platform))
     if (!await backend.isClientRunning()) throw new Error('rpc_connection_failed')
   }
   private async connect(mode: Mode) {

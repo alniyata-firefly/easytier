@@ -38,9 +38,10 @@ function enabledPortal(current: unknown): NodeConfigRecord {
     return portal;
 }
 
-export function NodeParameters({ mode, value, onPatch, busy = false, loadUplinkInventory, onValidityChange }: {
+export function NodeParameters({ mode, value, onPatch, busy = false, loadUplinkInventory, onValidityChange, supportsUplinkSelection = true }: {
     mode: 'member' | 'instance'; value: NodeConfigRecord; onPatch: (patch: NodeConfigRecord) => void;
     busy?: boolean; loadUplinkInventory?: UplinkInventoryLoader; onValidityChange?: (valid: boolean) => void;
+    supportsUplinkSelection?: boolean;
 }) {
     const { t } = useTranslation('node-config');
     const issues = useMemo(() => validateNodeParameters(value), [value]);
@@ -80,16 +81,16 @@ export function NodeParameters({ mode, value, onPatch, busy = false, loadUplinkI
                     <option value="inherit">{t('preference.inherit')}</option><option value="ipv6">{t('preference.ipv6')}</option><option value="default">{t('preference.default')}</option>
                 </select>
             </Field> : <div className="settings-options">{check('prefer_ipv6')}</div>}
-            <div className="settings-options">{NODE_BOOLEAN_FLAGS.map(key => check(key, key === 'bind_device' || key === 'multi_thread'))}</div>
+            <div className="settings-options">{NODE_BOOLEAN_FLAGS.filter(key => supportsUplinkSelection || key !== 'bind_device').map(key => check(key, key === 'bind_device' || key === 'multi_thread'))}</div>
         </fieldset>
         <fieldset className="node-parameter-section form-stack" disabled={busy}>
             <legend>{t('sections.interface')}</legend>
-            <Field label={field('uplink_mode')} error={errorAt('uplink') ?? errorAt('uplink.mode')}>
+            {supportsUplinkSelection && <Field label={field('uplink_mode')} error={errorAt('uplink') ?? errorAt('uplink.mode')}>
                 <select aria-label={field('uplink_mode')} value={uplinkMode} onChange={event => onPatch({ uplink: event.target.value === 'manual' ? { mode: 'manual', interfaces: [] } : { mode: 'auto', interfaces: [] } })}>
                     <option value="auto">{t('uplink.auto')}</option><option value="manual">{t('uplink.manual')}</option>
                 </select>
-            </Field>
-            {uplinkMode === 'manual' && <UplinkInterfaces value={Array.isArray(uplink?.interfaces) ? uplink.interfaces.filter((name): name is string => typeof name === 'string') : []}
+            </Field>}
+            {supportsUplinkSelection && uplinkMode === 'manual' && <UplinkInterfaces value={Array.isArray(uplink?.interfaces) ? uplink.interfaces.filter((name): name is string => typeof name === 'string') : []}
                 onChange={interfaces => onPatch({ uplink: { mode: 'manual', interfaces } })} load={loadUplinkInventory} busy={busy} error={errorAt('uplink.interfaces')}/>}
             <div className="form-grid">{textField('dev_name')}{textField('mtu', true)}</div>
             <Field label={field('instance_recv_bps_limit')} error={errorAt('instance_recv_bps_limit')}>

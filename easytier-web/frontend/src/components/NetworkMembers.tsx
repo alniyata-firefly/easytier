@@ -8,6 +8,7 @@ import { errorMessage, NetworkValidationError } from './NetworkSettingsForm';
 import { MemberEditor, memberName } from './MemberEditor';
 import { CustomLifetimeFields } from './CustomLifetimeFields';
 import { MAX_JOIN_CREDENTIAL_SECONDS, resolveLifetime } from '../lib/lifetime';
+import { supportsUplinkSelectionForOs } from '../../../frontend-lib/src/modules/uplinkCapabilities';
 
 export function NetworkMembers({ api, network, members, temporaryPeers, loading, onChanged, onObserve }: {
     api: ApiClient; network: CentralNetworkDetail; members: CentralNetworkMember[]; temporaryPeers: TemporaryPeer[];
@@ -20,7 +21,9 @@ export function NetworkMembers({ api, network, members, temporaryPeers, loading,
     const [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null);
     const notice = useNotice();
     const devices = useResource(() => api.list_machines(), `member-candidates:${network.network_id}`, adding ? 5000 : 0);
-    const candidates = useMemo(() => (devices.data ?? []).map(Utils.buildDeviceInfo).filter(device => !!device.machine_id && !members.some(member => member.device_id === device.machine_id)).sort((a, b) => Number(b.online) - Number(a.online) || (a.alias || a.hostname || '').localeCompare(b.alias || b.hostname || '')), [devices.data, members]);
+    const deviceInfos = useMemo(() => (devices.data ?? []).map(Utils.buildDeviceInfo), [devices.data]);
+    const candidates = useMemo(() => deviceInfos.filter(device => !!device.machine_id && !members.some(member => member.device_id === device.machine_id)).sort((a, b) => Number(b.online) - Number(a.online) || (a.alias || a.hostname || '').localeCompare(b.alias || b.hostname || '')), [deviceInfos, members]);
+    const supportsUplinkSelection = supportsUplinkSelectionForOs(deviceInfos.find(device => device.machine_id === editing?.device_id)?.device_os?.os_type);
     const filtered = useMemo(() => members.filter(member => `${memberName(member)} ${member.device_id} ${member.runtime_virtual_ipv4 ?? member.virtual_ipv4 ?? member.allocated_ipv4 ?? ''}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())).sort((a, b) => Number(b.online) - Number(a.online) || memberName(a).localeCompare(memberName(b))), [members, search]);
     const external = temporaryPeers.filter(peer => !members.some(member => member.credential_id && member.credential_id === peer.credential_id));
     useEffect(() => { setAdding(false); setEditing(null); setRemoving(null); setSearch(''); }, [network.network_id]);
@@ -61,6 +64,6 @@ export function NetworkMembers({ api, network, members, temporaryPeers, loading,
         <Dialog open={!!removing} title={t('members.removeTitle')} onClose={() => { if (!busy) setRemoving(null); }} footer={<><Button tone="ghost" onClick={() => setRemoving(null)} disabled={busy}>{t('actions.cancel')}</Button><Button tone="danger" busy={busy} onClick={remove}>{t('members.removeConfirm')}</Button></>}>
             {error !== null && <Alert tone="error">{errorMessage(error)}</Alert>}<p>{t('members.removePrompt', { member: removing ? memberName(removing) : '', network: network.display_name })}</p>{removing?.temporary && <Alert tone="warning">{t('members.removeCredentialWarning')}</Alert>}
         </Dialog>
-        <MemberEditor api={api} network={network} member={editing} onClose={() => setEditing(null)} onSaved={onChanged} />
+        <MemberEditor api={api} network={network} member={editing} supportsUplinkSelection={supportsUplinkSelection} onClose={() => setEditing(null)} onSaved={onChanged} />
     </>;
 }

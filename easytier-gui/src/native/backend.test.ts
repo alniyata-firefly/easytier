@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-const mock = vi.hoisted(() => ({ invoke: vi.fn(async () => undefined) }))
+const mock = vi.hoisted(() => ({ invoke: vi.fn(async () => undefined), configs: [{ config: { instance_id: 'fixture' } as Record<string, unknown>, source: 'web' }] }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mock.invoke }))
 vi.mock('../../../easytier-web/frontend-lib/src/types/network', () => ({
   toBackendNetworkConfig: (cfg: unknown) => cfg, normalizeNetworkConfig: (cfg: unknown) => cfg,
 }))
-vi.mock('./storage', () => ({ loadStoredConfigs: () => [{ config: { instance_id: 'fixture' }, source: 'web' }] }))
+vi.mock('./storage', () => ({ loadStoredConfigs: () => mock.configs }))
 
 describe('Tauri native command payload contract', () => {
   it('uses the Rust parameter names for validation, generation and saving', async () => {
@@ -26,5 +26,20 @@ describe('Tauri native command payload contract', () => {
     expect(mock.invoke).toHaveBeenLastCalledWith('load_configs', { configs: [{ config: { instance_id: 'fixture' }, source: 'web' }], enabledNetworks: ['fixture'] })
     await backend.updateNetworkConfigState('fixture', false)
     expect(mock.invoke).toHaveBeenLastCalledWith('update_network_config_state', { instanceId: 'fixture', disabled: false })
+  })
+
+  it('restores saved mobile configurations with automatic uplinks without changing stored data', async () => {
+    const backend = await import('./backend')
+    const config = { instance_id: 'mobile-fixture', bind_device: true, uplink: { mode: 'manual', interfaces: ['eth0'] }, mtu: 1280 }
+    mock.configs = [{ config, source: 'web' }]
+    try {
+      await backend.sendConfigs(['mobile-fixture'], false)
+      expect(mock.invoke).toHaveBeenLastCalledWith('load_configs', {
+        configs: [{ config: { instance_id: 'mobile-fixture', bind_device: false, mtu: 1280 }, source: 'web' }], enabledNetworks: ['mobile-fixture'],
+      })
+      expect(config.uplink.interfaces).toEqual(['eth0'])
+      expect(config.bind_device).toBe(true)
+    }
+    finally { mock.configs = [{ config: { instance_id: 'fixture' }, source: 'web' }] }
   })
 })

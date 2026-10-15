@@ -1,5 +1,5 @@
 import { UplinkInventoryError } from '../../../frontend-lib/src/modules/uplinkInventory';
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import ApiClient, { type CentralNetworkDetail, type CentralNetworkMember } from '../lib/api';
 import { RuntimeDisplay } from '../lib/shared';
@@ -7,13 +7,15 @@ import { Alert, Button, Dialog, Field, Tabs, useNotice } from './ui';
 import { errorMessage, NetworkValidationError, splitList } from './NetworkSettingsForm';
 import { NodeParameters } from './NodeParameters';
 import { applyNodePatch, NodeParameterValidationError, prepareNodeParametersForBackend, validateNodeParameters } from '../lib/node-config';
+import { normalizeUplinkForTarget } from '../../../frontend-lib/src/modules/uplinkCapabilities';
 
 type MemberConfig = Record<string, unknown> & { listener_urls?: string[]; prefer_ipv6?: boolean; proxy_cidrs?: string[] };
 export const memberName = (member: CentralNetworkMember) => member.hostname_override || member.alias || member.hostname || member.device_id;
 
-export function MemberEditor({ api, network, member, onClose, onSaved }: {
+export function MemberEditor({ api, network, member, onClose, onSaved, supportsUplinkSelection = true }: {
     api: ApiClient; network: CentralNetworkDetail; member: CentralNetworkMember | null;
     onClose: () => void; onSaved: () => void;
+    supportsUplinkSelection?: boolean;
 }) {
     const { t } = useTranslation(['networks', 'node-config']);
     const [tab, setTab] = useState('basic');
@@ -24,6 +26,8 @@ export function MemberEditor({ api, network, member, onClose, onSaved }: {
     const [loading, setLoading] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null);
     const [resetConfirm, setResetConfirm] = useState(false);
     const [loadAttempt, setLoadAttempt] = useState(0);
+    const uplinkCapability = useRef(supportsUplinkSelection);
+    uplinkCapability.current = supportsUplinkSelection;
     const notice = useNotice();
     const loadUplinkInventory = useCallback(() => {
         if (!member) return Promise.reject(new UplinkInventoryError('offline'));
@@ -37,18 +41,30 @@ export function MemberEditor({ api, network, member, onClose, onSaved }: {
         setLoading(true);
         api.get_member_config(network.network_id, member.device_id).then(value => {
             if (!active) return;
-            setConfig(value); setRaw(JSON.stringify(value, null, 2));
+            const normalized = normalizeUplinkForTarget(value, uplinkCapability.current);
+            setConfig(normalized); setRaw(JSON.stringify(normalized, null, 2));
         }).catch(failure => { if (active) setError(failure); }).finally(() => { if (active) setLoading(false); });
         return () => { active = false; };
     }, [api, network.network_id, member?.device_id, loadAttempt]);
+    useEffect(() => {
+        if (supportsUplinkSelection) return;
+        setConfig(value => value ? normalizeUplinkForTarget(value, false) : value);
+        setRaw(value => {
+            try {
+                const parsed = JSON.parse(value);
+                return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+                    ? JSON.stringify(normalizeUplinkForTarget(parsed, false), null, 2) : value;
+            } catch { return value; }
+        });
+    }, [supportsUplinkSelection]);
     const changeConfig = (patch: Record<string, unknown>) => {
-        const next = applyNodePatch(config ?? {}, patch);
+        const next = normalizeUplinkForTarget(applyNodePatch(config ?? {}, patch), supportsUplinkSelection);
         setConfig(next); setRaw(JSON.stringify(next, null, 2));
         if (Array.isArray(patch.proxy_cidrs)) setCidrs(patch.proxy_cidrs.join('\n'));
     };
     const changeTab = (next: string) => {
         if (tab === 'json' && next !== 'json') {
-            try { const parsed = JSON.parse(raw); if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new NetworkValidationError('member.errors.jsonObject'); setConfig(parsed); if (Array.isArray(parsed.proxy_cidrs)) setCidrs(parsed.proxy_cidrs.join('\n')); setError(null); }
+            try { const parsed = JSON.parse(raw); if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new NetworkValidationError('member.errors.jsonObject'); const normalized = normalizeUplinkForTarget(parsed, supportsUplinkSelection); setConfig(normalized); setRaw(JSON.stringify(normalized, null, 2)); if (Array.isArray(normalized.proxy_cidrs)) setCidrs(normalized.proxy_cidrs.join('\n')); setError(null); }
             catch (failure) { setError(failure); return; }
         }
         setTab(next);
@@ -70,8 +86,9 @@ export function MemberEditor({ api, network, member, onClose, onSaved }: {
                 });
                 await api.update_network_member(network.network_id, member.device_id, { hostname_override: hostname.trim(), virtual_ipv4: address.trim(), proxy_cidrs: [...new Set(proxyCidrs)] });
             } else {
-                const next: MemberConfig = tab === 'json' ? JSON.parse(raw) : { ...config };
-                if (!next || typeof next !== 'object' || Array.isArray(next)) throw new NetworkValidationError('member.errors.jsonObject');
+                const draft: MemberConfig = tab === 'json' ? JSON.parse(raw) : { ...config };
+                if (!draft || typeof draft !== 'object' || Array.isArray(draft)) throw new NetworkValidationError('member.errors.jsonObject');
+                const next = normalizeUplinkForTarget(draft, supportsUplinkSelection);
                 const issues = validateNodeParameters(next);
                 if (issues.length) throw new NodeParameterValidationError(issues[0]);
                 await api.set_member_config(network.network_id, member.device_id, prepareNodeParametersForBackend(next));
@@ -97,7 +114,7 @@ export function MemberEditor({ api, network, member, onClose, onSaved }: {
             </> : loading ? <p role="status" className="loading-lines">{t('member.loading')}</p> : !config ? <Button tone="ghost" onClick={() => setLoadAttempt(value => value + 1)}>{t('actions.reload')}</Button> : tab === 'json' ? <>
                 
                 <Field label={t('member.json')}><textarea aria-label={t('member.json')} className="mono code-editor" rows={16} value={raw} onChange={event => setRaw(event.target.value)} spellCheck={false} disabled={busy} /></Field>
-            </> : <NodeParameters loadUplinkInventory={loadUplinkInventory} mode="member" value={config} onPatch={changeConfig} busy={busy} onValidityChange={setParametersValid} />}
+            </> : <NodeParameters loadUplinkInventory={loadUplinkInventory} supportsUplinkSelection={supportsUplinkSelection} mode="member" value={config} onPatch={changeConfig} busy={busy} onValidityChange={setParametersValid} />}
             <div className="form-actions"><Button tone="ghost" type="button" onClick={onClose} disabled={busy}>{t('actions.cancel')}</Button><Button type="submit" busy={busy} disabled={tab !== 'basic' && (loading || !config || (tab === 'advanced' && !parametersValid))}>{t('member.save')}</Button></div>
         </form>
         {member?.has_override && <div className="danger-actions">{resetConfirm ? <><p>{t('member.resetExplanation')}</p><Button tone="ghost" onClick={() => setResetConfirm(false)} disabled={busy}>{t('member.cancelReset')}</Button><Button tone="danger" busy={busy} onClick={reset}>{t('member.confirmReset')}</Button></> : <Button tone="ghost" onClick={() => setResetConfirm(true)} disabled={busy}>{t('member.reset')}</Button>}</div>}

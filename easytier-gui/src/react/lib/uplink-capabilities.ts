@@ -1,12 +1,7 @@
-import type { NodeConfigRecord } from './node-config';
+import { supportsUplinkSelectionForOs } from '../../../../easytier-web/frontend-lib/src/modules/uplinkCapabilities';
+
+export { normalizeUplinkForTarget } from '../../../../easytier-web/frontend-lib/src/modules/uplinkCapabilities';
 
 export function supportsUplinkSelectionForTarget(platform: string, mode: { mode: string }): boolean {
-    return mode.mode === 'remote' || (platform !== 'android' && platform !== 'ios');
-}
-
-export function normalizeUplinkForTarget(value: NodeConfigRecord, supported: boolean): NodeConfigRecord {
-    if (supported) return value;
-    const next = { ...value };
-    delete next.uplink;
-    return next;
+    return mode.mode === 'remote' || supportsUplinkSelectionForOs(platform);
 }

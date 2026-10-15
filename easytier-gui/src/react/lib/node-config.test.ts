@@ -74,7 +74,7 @@ describe('uplink target capabilities', () => {
   it('drops imported local mobile policy while preserving every remote field and the original object', () => {
     const source = { uplink: { mode: 'manual', interfaces: ['eth0'] }, mtu: 1280, future: { keep: true } };
     const local = normalizeUplinkForTarget(source, false);
-    expect(local).toEqual({ mtu: 1280, future: { keep: true } });
+    expect(local).toEqual({ mtu: 1280, future: { keep: true }, bind_device: false });
     expect(normalizeUplinkForTarget(source, true)).toEqual(source);
     expect(source.uplink).toEqual({ mode: 'manual', interfaces: ['eth0'] });
     expect(local.future).toBe(source.future);

@@ -8,6 +8,7 @@ import { applyNodePatch, validateNodeParameters, prepareNodeParametersForBackend
 import { NodeParameters } from './NodeParameters';
 import { InstanceAclEditor, validateInstanceAcl } from './InstanceAclEditor';
 import { Alert, Button, Field, Tabs } from './ui';
+import { normalizeUplinkForTarget } from '../../../frontend-lib/src/modules/uplinkCapabilities';
 
 type Config = NetworkTypes.NetworkConfig;
 type SaveMode = 'save' | 'run';
@@ -15,7 +16,8 @@ type IdentityMode = 'secret' | 'credential';
 type UiError = { key: string; ns: string; values?: Record<string, unknown> };
 class InstanceConfigError extends Error {}
 const peerUrls = (text: string) => text.split('\n').map(row => row.trim()).filter(Boolean);
-const backendDraft = (config: Config): Config => prepareNodeParametersForBackend(config as unknown as Record<string, unknown>) as unknown as Config;
+const targetConfig = (config: Config, supported: boolean): Config => normalizeUplinkForTarget(config as unknown as Record<string, unknown>, supported) as unknown as Config;
+const backendDraft = (config: Config, supported = true): Config => prepareNodeParametersForBackend(targetConfig(config, supported) as unknown as Record<string, unknown>) as unknown as Config;
 
 export function validateInstanceConfigDraft(config: Config, instanceId: string, identity?: IdentityMode): void {
   if (typeof config.instance_id !== 'string' || config.instance_id.toLowerCase() !== instanceId.toLowerCase()) throw new InstanceConfigError('editor.wrongId');
@@ -27,9 +29,10 @@ export function validateInstanceConfigDraft(config: Config, instanceId: string, 
   if (aclError) throw new InstanceConfigError(aclError);
 }
 
-export function InstanceConfigEditor({ remote, instanceId, isNew = false, online, checkPermission, onSaved, onBusyChange }: {
+export function InstanceConfigEditor({ remote, instanceId, isNew = false, online, checkPermission, onSaved, onBusyChange, supportsUplinkSelection = true }: {
   remote: RemoteClient; instanceId: string; isNew?: boolean; online: boolean;
   checkPermission: () => Promise<void>; onSaved: (mode: SaveMode) => void; onBusyChange: (value: boolean) => void;
+  supportsUplinkSelection?: boolean;
 }) {
   const { t } = useTranslation(['devices', 'node-config']);
   const [config, setConfig] = useState<Config>();
@@ -37,6 +40,8 @@ export function InstanceConfigEditor({ remote, instanceId, isNew = false, online
   const [peerText, setPeerText] = useState(''), [identity, setIdentity] = useState<IdentityMode>('secret');
   const [tab, setTab] = useState('basic'), [error, setError] = useState<UiError>(), [validated, setValidated] = useState(false);
   const [showSecret, setShowSecret] = useState(false);
+  const uplinkCapability = useRef(supportsUplinkSelection);
+  uplinkCapability.current = supportsUplinkSelection;
   const loadUplinkInventory = useCallback(() => {
     if (!online) return Promise.reject(new UplinkInventoryError('offline'));
     if (!remote.get_network_interfaces) return Promise.reject(new UplinkInventoryError('unsupported'));
@@ -44,13 +49,13 @@ export function InstanceConfigEditor({ remote, instanceId, isNew = false, online
   }, [remote, instanceId, online]);
   const mounted = useRef(true), locked = useRef(false);
   const shownError = error ? t(error.key, { ns: error.ns, ...error.values }) : '';
-  const acceptConfig = (next: Config) => { setConfig(next); setPeerText((next.peer_urls ?? []).join('\n')); setIdentity(next.credential_secret ? 'credential' : 'secret'); setShowSecret(false); };
+  const acceptConfig = (value: Config) => { const next = targetConfig(value, uplinkCapability.current); setConfig(next); setPeerText((next.peer_urls ?? []).join('\n')); setIdentity(next.credential_secret ? 'credential' : 'secret'); setShowSecret(false); };
   useEffect(() => {
     mounted.current = true; let current = true;
     const load = async () => {
       try {
         const initial = isNew ? { ...NetworkTypes.DEFAULT_NETWORK_CONFIG(), instance_id: instanceId, listener_urls: [] } : await remote.get_network_config(instanceId);
-        const generated = await remote.generate_config(backendDraft(initial));
+        const generated = await remote.generate_config(backendDraft(initial, uplinkCapability.current));
         if (!generated.toml_config || generated.error) throw new InstanceConfigError('editor.invalid');
         if (current) { acceptConfig(initial); setText(generated.toml_config); }
       } catch (failure) { if (current) setError(failure instanceof InstanceConfigError ? { key: failure.message, ns: 'devices' } : errorDescriptor(failure)); }
@@ -59,9 +64,14 @@ export function InstanceConfigEditor({ remote, instanceId, isNew = false, online
     void load();
     return () => { current = false; mounted.current = false; };
   }, [remote, instanceId, isNew]);
+  useEffect(() => {
+    if (supportsUplinkSelection) return;
+    setConfig(value => value ? targetConfig(value, false) : value);
+    setValidated(false);
+  }, [supportsUplinkSelection]);
 
   const change = (patch: Record<string, unknown>) => {
-    setConfig(old => old ? applyNodePatch(old as unknown as Record<string, unknown>, patch) as unknown as Config : old);
+    setConfig(old => old ? targetConfig(applyNodePatch(old as unknown as Record<string, unknown>, patch) as unknown as Config, supportsUplinkSelection) : old);
     setValidated(false);
   };
   const work = async (task: () => Promise<void>) => {
@@ -75,19 +85,21 @@ export function InstanceConfigEditor({ remote, instanceId, isNew = false, online
   };
   const draft = (): Config => {
     if (!config) throw new InstanceConfigError('editor.loadFailed');
-    return { ...config, peer_urls: peerUrls(peerText) };
+    return targetConfig({ ...config, peer_urls: peerUrls(peerText) }, uplinkCapability.current);
   };
   const generate = async (next: Config): Promise<string> => {
-    validateInstanceConfigDraft(next, instanceId, identity);
-    const generated = await remote.generate_config(backendDraft(next));
+    const normalized = targetConfig(next, uplinkCapability.current);
+    validateInstanceConfigDraft(normalized, instanceId, identity);
+    const generated = await remote.generate_config(backendDraft(normalized, uplinkCapability.current));
     if (!generated.toml_config || generated.error) throw new InstanceConfigError('editor.invalid');
     return generated.toml_config;
   };
   const parse = async (): Promise<Config> => {
     const parsed = await remote.parse_config(text);
     if (!parsed.config || parsed.error) throw new InstanceConfigError('editor.invalid');
-    validateInstanceConfigDraft(parsed.config, instanceId);
-    return parsed.config;
+    const normalized = targetConfig(parsed.config, uplinkCapability.current);
+    validateInstanceConfigDraft(normalized, instanceId);
+    return normalized;
   };
   const currentConfig = async (): Promise<Config> => {
     if (tab === 'toml') return parse();
@@ -103,15 +115,15 @@ export function InstanceConfigEditor({ remote, instanceId, isNew = false, online
   });
   const validate = () => work(async () => {
     const next = await currentConfig();
-    if (online) await remote.validate_config(backendDraft(next));
+    if (online) await remote.validate_config(backendDraft(next, uplinkCapability.current));
     if (mounted.current) { if (tab === 'toml') acceptConfig(next); setValidated(true); }
   });
   const submit = (mode: SaveMode) => work(async () => {
     if (mode === 'run' && !online) throw new InstanceConfigError('editor.offline');
     const next = await currentConfig();
     await checkPermission();
-    if (online) await remote.validate_config(backendDraft(next));
-    if (mode === 'run') await remote.run_network(backendDraft(next), true); else await remote.save_config(backendDraft(next));
+    if (online) await remote.validate_config(backendDraft(next, uplinkCapability.current));
+    if (mode === 'run') await remote.run_network(backendDraft(next, uplinkCapability.current), true); else await remote.save_config(backendDraft(next, uplinkCapability.current));
     if (mounted.current) onSaved(mode);
   });
   if (loading) return <p className="loading" role="status">{t('editor.loading')}</p>;
@@ -138,7 +150,7 @@ export function InstanceConfigEditor({ remote, instanceId, isNew = false, online
         <Button tone="ghost" icon="eye" disabled={busy} onClick={() => setShowSecret(value => !value)}>{t(showSecret ? 'editor.hideSecret' : 'editor.showSecret')}</Button>
       </div>
     </>}
-    {tab === 'advanced' && <NodeParameters loadUplinkInventory={loadUplinkInventory} mode="instance" value={config as unknown as Record<string, unknown>} onPatch={change} busy={busy}/>}
+    {tab === 'advanced' && <NodeParameters loadUplinkInventory={loadUplinkInventory} supportsUplinkSelection={supportsUplinkSelection} mode="instance" value={config as unknown as Record<string, unknown>} onPatch={change} busy={busy}/>}
     {tab === 'acl' && <InstanceAclEditor value={config.acl} onChange={acl => change({ acl })} busy={busy}/>}
     {tab === 'toml' && <><Alert tone="warning">{t('runtime.tomlWarning')}</Alert><Field label={t('editor.toml')}><textarea className="code-editor mono" rows={18} value={text} spellCheck={false} autoComplete="off" disabled={busy} onChange={event => { setText(event.target.value); setValidated(false); }}/></Field></>}
     {validated && <Alert tone="success">{online ? t('editor.validated') : t('editor.parsedOffline')}</Alert>}

@@ -32,7 +32,7 @@ for (const target of ['web', 'gui', 'gui-android', 'gui-ios']) test(`${target} u
   const make=(name,addresses=[],extra={})=>({name,addresses,kind:'ethernet',up:true,selectable:true,...extra});
   window.__INVENTORY__={interfaces:[make('eth0',['10.7.0.46/24','fd00:7::46/64']),make('Ethernet 2',['192.168.1.5/24']),make('备用网卡',[],{up:false}),make('wg0',['fd00:8::1/64'],{kind:'wireguard'}),make('lo',['127.0.0.1/8'],{kind:'loopback',selectable:false})]};window.__FAILURE__=undefined;window.__DEFER__=false;window.__CALLS__=0;
   function Fixture(){const[value,setValue]=useState(${JSON.stringify(initial)});const[valid,setValid]=useState(true);const load=useCallback(async()=>{window.__CALLS__++;if(window.__DEFER__)return new Promise(resolve=>window.__RESOLVE__=resolve);if(window.__FAILURE__)throw new UplinkInventoryError(window.__FAILURE__);return structuredClone(window.__INVENTORY__);},[]);return <main style={{maxWidth:700,margin:'24px auto',padding:16}}><NodeParameters loadUplinkInventory={load} mode=${JSON.stringify(target === 'web' ? 'member' : 'instance')} value={value} onPatch={patch=>setValue(old=>({...old,...patch}))} onValidityChange={setValid}/><button disabled={!valid} id="save">Save fixture</button><button id="saved-config" onClick={()=>setValue({mtu:1280,uplink:{mode:'manual',interfaces:['old adapter']}})}>Load saved fixture</button><pre id="value" style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{JSON.stringify(value)}</pre></main>};i18nReady.then(()=>createRoot(document.getElementById('root')).render(<React.Suspense fallback="Loading"><Fixture/></React.Suspense>));`;
-  await esbuild.build({ stdin: { contents: unsupported ? mobileFixture : desktopFixture, resolveDir: frontend, loader: 'tsx' }, outfile, bundle: true, platform: 'browser', format: 'esm', jsx: 'automatic', logLevel: 'silent' });
+  await esbuild.build({ stdin: { contents: unsupported ? mobileFixture : desktopFixture, resolveDir: frontend, loader: 'tsx' }, outfile, bundle: true, platform: 'browser', format: 'esm', jsx: 'automatic', loader: { '.svg': 'dataurl' }, logLevel: 'silent' });
   const bundle = await readFile(outfile);
   const server = createServer(async (request, response) => {
     try {
@@ -56,12 +56,13 @@ for (const target of ['web', 'gui', 'gui-android', 'gui-ios']) test(`${target} u
     await editor.locator('.node-parameters').waitFor();
     assert.equal(await editor.getByRole('combobox', { name: '上联网卡选择', exact: true }).count(), 0);
     assert.equal(await editor.getByRole('textbox', { name: '允许使用的接口', exact: true }).count(), 0);
+    assert.equal(await editor.getByRole('checkbox', { name: '绑定网络接口', exact: true }).count(), 0);
     const save = editor.getByRole('button', { name: '保存', exact: true });
     assert.equal(await save.isEnabled(), true);
     await save.click();
     await page.waitForFunction(() => window.__UPLINK_CAPTURE__?.length === 2);
     const captured = await page.evaluate(() => window.__UPLINK_CAPTURE__);
-    for (const config of captured) { assert.equal(config.uplink, undefined); assert.equal(config.network_name, 'Mobile fixture'); }
+    for (const config of captured) { assert.equal(config.uplink, undefined); assert.equal(config.bind_device, false); assert.equal(config.network_name, 'Mobile fixture'); }
     assert.deepEqual(await page.evaluate(() => window.__UPLINK_ORIGINAL__.uplink), { mode: 'manual', interfaces: ['eth0'] });
     assert.deepEqual(errors, []);
     return;

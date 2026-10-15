@@ -1,4 +1,5 @@
 import { normalizeUplinkInventory } from '../../../easytier-web/frontend-lib/src/modules/uplinkInventoryRpc'
+import { normalizeUplinkForTarget } from '../../../easytier-web/frontend-lib/src/modules/uplinkCapabilities'
 import { invoke } from '@tauri-apps/api/core'
 import * as Network from '../../../easytier-web/frontend-lib/src/types/network'
 import type * as Api from '../../../easytier-web/frontend-lib/src/modules/api'
@@ -27,8 +28,8 @@ export const updateNetworkConfigState = (instanceId: string, disabled: boolean) 
 export const saveNetworkConfig = (cfg: Network.NetworkConfig) => invoke('save_network_config', { cfg: Network.toBackendNetworkConfig(cfg) })
 export const validateConfig = (cfg: Network.NetworkConfig) => invoke<Api.ValidateConfigResponse>('validate_config', { config: Network.toBackendNetworkConfig(cfg) })
 export async function getConfig(instanceId: string) { return Network.normalizeNetworkConfig(await invoke<Network.NetworkConfig>('get_config', { instanceId })) }
-export const sendConfigs = (enabledNetworks: string[]) => invoke('load_configs', {
-  configs: loadStoredConfigs().map(({ config, source }) => ({ config: Network.toBackendNetworkConfig(config), source })),
+export const sendConfigs = (enabledNetworks: string[], supportsUplinkSelection = true) => invoke('load_configs', {
+  configs: loadStoredConfigs().map(({ config, source }) => ({ config: Network.toBackendNetworkConfig(normalizeUplinkForTarget(config as unknown as Record<string, unknown>, supportsUplinkSelection) as unknown as Network.NetworkConfig), source })),
   enabledNetworks,
 })
 export const getNetworkMetas = (instanceIds: string[]) => invoke<Api.GetNetworkMetasResponse>('get_network_metas', { instanceIds })

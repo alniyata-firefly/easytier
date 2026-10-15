@@ -11,6 +11,7 @@ import { InstanceConfigEditor } from '../components/InstanceConfigEditor';
 import { InstanceAcl, InstanceLogger, InstanceNodeInfo, InstancePeers, InstanceRoutes, InstanceRunningConfig } from '../components/InstanceRuntimePanels';
 import { NodeMetrics } from '../components/NodeMetrics';
 import { canChangeInstanceState, canDeleteInstance as deletable, canEditInstance as editable, normalizeInstanceMeta as normalizeMeta } from '../components/InstancePermissions';
+import { supportsUplinkSelectionForOs } from '../../../frontend-lib/src/modules/uplinkCapabilities';
 
 type InstanceRow = { id: string; running: boolean; meta?: NetworkMeta & { instance_name?: string }; centralName?: string };
 type Action = 'edit' | 'new' | 'stop' | 'start' | 'delete';
@@ -101,7 +102,7 @@ export function DevicePage({ api, deviceId, instanceId, onTitleChange }: { api: 
       </div>
     </> : null}
     <Dialog open={!!action && !!target} title={action === 'new' ? t('instance.newDialog') : action === 'edit' ? t('instance.editDialog') : action === 'delete' ? t('actions.deleteInstance') : action === 'stop' ? t('actions.stopInstance') : t('actions.startInstance')} onClose={close} wide={action === 'new' || action === 'edit'}>
-      {(action === 'new' || action === 'edit') && target ? <InstanceConfigEditor key={`${deviceId}:${target.id}`} remote={remote} instanceId={target.id} isNew={action === 'new'} online={online} onBusyChange={setBusy} checkPermission={() => checkPermission(target, action)} onSaved={mode => { setAction(undefined); setTarget(undefined); refresh(); notice({ ns: 'devices', key: mode === 'run' ? 'notice.configRun' : 'notice.configSaved' }); navigate(devicePath(deviceId, target.id)); }}/> : <>
+      {(action === 'new' || action === 'edit') && target ? <InstanceConfigEditor key={`${deviceId}:${target.id}`} remote={remote} instanceId={target.id} isNew={action === 'new'} online={online} supportsUplinkSelection={supportsUplinkSelectionForOs(device?.device_os?.os_type)} onBusyChange={setBusy} checkPermission={() => checkPermission(target, action)} onSaved={mode => { setAction(undefined); setTarget(undefined); refresh(); notice({ ns: 'devices', key: mode === 'run' ? 'notice.configRun' : 'notice.configSaved' }); navigate(devicePath(deviceId, target.id)); }}/> : <>
         {error && <Alert tone="error">{error}</Alert>}
         <p>{action === 'delete' ? t('instance.deleteHint') : action === 'stop' ? t('instance.stopHint') : t('instance.startHint')}</p>
         <p className="mono">{target?.id}</p>

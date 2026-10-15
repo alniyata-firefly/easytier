@@ -101,6 +101,7 @@ export interface DeviceInfo {
     networks?: Array<DeviceNetwork>;
     online?: boolean;
     last_seen?: string;
+    device_os?: { os_type?: string; version?: string; distribution?: string };
 }
 
 export function buildDeviceInfo(device: any): DeviceInfo {
@@ -118,6 +119,7 @@ export function buildDeviceInfo(device: any): DeviceInfo {
         networks: device.networks ?? [],
         online: device.online ?? false,
         last_seen: device.last_seen,
+        device_os: device.info?.device_os,
     };
 
     return dev_info;
