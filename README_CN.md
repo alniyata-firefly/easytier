@@ -27,6 +27,7 @@
 - Web 与客户端统一使用自行绘制的[蓝色三节点 SVG 标识](assets/brand/easytier.svg)。
 - 网络统一配置压缩、KCP/QUIC、加密、直连协议和 DNS 后缀，向受管成员及服务端网关下发。网络明确值覆盖成员设置，省略的项沿用原值；实际变更可能重建网络实例并短暂重连。
 - 补齐自定义 STUN、中转限速与策略、虚拟 IPv6、完整 SOCKS5 监听地址、端口白名单、实例名及 Linux 命名空间等管理配置接口，参见[配置与下发语义](docs/central-network-connectivity.md)。
+- Android/iOS 隐藏不支持的上联网卡选择与绑定控件，导入和保存本地配置时清理这些选项；桌面端保留对应能力。
 
 平面界面的视觉参考来自 [UniFi Network 10.5 官方介绍](https://blog.ui.com/article/introducing-network-10-5)及 [UniFi Design Center](https://design.ui.com/)。本项目不是 Ubiquiti 官方项目，也未获其官方背书，不主张获得其商标或图标的使用授权。新三节点标识在本仓库中自行绘制，并非从这些网站提取的图标。具体设计约定见 [DESIGN.md](easytier-web/frontend/DESIGN.md)。
 

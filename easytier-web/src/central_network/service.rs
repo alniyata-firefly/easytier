@@ -578,16 +578,17 @@ impl CentralNetworkService {
                                 .map_err(|error| {
                                     CentralNetworkServiceError::Conflict(error.to_string())
                                 })?;
-                            if owned.iter().any(|config| {
+                            if !owned.iter().any(|config| {
                                 running
                                     .inst_ids
                                     .contains(&config.instance_id.into())
                             }) {
-                                return Err(CentralNetworkServiceError::Conflict(
-                                    "device still has running managed instances".into(),
-                                ));
+                                return Ok(());
                             }
-                            return Ok(());
+                            // A restored/failed instance can outlive an older
+                            // heartbeat's applied acknowledgement. Keep the
+                            // device and its intent until the actual Core list
+                            // is clear, within this operation's existing deadline.
                         }
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
@@ -3030,6 +3031,15 @@ mod tests {
 
     #[tokio::test]
     async fn device_delete_waits_for_core_shutdown_and_restores_intent_on_failure() {
+        device_delete_runtime_rollback(false).await;
+    }
+
+    #[tokio::test]
+    async fn device_delete_cleans_failed_core_objects_before_committing_or_rolling_back() {
+        device_delete_runtime_rollback(true).await;
+    }
+
+    async fn device_delete_runtime_rollback(fail_core_start: bool) {
         use easytier::{
             instance::factory::native_instance_manager,
             proto::rpc::standalone::{runtime_udp_tunnel_dialer, runtime_udp_tunnel_listener},
@@ -3072,6 +3082,17 @@ mod tests {
             .await
             .unwrap();
         let network_id = Uuid::parse_str(&network.network_id).unwrap();
+        // A real occupied loopback listener makes startup fail after Core has
+        // created its instance object. It must still be removed at deletion.
+        let occupied_listener = if fail_core_start {
+            Some(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap())
+        } else {
+            None
+        };
+        let listener_urls = occupied_listener
+            .as_ref()
+            .map(|listener| vec![format!("tcp://{}", listener.local_addr().unwrap())])
+            .unwrap_or_default();
         service
             .add_members(
                 user_id,
@@ -3093,6 +3114,12 @@ mod tests {
                     no_tun: Some(true),
                     disable_ipv6: Some(true),
                     multi_thread: Some(false),
+                    disable_upnp: Some(true),
+                    bind_device: Some(false),
+                    disable_udp_hole_punching: Some(true),
+                    disable_tcp_hole_punching: Some(true),
+                    disable_sym_hole_punching: Some(true),
+                    listener_urls,
                     ..Default::default()
                 },
             )
@@ -3114,9 +3141,36 @@ mod tests {
             None,
         );
         wait_for(|| core.config(network_id).is_some()).await;
+        if fail_core_start {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    if let Some(session) = service
+                        .client_manager
+                        .get_session_by_machine_id(user_id, &device)
+                        && session.get_heartbeat_req().await.is_some_and(|request| {
+                            request
+                                .failed_network_instances
+                                .contains(&network_id.into())
+                        })
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the real failed instance must appear in a heartbeat before deletion");
+        }
         sqlx::query("CREATE TRIGGER fail_device_delete BEFORE DELETE ON devices BEGIN SELECT RAISE(ABORT, 'forced deletion failure'); END")
             .execute(&db.inner()).await.unwrap();
-        assert!(service.delete_device(user_id, device, true).await.is_err());
+        let error = service
+            .delete_device(user_id, device, true)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, CentralNetworkServiceError::Database(_)),
+            "runtime cleanup must complete before the forced database rollback: {error}"
+        );
         assert_eq!(service.load(user_id, network_id).await.unwrap(), before);
         assert!(db.list_blocked_devices(user_id).await.unwrap().is_empty());
         wait_for(|| core.config(network_id).is_some()).await;

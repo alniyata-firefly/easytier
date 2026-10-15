@@ -25,6 +25,10 @@ pub(crate) struct UplinkInterface {
     pub addresses: Vec<Addr>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("no available allowed uplink interface; refusing VPN fallback")]
+pub(crate) struct NoAvailableUplink;
+
 #[derive(Clone, Debug)]
 struct ObservedInterface {
     interface: NetworkInterface,
@@ -265,7 +269,7 @@ fn select_interfaces(
         }
     }
     if selected.is_empty() {
-        bail!("no available allowed uplink interface; refusing VPN fallback");
+        return Err(NoAvailableUplink.into());
     }
     Ok(selected)
 }

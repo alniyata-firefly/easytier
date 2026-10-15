@@ -533,7 +533,38 @@ impl VirtualUdpSocketFactory for RuntimeUdpSocketFactory {
             options.reuse_addr = true;
             options.reuse_port = true;
         }
-        let socket = create_udp_socket(&options).await?;
+        let automatic_wildcard =
+            options.context.uplink.as_ref().is_some_and(|policy| {
+                policy.mode == easytier_core::config::uplink::UplinkMode::Auto
+            }) && options
+                .local_addr
+                .is_none_or(|address| address.ip().is_unspecified())
+                && options.bind_device.as_deref().is_none_or(str::is_empty);
+        let (socket, awaiting_uplink) = match create_udp_socket(&options).await {
+            Ok(socket) => (socket, false),
+            Err(error) if automatic_wildcard => {
+                // validate_local_bind reports through io::Error, so confirm
+                // the typed inventory condition directly rather than matching
+                // a formatted error or swallowing a socket/protection error.
+                let unavailable = crate::common::uplink::selected_interfaces(&options.context)
+                    .await
+                    .err()
+                    .is_some_and(|error| error.is::<crate::common::uplink::NoAvailableUplink>());
+                if !unavailable {
+                    return Err(error);
+                }
+                // The destination is unknown at bind time. Keep loopback usable
+                // while every physical uplink is down, without giving remote
+                // traffic an unrestricted fallback socket. The returned socket
+                // retains its policy: non-loopback sends and receives still
+                // require an allowed uplink, and a later uplink can join its pool.
+                let mut loopback_bind = options.clone();
+                loopback_bind.context.uplink = None;
+                loopback_bind.bind_device = Some(String::new());
+                (create_udp_socket(&loopback_bind).await?, true)
+            }
+            Err(error) => return Err(error),
+        };
         let port_lease = if options.context.uplink.is_some() {
             Some(lease_uplink_port(
                 &options.context,
@@ -545,7 +576,7 @@ impl VirtualUdpSocketFactory for RuntimeUdpSocketFactory {
             None
         };
         let mut uplink_sockets = Vec::new();
-        if per_interface_sockets {
+        if per_interface_sockets && !awaiting_uplink {
             let local = socket.local_addr()?;
             let interfaces = crate::common::uplink::selected_interfaces(&options.context).await?;
             let mut last_error = None;
@@ -743,6 +774,68 @@ mod tests {
             .bind_udp(UdpBindOptions::direct_connect().with_context(invalid_manual_uplink()))
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn automatic_uplink_udp_keeps_loopback_without_allowing_unrestricted_fallback() {
+        let context = SocketContext::default()
+            .with_uplink(Some(easytier_core::config::uplink::UplinkConfig::default()));
+        let no_uplink = match crate::common::uplink::selected_interfaces(&context).await {
+            Ok(_) => false,
+            Err(error) if error.is::<crate::common::uplink::NoAvailableUplink>() => true,
+            Err(error) => panic!("unexpected uplink inventory failure: {error}"),
+        };
+        let socket = RuntimeUdpSocketFactory::new()
+            .bind_udp(UdpBindOptions::direct_connect().with_context(context))
+            .await
+            .expect("automatic policy must permit local traffic even with no physical uplink");
+        assert!(
+            socket.socket_context().uplink.is_some(),
+            "the wildcard socket must retain its underlay restriction"
+        );
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket
+            .send_to(b"loopback", server.local_addr().unwrap())
+            .await
+            .unwrap();
+        let mut buffer = [0u8; 32];
+        let (length, source) =
+            tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&buffer[..length], b"loopback");
+        server.send_to(b"reply", source).await.unwrap();
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&buffer[..length], b"reply");
+        if no_uplink {
+            // In the loopback-only integration namespace this branch exercises
+            // the exact outage condition. It never sends a public test packet.
+            assert!(
+                socket
+                    .send_to(b"must-not-send", "203.0.113.1:9".parse().unwrap())
+                    .await
+                    .is_err()
+            );
+            assert_ne!(
+                socket
+                    .destination_allowed(Some("203.0.113.1".parse().unwrap()))
+                    .await
+                    .ok(),
+                Some(true)
+            );
+        }
+        let manual = RuntimeUdpSocketFactory::new()
+            .bind_udp(UdpBindOptions::direct_connect().with_context(invalid_manual_uplink()))
+            .await;
+        assert!(
+            manual.is_err(),
+            "missing manual uplinks must remain a bind-time error"
+        );
     }
 
     #[tokio::test]

@@ -27,6 +27,7 @@ The downstream work adds and adapts:
 - A shared, independently drawn [blue three-node SVG identity](assets/brand/easytier.svg) for the console and client packages.
 - Network-level compression, KCP/QUIC, encryption, protocol and DNS suffix policies delivered to managed members and the embedded Gateway. Policies override explicit member values; omitted fields preserve existing settings. Runtime changes can recreate network instances and briefly reconnect them.
 - Management configuration support for custom STUN servers, relay limits and policies, virtual IPv6, complete SOCKS5 bind URLs, port whitelists, instance names and Linux namespaces. See [configuration and delivery semantics](docs/central-network-connectivity.md).
+- Android/iOS hide unsupported uplink selection and interface binding controls and clear those options when importing or saving local configurations; desktop clients retain them.
 
 The flat interface takes visual inspiration from the official [UniFi Network 10.5 presentation](https://blog.ui.com/article/introducing-network-10-5) and [UniFi Design Center](https://design.ui.com/). This is not a Ubiquiti project, is not endorsed by Ubiquiti, and does not claim a license to its branding or icons. The new three-node mark is drawn in this repository rather than extracted from those sites. Design details are documented in [DESIGN.md](easytier-web/frontend/DESIGN.md).
 

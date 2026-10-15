@@ -292,6 +292,10 @@ struct ReconcileRound {
     req: HeartbeatRequest,
     machine_id: uuid::Uuid,
     user_id: i32,
+    // Failed instances may still own a Core object and resources. Preserve the
+    // actual presence snapshot for metadata/deletion; only desired-instance
+    // restart planning treats those objects as not running.
+    present_inst_ids: HashSet<String>,
     running_inst_ids: HashSet<String>,
     local_configs: Vec<crate::db::entity::user_running_network_configs::Model>,
     delete_instance_ids: HashSet<String>,
@@ -399,13 +403,12 @@ async fn prepare_reconcile_round(
     } else {
         ReconcileScope::Full
     };
-    let running_inst_ids = match running_instance_ids_for_round(
+    let present_inst_ids = match present_instance_ids_for_round(
         rpc_client,
         &req,
         user_id,
         machine_id,
         should_apply_runtime_revision,
-        &failed_instance_ids,
     )
     .await
     {
@@ -413,6 +416,10 @@ async fn prepare_reconcile_round(
         RoundStatus::Skip => return RoundStatus::Skip,
         RoundStatus::Stop => return RoundStatus::Stop,
     };
+    let running_inst_ids = present_inst_ids
+        .difference(&failed_instance_ids)
+        .cloned()
+        .collect();
 
     let (local_configs, delete_instance_ids) = match load_round_configs(
         storage, user_id, machine_id, &scope,
@@ -449,6 +456,7 @@ async fn prepare_reconcile_round(
         req,
         machine_id,
         user_id,
+        present_inst_ids,
         running_inst_ids,
         local_configs,
         delete_instance_ids,
@@ -569,20 +577,19 @@ async fn load_round_configs(
     Ok(Some((configs, delete_instance_ids)))
 }
 
-async fn running_instance_ids_for_round(
+async fn present_instance_ids_for_round(
     rpc_client: &mut SessionRpcClient,
     req: &HeartbeatRequest,
     user_id: i32,
     machine_id: uuid::Uuid,
     should_apply_runtime_revision: bool,
-    failed_instance_ids: &HashSet<String>,
 ) -> RoundStatus<HashSet<String>> {
-    // Both sources must agree on which instances are running: instances
-    // known to have failed are excluded so the reconciler restarts them
-    // instead of hot-patching a stopped instance forever.
+    // Cleanup must see every object returned by Core, including failed ones.
+    // Healthy-running filtering happens only after preserving this snapshot.
     let ids = if !should_apply_runtime_revision {
         req.running_network_instances
             .iter()
+            .chain(&req.failed_network_instances)
             .map(|x| x.to_string())
             .collect::<HashSet<_>>()
     } else {
@@ -602,11 +609,7 @@ async fn running_instance_ids_for_round(
             }
         }
     };
-    RoundStatus::Ready(
-        ids.into_iter()
-            .filter(|id| !failed_instance_ids.contains(id))
-            .collect(),
-    )
+    RoundStatus::Ready(ids)
 }
 
 async fn sync_running_sources_for_round(
@@ -618,7 +621,7 @@ async fn sync_running_sources_for_round(
         return RoundStatus::Ready(None);
     }
 
-    let ret = if round.running_inst_ids.is_empty() {
+    let ret = if round.present_inst_ids.is_empty() {
         Ok(Vec::new())
     } else {
         rpc_client
@@ -626,7 +629,7 @@ async fn sync_running_sources_for_round(
                 BaseController::default(),
                 ListNetworkInstanceMetaRequest {
                     inst_ids: managed_config::parse_instance_ids(
-                        round.running_inst_ids.iter().cloned(),
+                        round.present_inst_ids.iter().cloned(),
                     ),
                 },
             )
@@ -715,7 +718,7 @@ async fn cleanup_stale_web_source_instances(
     };
 
     let running_web_inst_ids = managed_config::running_web_source_instance_ids(
-        &round.running_inst_ids,
+        &round.present_inst_ids,
         &db_web_inst_ids,
         running_metas,
     );
@@ -790,7 +793,7 @@ async fn cleanup_patch_deleted_instances(
 ) -> RoundStatus<ReconcileOutcome> {
     let running_web_instance_ids: HashSet<String> = match running_metas {
         Some(metas) => managed_config::running_web_source_instance_ids(
-            &round.running_inst_ids,
+            &round.present_inst_ids,
             delete_instance_ids,
             Some(metas),
         )
@@ -798,7 +801,7 @@ async fn cleanup_patch_deleted_instances(
         .cloned()
         .collect(),
         None => round
-            .running_inst_ids
+            .present_inst_ids
             .intersection(delete_instance_ids)
             .cloned()
             .collect(),
@@ -1429,6 +1432,7 @@ mod tests {
                 req,
                 machine_id,
                 user_id: owner,
+                present_inst_ids: HashSet::new(),
                 running_inst_ids: HashSet::new(),
                 local_configs: Vec::new(),
                 delete_instance_ids: HashSet::new(),
@@ -1765,6 +1769,7 @@ mod tests {
             req,
             machine_id,
             user_id: 7,
+            present_inst_ids: HashSet::new(),
             running_inst_ids: HashSet::new(),
             local_configs: Vec::new(),
             delete_instance_ids: HashSet::new(),
@@ -2197,6 +2202,7 @@ mod tests {
             req: HeartbeatRequest::default(),
             machine_id: uuid::Uuid::new_v4(),
             user_id: 1,
+            present_inst_ids: HashSet::new(),
             running_inst_ids: HashSet::new(),
             local_configs: Vec::new(),
             delete_instance_ids: HashSet::new(),
