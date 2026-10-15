@@ -1,6 +1,16 @@
 # EasyTier 平面管理控制台设计规范
 
-用户于2026-10-14明确取消原拟物方案。本文替代旧四份拟物简报的视觉要求，保留实际 API、权限、设备与网络行为。当前仅运行本机预览。
+用户于2026-10-14明确取消原拟物方案。本文替代旧四份拟物简报的视觉要求，保留实际 API、权限、设备与网络行为。具体版本的构建、部署和验证状态以对应 Release 的交付记录为准。
+
+## 设计与标识来源
+
+本项目是 [EasyTier 的下游适配](../../README_CN.md#项目来源与下游改造)，上游为 [EasyTier/EasyTier](https://github.com/EasyTier/EasyTier)，基线提交和代码许可见仓库 README 与 [LICENSE](../../LICENSE)。本文描述下游自行实现的 React Web、Windows 和 Android 界面约定，不代表 EasyTier 上游或 Ubiquiti 官方设计规范。
+
+视觉参考包括 [UniFi Network 10.5 官方介绍](https://blog.ui.com/article/introducing-network-10-5)、[UniFi Design Center 机架演示](https://design.ui.com/projects/default/rack)和[拓扑演示](https://design.ui.com/projects/8176bab0-48eb-4465-877a-e81d52c5a815/topology)。参考范围是布局、信息密度、留白、控件和线性图标风格。本项目不是 Ubiquiti 官方项目，未获其官方背书，也不将参考站点视为商标或图标的授权来源。
+
+统一品牌图标是本仓库自行绘制的[蓝色三节点 SVG](../../assets/brand/easytier.svg)：以三个节点和连线表达组网，网页图标、安装包与应用图标由同一份矢量标识生成。它不是从 UniFi 页面提取的 SVG，也不是 Ubiquiti 官方标识。上游原有作者、商标归属和许可说明继续保留。
+
+HarmonyOS Sans SC 来自 Huawei 官方网页字体切片，遵循 [HarmonyOS Sans Fonts License Agreement](public/fonts/LICENSE-HarmonyOS-Sans.txt)；Inter 来自 Google Fonts，遵循 [SIL Open Font License 1.1](public/fonts/LICENSE-Inter-GoogleFonts.txt)。保留字体版权、协议、[来源清单](public/fonts/provenance.json)和[许可页面](public/fonts/font-notices.html)，不重新切割或修改官方字体文件。
 
 ## 依据与优先级
 

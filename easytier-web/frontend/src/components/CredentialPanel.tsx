@@ -6,9 +6,10 @@ import { useResource } from '../lib/hooks';
 import { RuntimeDisplay } from '../lib/shared';
 import { Alert, Button, Dialog, Empty, Field, Panel, Status, useNotice } from './ui';
 import { errorMessage, NetworkValidationError, splitList } from './NetworkSettingsForm';
+import { MAX_JOIN_CREDENTIAL_SECONDS, resolveLifetime } from '../lib/lifetime';
 
 type GrantForm = { id: string; ttl: string; groups: string; cidrs: string; reusable: boolean; relay: boolean; rotate: boolean };
-const blankForm = (): GrantForm => ({ id: '', ttl: '24', groups: '', cidrs: '', reusable: true, relay: false, rotate: false });
+const blankForm = (): GrantForm => ({ id: '', ttl: '1', groups: '', cidrs: '', reusable: true, relay: false, rotate: false });
 export function CredentialPanel({ api, network, gateway, onChanged }: { api: ApiClient; network: CentralNetworkDetail; gateway?: GatewayInfo; onChanged: () => void }) {
     const { t } = useTranslation('networks');
     const resource = useResource(() => api.list_credentials(network.network_id), `network-credentials:${network.network_id}`, 5000);
@@ -32,14 +33,14 @@ export function CredentialPanel({ api, network, gateway, onChanged }: { api: Api
     const change = <K extends keyof GrantForm>(key: K, value: GrantForm[K]) => setForm(previous => ({ ...previous, [key]: value }));
     const save = async (event: FormEvent) => {
         event.preventDefault(); if (!editor || busy) return; setError(null);
-        const hours = form.ttl === '' ? undefined : Number(form.ttl);
-        if ((editor === 'new' && hours === undefined) || (hours !== undefined && (!Number.isFinite(hours) || hours <= 0 || hours > 8760))) { setError(new NetworkValidationError('credentials.invalidTtl')); return; }
+        const lifetime = editor !== 'new' && form.ttl === '' ? { valid: true as const, seconds: undefined } : resolveLifetime('custom', form.ttl, MAX_JOIN_CREDENTIAL_SECONDS);
+        if (!lifetime.valid) { setError(new NetworkValidationError('credentials.invalidTtl')); return; }
         setBusy(true);
         try {
             const grant = { acl_groups: splitList(form.groups), allowed_proxy_cidrs: splitList(form.cidrs), allow_relay: form.relay };
             const credential = editor === 'new'
-                ? await api.generate_credential(network.network_id, Math.floor(hours! * 3600), form.reusable, form.id.trim() || undefined, grant)
-                : await api.update_credential(network.network_id, editor.credential_id, { ...grant, ttl_seconds: hours === undefined ? undefined : Math.floor(hours * 3600), reusable: editor.device_id ? false : form.reusable, rotate_secret: form.rotate });
+                ? await api.generate_credential(network.network_id, lifetime.seconds!, form.reusable, form.id.trim() || undefined, grant)
+                : await api.update_credential(network.network_id, editor.credential_id, { ...grant, ttl_seconds: lifetime.seconds, reusable: editor.device_id ? false : form.reusable, rotate_secret: form.rotate });
             if (editor === 'new' || form.rotate) { setRevealedAt(Date.now()); setRevealed(credential); setFormat('cli'); }
             setEditor(null); resource.refresh(); onChanged(); notice({ key: 'credentials.saved', ns: 'networks' }, 'success');
         } catch (failure) { setError(failure); }
@@ -69,7 +70,7 @@ export function CredentialPanel({ api, network, gateway, onChanged }: { api: Api
             {error !== null && <Alert tone="error">{errorMessage(error)}</Alert>}
             <form className="form-stack" onSubmit={save}>
                 {editor === 'new' ? <Field label={t('credentials.name')}><input aria-label={t('credentials.name')} value={form.id} onChange={event => change('id', event.target.value)} disabled={busy} /></Field> : <p className="mono">{editor?.credential_id}</p>}
-                <Field label={t(editor === 'new' ? 'credentials.ttl' : 'credentials.resetTtl')}><input aria-label={t('credentials.ttlAria')} type="number" min="0.000278" max={8760} step="any" value={form.ttl} onChange={event => change('ttl', event.target.value)} required={editor === 'new'} disabled={busy} /></Field>
+                <Field label={t(editor === 'new' ? 'credentials.ttl' : 'credentials.resetTtl')}><input aria-label={t('credentials.ttlAria')} type="number" inputMode="numeric" min={1} max={MAX_JOIN_CREDENTIAL_SECONDS / 86400} step={1} value={form.ttl} onChange={event => change('ttl', event.target.value)} required={editor === 'new'} disabled={busy} /></Field>
                 <Field label={t('credentials.groups')}><textarea aria-label={t('credentials.groups')} rows={2} value={form.groups} onChange={event => change('groups', event.target.value)} disabled={busy} /></Field>
                 <Field label={t('credentials.cidrs')}><textarea aria-label={t('credentials.cidrs')} className="mono" rows={2} value={form.cidrs} onChange={event => change('cidrs', event.target.value)} disabled={busy} /></Field>
                 <label className="check-row"><input type="checkbox" checked={form.reusable} onChange={event => change('reusable', event.target.checked)} disabled={busy || (editor !== 'new' && !!editor?.device_id)} /><span>{t('credentials.reusable')}</span></label>

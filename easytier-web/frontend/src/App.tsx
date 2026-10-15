@@ -7,7 +7,7 @@ import {getApiBase} from './lib/api-host';
 import {navigate, useRoute} from './lib/router';
 import {errorDescriptor,errorMessage} from './lib/hooks';
 import i18n from './lib/i18n';
-import {Alert,Button,Dialog,Field,Icon,NoticeProvider,useNotice} from './components/ui';
+import {Alert,Button,Dialog,Field,Icon,BrandMark,NoticeProvider,useNotice} from './components/ui';
 
 const LoginPage=lazy(()=>import('./pages/LoginPage').then(module=>({default:module.LoginPage})));
 const OverviewPage=lazy(()=>import('./pages/OverviewPage').then(module=>({default:module.OverviewPage})));
@@ -72,7 +72,7 @@ function Console() {
     <a className="skip-link" href="#console-workspace" onClick={event=>{event.preventDefault();document.getElementById('console-workspace')?.focus();}}>{t('nav.skip')}</a>
     <header className="global-topbar">
       <button ref={navToggle} className="button ghost mobile-nav-toggle icon-only" type="button" aria-label={t(navOpen?'nav.close':'nav.open')} aria-expanded={navOpen} aria-controls="console-navigation" onClick={()=>setNavOpen(value=>!value)}><Icon name="menu"/></button>
-      <div className="topbar-brand"><span className="brand-mark"><Icon name="network" size={21}/></span><span>EasyTier</span></div>
+      <div className="topbar-brand"><span className="brand-mark"><BrandMark size={21}/></span><span>EasyTier</span></div>
       <nav className="topbar-breadcrumb" aria-label={t('nav.breadcrumb')}><ol>
         <li>{active==='overview'?<span aria-current="page">{title}</span>:<a href={`#${entries.find(entry=>entry.id===active)?.path}`} aria-current={!detailPath?'page':undefined}>{title}</a>}</li>
         {detailPath&&<li><Icon name="arrow" size={12}/><a href={`#${detailPath}`} aria-current={!parts[4]?'page':undefined}>{detail?.label||t(active==='networks'?'nav.networkDetail':'nav.deviceDetail')}</a></li>}

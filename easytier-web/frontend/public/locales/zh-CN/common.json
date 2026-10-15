@@ -13,6 +13,10 @@
   "closeNotice": "关闭提示",
   "detailTabs": "详情分类",
   "language": { "label": "语言", "zhCN": "简体中文", "en": "English" },
+  "duration": {
+    "custom": "自定义",
+    "days": "有效期（天）"
+  },
   "status": {
     "online": "在线",
     "offline": "离线",
@@ -41,6 +45,7 @@
     "timeout": "请求超时，请检查设备连接后重试。",
     "http": "请求失败（HTTP {{status}}），请检查输入后重试。",
     "network": "未能连接到服务，请检查网络后重试。",
-    "invalid": "操作未完成，请检查输入后重试。"
+    "invalid": "操作未完成，请检查输入后重试。",
+    "duration": "请输入 1 至 {{maxDays}} 之间的整数天数。"
   }
 }

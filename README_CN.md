@@ -1,4 +1,8 @@
-# EasyTier
+# EasyTier · 下游适配版
+
+<p align="center"><img src="assets/brand/easytier.svg" width="80" height="80" alt="EasyTier"/></p>
+
+上游项目状态：
 
 [![Github release](https://img.shields.io/github/v/tag/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/releases)
 [![GitHub](https://img.shields.io/github/license/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
@@ -10,6 +14,23 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/EasyTier/EasyTier)
 
 [简体中文](/README_CN.md) | [English](/README.md)
+
+## 项目来源与下游改造
+
+本仓库是独立维护的 **[EasyTier](https://github.com/EasyTier/EasyTier) 下游适配版本**。VPN 核心、通信协议、Tauri 客户端基础及上游文档来自 EasyTier 项目及其贡献者。本仓库记录的上游基线为 [`8b7f1f0196edb5b580829ed5f135050fb5853478`](https://github.com/EasyTier/EasyTier/commit/8b7f1f0196edb5b580829ed5f135050fb5853478)，提交日期为 2026 年 10 月 5 日，软件包版本为 `2.7.0`。本仓库的 `2.7.1` 为下游发布版本号，不代表 EasyTier 上游正式发布或认可。
+
+本仓库新增和适配的主要内容：
+
+- 中央网络管理、管理令牌接入、设备与网络成员管理，以及由节点确认结果的配置下发。
+- React Web 控制台，以及基于 React 的 Windows、Android 界面，保留 EasyTier Core 与 Tauri 的集成。
+- 多实例配置、服务器与节点资源观测、可选历史指标、IPv6 优先与 IPv4 回退，以及支持平台上的自动识别或手动选择上联网卡。
+- Web 与客户端统一使用自行绘制的[蓝色三节点 SVG 标识](assets/brand/easytier.svg)。
+
+平面界面的视觉参考来自 [UniFi Network 10.5 官方介绍](https://blog.ui.com/article/introducing-network-10-5)及 [UniFi Design Center](https://design.ui.com/)。本项目不是 Ubiquiti 官方项目，也未获其官方背书，不主张获得其商标或图标的使用授权。新三节点标识在本仓库中自行绘制，并非从这些网站提取的图标。具体设计约定见 [DESIGN.md](easytier-web/frontend/DESIGN.md)。
+
+项目保留上游的 **GNU LGPL 第 3 版**[许可证](LICENSE)及原有贡献者说明。内置 HarmonyOS Sans SC 和 Inter 分别遵循各自的[鸿蒙字体许可协议](easytier-web/frontend/public/fonts/LICENSE-HarmonyOS-Sans.txt)与 [SIL Open Font License 1.1](easytier-web/frontend/public/fonts/LICENSE-Inter-GoogleFonts.txt)；字体来源、未经修改的官方网页切片及许可记录见[字体来源清单](easytier-web/frontend/public/fonts/provenance.json)和[字体许可页面](easytier-web/frontend/public/fonts/font-notices.html)。
+
+下文保留的徽章、截图、文档、安装命令、发布链接、赞助和贡献者信息来自上游，相关链接指向原始 EasyTier 项目。本下游版本的安装包及对应源码请使用本仓库的 Releases。
 
 > ✨ 一个由 Rust 和 Tokio 驱动的简单、安全、去中心化的异地组网方案
 

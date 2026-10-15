@@ -16,7 +16,7 @@
     "listSeparator": ", "
   },
   "durations": {
-    "hours24": "24 hours",
+    "days1": "1 day",
     "days7": "7 days",
     "days30": "30 days"
   },
@@ -159,6 +159,7 @@
     "trustedIdentity": "Trusted administrator member",
     "identityHint": "Credential members join for a limited time. Trusted administrator members use the network identity.",
     "ttl": "Join credential lifetime",
+    "invalidTtl": "Enter a whole number of days between 1 and 365 for the join credential lifetime.",
     "removeTitle": "Remove network member",
     "removeConfirm": "Confirm removal",
     "removePrompt": "Remove {{member}} from {{network}} and remove its managed configuration for this network.",
@@ -271,9 +272,9 @@
     "editTitle": "Edit network join credential",
     "name": "Credential name",
     "nameHint": "Optional. Leave blank for the server to generate a unique name.",
-    "ttl": "Lifetime (hours)",
-    "resetTtl": "Reset lifetime from now (hours)",
-    "ttlAria": "Credential lifetime (hours)",
+    "ttl": "Lifetime (days)",
+    "resetTtl": "Reset lifetime from now (days)",
+    "ttlAria": "Credential lifetime (days)",
     "ttlHint": "Up to 365 days.",
     "resetTtlHint": "Leave blank to retain the current expiry time. A new value starts from this save.",
     "groups": "ACL permission groups",
@@ -298,7 +299,7 @@
     "formatCli": "Core command",
     "formatToml": "TOML configuration",
     "formatSecret": "Credential secret only",
-    "invalidTtl": "Lifetime must be greater than 0 and no more than 8,760 hours (365 days).",
+    "invalidTtl": "Enter a whole number of days between 1 and 365 for the credential lifetime.",
     "saved": "Network credential saved. Waiting for the peer to acknowledge it.",
     "deleted": "Network credential deleted.",
     "copied": "Copied.",

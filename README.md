@@ -1,4 +1,8 @@
-# EasyTier
+# EasyTier · Downstream adaptation
+
+<p align="center"><img src="assets/brand/easytier.svg" width="80" height="80" alt="EasyTier"/></p>
+
+Upstream project status:
 
 [![Github release](https://img.shields.io/github/v/tag/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/releases)
 [![GitHub](https://img.shields.io/github/license/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
@@ -10,6 +14,23 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/EasyTier/EasyTier)
 
 [简体中文](/README_CN.md) | [English](/README.md)
+
+## Project provenance and downstream changes
+
+This repository is an independently maintained **downstream adaptation of [EasyTier](https://github.com/EasyTier/EasyTier)**. The original VPN core, protocols, Tauri application foundation, and upstream documentation were created by the EasyTier project and its contributors. The upstream baseline recorded in this repository is [`8b7f1f0196edb5b580829ed5f135050fb5853478`](https://github.com/EasyTier/EasyTier/commit/8b7f1f0196edb5b580829ed5f135050fb5853478), dated October 5, 2026, with package version `2.7.0`. The `2.7.1` version used here identifies this downstream release; it does not imply an official upstream release or endorsement.
+
+The downstream work adds and adapts:
+
+- Central network administration, device enrollment with management tokens, network membership, and configuration delivery with node confirmation.
+- A React Web console and React-based Windows and Android interfaces, retaining the EasyTier Core and Tauri integration.
+- Multi-instance configuration, server and node resource observations, optional metrics history, IPv6 preference with IPv4 fallback, and automatic or manually selected uplink interfaces on supported platforms.
+- A shared, independently drawn [blue three-node SVG identity](assets/brand/easytier.svg) for the console and client packages.
+
+The flat interface takes visual inspiration from the official [UniFi Network 10.5 presentation](https://blog.ui.com/article/introducing-network-10-5) and [UniFi Design Center](https://design.ui.com/). This is not a Ubiquiti project, is not endorsed by Ubiquiti, and does not claim a license to its branding or icons. The new three-node mark is drawn in this repository rather than extracted from those sites. Design details are documented in [DESIGN.md](easytier-web/frontend/DESIGN.md).
+
+The project retains the upstream **GNU LGPL version 3** [LICENSE](LICENSE) and existing contributor notices. Bundled HarmonyOS Sans SC and Inter keep their own licenses: the [HarmonyOS Sans Fonts License Agreement](easytier-web/frontend/public/fonts/LICENSE-HarmonyOS-Sans.txt) and [SIL Open Font License 1.1](easytier-web/frontend/public/fonts/LICENSE-Inter-GoogleFonts.txt). Font origins and original, unmodified web subsets are recorded in [font provenance](easytier-web/frontend/public/fonts/provenance.json) and the [font notices](easytier-web/frontend/public/fonts/font-notices.html).
+
+The badges, screenshots, documentation, installation commands, release links, sponsorship information, and contributor acknowledgments below are retained from upstream. They refer to the original EasyTier project; use this repository's Releases for downstream binaries and the matching source revision.
 
 > ✨ A simple, secure, decentralized virtual private network solution powered by Rust and Tokio
 

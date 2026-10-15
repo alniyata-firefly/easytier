@@ -16,7 +16,7 @@
     "listSeparator": "、"
   },
   "durations": {
-    "hours24": "24 小时",
+    "days1": "1 天",
     "days7": "7 天",
     "days30": "30 天"
   },
@@ -159,6 +159,7 @@
     "trustedIdentity": "受信任管理员成员",
     "identityHint": "设备凭据成员按期限入网；受信任管理员成员使用网络身份。",
     "ttl": "入网凭据有效期",
+    "invalidTtl": "入网凭据有效期请输入 1 至 365 之间的整数天数。",
     "removeTitle": "移出网络成员",
     "removeConfirm": "确认移出",
     "removePrompt": "将 {{member}} 移出 {{network}}，并回收该网络的托管配置。",
@@ -271,9 +272,9 @@
     "editTitle": "编辑网络入网凭据",
     "name": "凭据名称",
     "nameHint": "选填；留空由服务器生成唯一名称。",
-    "ttl": "有效期（小时）",
-    "resetTtl": "从现在重新设置有效期（小时）",
-    "ttlAria": "凭据有效期（小时）",
+    "ttl": "有效期（天）",
+    "resetTtl": "从现在重新设置有效期（天）",
+    "ttlAria": "凭据有效期（天）",
     "ttlHint": "最长 365 天。",
     "resetTtlHint": "留空保留当前到期时间；填写后从本次保存开始计算。",
     "groups": "ACL 权限组",
@@ -298,7 +299,7 @@
     "formatCli": "Core 命令",
     "formatToml": "TOML 配置",
     "formatSecret": "仅凭据密钥",
-    "invalidTtl": "有效期必须大于 0 且不超过 8760 小时（365 天）。",
+    "invalidTtl": "凭据有效期请输入 1 至 365 之间的整数天数。",
     "saved": "网络凭据已保存，等待节点确认配置。",
     "deleted": "网络凭据已删除。",
     "copied": "已复制。",
