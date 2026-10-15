@@ -2423,6 +2423,7 @@ virtual_ip = "10.82.0.2/24"
                     inst_id: Some(instance_id.into()),
                     config: Some(NetworkConfig {
                         network_name: Some("replacement".to_owned()),
+                        instance_name: Some("renamed-before-rollback".to_owned()),
                         networking_method: Some(NetworkingMethod::Standalone.into()),
                         ..Default::default()
                     }),
@@ -2432,7 +2433,12 @@ virtual_ip = "10.82.0.2/24"
             )
             .await;
 
-        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("post-run hook failed")
+        );
         assert_eq!(
             instances
                 .instance(instance_id)
@@ -2464,7 +2470,7 @@ virtual_ip = "10.82.0.2/24"
             instance::manager::InstanceFactory,
             management::{
                 ConfigFileControl, ConfigFilePermission, ConfigFileStorage, InstanceManager,
-                ProcessManagementRpc, config_source_to_rpc,
+                ProcessManagement, ProcessManagementRpc, config_source_to_rpc,
             },
         };
         use easytier_proto::{
@@ -2505,6 +2511,7 @@ virtual_ip = "10.82.0.2/24"
         struct MemoryStorage {
             files: StdMutex<HashMap<PathBuf, Vec<u8>>>,
             readonly: AtomicBool,
+            reject_writes: AtomicBool,
         }
 
         #[async_trait]
@@ -2523,6 +2530,10 @@ virtual_ip = "10.82.0.2/24"
             }
 
             async fn write(&self, path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+                anyhow::ensure!(
+                    !self.reject_writes.load(Ordering::Relaxed),
+                    "simulated atomic persistence failure"
+                );
                 self.files
                     .lock()
                     .unwrap()
@@ -2653,15 +2664,142 @@ virtual_ip = "10.82.0.2/24"
         assert_eq!(*storage.files.lock().unwrap(), files_before);
         storage.readonly.store(false, Ordering::Relaxed);
 
+        let explicit_name = |mut request: RunNetworkInstanceRequest, name: &str| {
+            request.config.as_mut().unwrap().instance_name = Some(name.to_owned());
+            request
+        };
+        let persisted_name = |path: &str| {
+            let files = storage.files.lock().unwrap();
+            let bytes = files.get(&PathBuf::from(path)).unwrap();
+            TomlConfig::new_from_str(std::str::from_utf8(bytes).unwrap())
+                .unwrap()
+                .get_inst_name()
+        };
+        // A failed write must leave the old runtime and file intact, including
+        // its name; the request must not stop the old instance first.
+        storage.reject_writes.store(true, Ordering::Relaxed);
+        assert!(
+            rpc.run_network_instance(
+                BaseController::default(),
+                explicit_name(
+                    update(first, "shared-network", originals[0].2),
+                    "rejected-name"
+                ),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(instances.config(first).unwrap().dump(), before);
+        assert_eq!(*storage.files.lock().unwrap(), files_before);
+        storage.reject_writes.store(false, Ordering::Relaxed);
+
+        rpc.run_network_instance(
+            BaseController::default(),
+            explicit_name(
+                update(first, "shared-network", originals[0].2),
+                "renamed-main",
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            instances.config(first).unwrap().get_inst_name(),
+            "renamed-main"
+        );
+        assert_eq!(
+            instances.instance(first).unwrap().instance_name(),
+            "renamed-main"
+        );
+        assert_eq!(persisted_name("main.toml"), "renamed-main");
+        assert!(
+            !storage
+                .files
+                .lock()
+                .unwrap()
+                .contains_key(&PathBuf::from("renamed-main.toml"))
+        );
+
+        // A legacy request still preserves the independent name after a rename.
+        rpc.run_network_instance(
+            BaseController::default(),
+            update(first, "another-network-label", originals[0].2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            instances.config(first).unwrap().get_inst_name(),
+            "renamed-main"
+        );
+        assert_eq!(persisted_name("main.toml"), "renamed-main");
+
+        let before_conflict = instances.config(first).unwrap().dump();
+        let files_before_conflict = storage.files.lock().unwrap().clone();
+        assert!(
+            rpc.run_network_instance(
+                BaseController::default(),
+                explicit_name(update(first, "shared-network", originals[0].2), "outbound"),
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("already exists")
+        );
+        assert_eq!(instances.config(first).unwrap().dump(), before_conflict);
+        assert_eq!(*storage.files.lock().unwrap(), files_before_conflict);
+
+        // Empty is a valid explicit name, not the absence of a rename request.
+        rpc.run_network_instance(
+            BaseController::default(),
+            explicit_name(update(first, "shared-network", originals[0].2), ""),
+        )
+        .await
+        .unwrap();
+        assert_eq!(instances.config(first).unwrap().get_inst_name(), "");
+        assert_eq!(persisted_name("main.toml"), "");
+        rpc.run_network_instance(
+            BaseController::default(),
+            update(first, "label-must-not-replace-empty-name", originals[0].2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(instances.config(first).unwrap().get_inst_name(), "");
+
+        let direct = ProcessManagement::new(instances.clone(), Arc::new(()), storage.clone());
+        let imported = TomlConfig::default();
+        imported.set_id(first);
+        imported.set_inst_name("legacy-import-generated-name".into());
+        imported.set_listeners(Vec::new());
+        direct
+            .run_network_instance(imported, None, true, Some(ConfigSource::User))
+            .await
+            .unwrap();
+        assert_eq!(instances.instance(first).unwrap().instance_name(), "");
+        assert_eq!(persisted_name("main.toml"), "");
+
+        let owned = TomlConfig::default();
+        owned.set_inst_name("outbound".into());
+        owned.set_listeners(Vec::new());
+        let owned_id = owned.get_id();
+        assert!(
+            direct
+                .run_owned_network_instance(owned, ConfigFileControl::STATIC_CONFIG)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("already exists")
+        );
+        assert!(instances.config(owned_id).is_none());
+
         let new_id = uuid::Uuid::new_v4();
         let mut new_request = update(new_id, "new-instance-label", "fixture-new-secret");
+        new_request.config.as_mut().unwrap().instance_name = Some("independent-new-name".into());
         new_request.source = config_source_to_rpc(ConfigSource::Web);
         rpc.run_network_instance(BaseController::default(), new_request)
             .await
             .unwrap();
         assert_eq!(
             instances.config(new_id).unwrap().get_inst_name(),
-            "new-instance-label"
+            "independent-new-name"
         );
         assert_eq!(
             instances
@@ -2670,8 +2808,54 @@ virtual_ip = "10.82.0.2/24"
                 .get_network_config_source(),
             ConfigSource::Web
         );
+
+        let conflict_id = uuid::Uuid::new_v4();
+        assert!(
+            rpc.run_network_instance(
+                BaseController::default(),
+                explicit_name(
+                    update(conflict_id, "new-label", "fixture-conflict-secret"),
+                    "independent-new-name"
+                ),
+            )
+            .await
+            .is_err()
+        );
+        assert!(instances.config(conflict_id).is_none());
+
+        // The old implicit network-label rule remains available, even when
+        // separate UUIDs already share that label. An unchanged explicit name
+        // must not break editing such pre-existing instances.
+        let legacy_duplicate_id = uuid::Uuid::new_v4();
+        rpc.run_network_instance(
+            BaseController::default(),
+            update(legacy_duplicate_id, "outbound", "fixture-legacy-secret"),
+        )
+        .await
+        .unwrap();
+        rpc.run_network_instance(
+            BaseController::default(),
+            explicit_name(
+                update(legacy_duplicate_id, "outbound", "fixture-legacy-secret"),
+                "outbound",
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            instances
+                .config(legacy_duplicate_id)
+                .unwrap()
+                .get_inst_name(),
+            "outbound"
+        );
         instances
-            .delete_network_instances(originals.iter().map(|(id, _, _)| *id).chain([new_id]))
+            .delete_network_instances(
+                originals
+                    .iter()
+                    .map(|(id, _, _)| *id)
+                    .chain([new_id, legacy_duplicate_id]),
+            )
             .await
             .unwrap();
     }

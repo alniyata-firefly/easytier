@@ -255,6 +255,24 @@ where
         overwrite: bool,
         requested_source: Option<ConfigSource>,
     ) -> anyhow::Result<uuid::Uuid> {
+        self.run_network_instance_with_name_policy(
+            config,
+            requested_id,
+            overwrite,
+            requested_source,
+            false,
+        )
+        .await
+    }
+
+    async fn run_network_instance_with_name_policy(
+        &self,
+        config: TomlConfig,
+        requested_id: Option<uuid::Uuid>,
+        overwrite: bool,
+        requested_source: Option<ConfigSource>,
+        explicit_instance_name: bool,
+    ) -> anyhow::Result<uuid::Uuid> {
         let mut instance_id = config.get_id();
         if let Some(requested_id) = requested_id {
             instance_id = requested_id;
@@ -279,10 +297,10 @@ where
             self.ensure_overwritable(instance_id, &control, remote_managed)
                 .await?;
             let existing_config = self.instances.config(instance_id);
-            if let Some(existing_config) = existing_config.as_ref() {
-                // NetworkConfig has no independent instance-name field. Its
-                // generated name is the network label, which can be shared by
-                // multiple local instances; keep this UUID's existing name.
+            if !explicit_instance_name && let Some(existing_config) = existing_config.as_ref() {
+                // Legacy DTOs generate a name from the shared network label.
+                // Preserve this UUID's independent name unless the request
+                // actually supplied the new instance_name field.
                 config.set_inst_name(existing_config.get_inst_name());
             }
             config.set_network_config_source(requested_source.or(existing_source));
@@ -299,6 +317,20 @@ where
             config.set_network_config_source(requested_source);
             ConfigFileControl::new(None, ConfigFilePermission::default())
         };
+
+        let name = config.get_inst_name();
+        let current_name = self
+            .instances
+            .instance(instance_id)
+            .map(|instance| instance.instance_name().to_owned());
+        if explicit_instance_name
+            && current_name.as_deref() != Some(name.as_str())
+            && self.instances.instances().iter().any(|instance| {
+                instance.instance_id() != instance_id && instance.instance_name() == name
+            })
+        {
+            anyhow::bail!("instance name {name} already exists");
+        }
 
         self.hooks
             .pre_run_network_instance(&config)
@@ -646,16 +678,25 @@ where
         _: BaseController,
         request: RunNetworkInstanceRequest,
     ) -> rpc_types::error::Result<RunNetworkInstanceResponse> {
-        let config = request
+        let input = request
             .config
-            .ok_or_else(|| anyhow::anyhow!("config is required"))?
-            .gen_config()?;
+            .ok_or_else(|| anyhow::anyhow!("config is required"))?;
+        // Inspect the DTO before generation: gen_config also fills the old
+        // network-label fallback, which is not an explicit rename request.
+        let explicit_instance_name = input.instance_name.is_some();
+        let config = input.gen_config()?;
         let requested_id = request.inst_id.map(Into::into);
         let requested_source = config_source_from_rpc(request.source);
         let management = self.management.clone();
         let instance_id = tokio::spawn(async move {
             management
-                .run_network_instance(config, requested_id, request.overwrite, requested_source)
+                .run_network_instance_with_name_policy(
+                    config,
+                    requested_id,
+                    request.overwrite,
+                    requested_source,
+                    explicit_instance_name,
+                )
                 .await
         })
         .await
