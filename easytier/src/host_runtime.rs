@@ -64,14 +64,31 @@ impl VirtualTcpSocketFactory for NativeHostRuntime {
             let socket_mark = options.bind.context.socket_mark;
             let net_ns = NetNS::from_socket_context(&options.bind.context);
             let source = if options.bind.context.uplink.is_some() {
-                Some(crate::socket::uplink::source_for_remote(&options.bind.context, remote_addr,
-                    options.bind.local_addr.map(|address| address.ip()),
-                    options.bind.bind_device.as_deref().filter(|name| !name.is_empty()),
-                    options.bind.need_protect).await?)
-            } else { None };
-            let socket =
-                crate::socket::fake_tcp::connect_socket(remote_addr, socket_mark, net_ns,
-                    source, options.bind.need_protect).await?;
+                Some(
+                    crate::socket::uplink::source_for_remote(
+                        &options.bind.context,
+                        remote_addr,
+                        options.bind.local_addr.map(|address| address.ip()),
+                        options
+                            .bind
+                            .bind_device
+                            .as_deref()
+                            .filter(|name| !name.is_empty()),
+                        options.bind.need_protect,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            let socket = crate::socket::fake_tcp::connect_socket(
+                remote_addr,
+                socket_mark,
+                net_ns,
+                source,
+                options.bind.need_protect,
+            )
+            .await?;
             return Ok(RuntimeTcpSocket::from_fake_tcp(socket));
         }
 
@@ -116,7 +133,15 @@ impl ConnectorRuntime for NativeHostRuntime {
         context: SocketContext,
     ) -> anyhow::Result<SocketAddr> {
         if context.uplink.is_some() && !remote_addr.ip().is_loopback() {
-            return Ok(crate::socket::uplink::source_for_remote(&context, remote_addr, None, None, true).await?.address);
+            return Ok(crate::socket::uplink::source_for_remote(
+                &context,
+                remote_addr,
+                None,
+                None,
+                true,
+            )
+            .await?
+            .address);
         }
         let bind_addr = match remote_addr {
             SocketAddr::V4(_) => {
@@ -125,6 +150,13 @@ impl ConnectorRuntime for NativeHostRuntime {
             SocketAddr::V6(_) => {
                 SocketAddr::V6(SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, 0, 0, 0))
             }
+        };
+        // A loopback route probe must not require a physical uplink. Keep the
+        // namespace and mark, and let the OS choose its real source address.
+        let context = if remote_addr.ip().is_loopback() {
+            context.with_uplink(None)
+        } else {
+            context
         };
         let options = UdpBindOptions::default()
             .with_context(context)
@@ -248,5 +280,62 @@ mod tests {
             .unwrap();
 
         assert!(local_addr.is_ipv4());
+    }
+
+    #[tokio::test]
+    async fn native_loopback_route_probe_works_without_an_available_uplink() {
+        use easytier_core::config::uplink::{UplinkConfig, UplinkMode};
+
+        for uplink in [
+            UplinkConfig::default(),
+            UplinkConfig {
+                mode: UplinkMode::Manual,
+                interfaces: vec!["et-probe-nonexistent".into()],
+            },
+        ] {
+            for endpoint in ["127.0.0.1:9", "[::1]:9"] {
+                let remote: SocketAddr = endpoint.parse().unwrap();
+                let source = native_host_runtime()
+                    .local_addr_for_remote(
+                        remote,
+                        SocketContext::default().with_uplink(Some(uplink.clone())),
+                    )
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("loopback route probe for {remote} with {uplink:?}: {error:#}")
+                    });
+
+                assert_eq!(source.ip(), remote.ip());
+                assert_ne!(
+                    source.port(),
+                    0,
+                    "the OS must actually bind the probe socket"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_non_loopback_route_probe_still_requires_an_allowed_uplink() {
+        use easytier_core::config::uplink::{UplinkConfig, UplinkMode};
+
+        let missing = "et-probe-nonexistent";
+        for endpoint in ["192.0.2.1:9", "[2001:db8::1]:9"] {
+            let remote: SocketAddr = endpoint.parse().unwrap();
+            let error = native_host_runtime()
+                .local_addr_for_remote(
+                    remote,
+                    SocketContext::default().with_uplink(Some(UplinkConfig {
+                        mode: UplinkMode::Manual,
+                        interfaces: vec![missing.into()],
+                    })),
+                )
+                .await
+                .expect_err("non-loopback probes must not bypass the uplink allowlist");
+
+            let message = format!("{error:#}");
+            assert!(message.contains(missing), "{remote}: {message}");
+            assert!(message.contains("unavailable"), "{remote}: {message}");
+        }
     }
 }

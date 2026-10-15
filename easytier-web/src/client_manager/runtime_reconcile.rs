@@ -1400,13 +1400,26 @@ mod tests {
 
     #[test]
     fn runtime_patch_rejects_encryption_algorithm_change() {
-        let current = config_with_port_forwards(vec![port_forward(23000, 5174)]);
+        let mut current = config_with_port_forwards(vec![port_forward(23000, 5174)]);
+        current.encryption_algorithm = Some("aes-gcm".to_string());
         let mut desired = current.clone();
-        desired.encryption_algorithm = Some("managed-test-algo".to_string());
+        desired.encryption_algorithm = Some("chacha20".to_string());
 
         let patch = web_source_runtime_patch(&current, &desired).expect("build patch");
 
         assert!(patch.is_none());
+    }
+
+    #[test]
+    fn runtime_patch_rejects_invalid_encryption_algorithm_before_diffing() {
+        let current = config_with_port_forwards(vec![port_forward(23000, 5174)]);
+        let mut desired = current.clone();
+        desired.encryption_algorithm = Some("managed-test-algo".to_string());
+
+        let error = web_source_runtime_patch(&current, &desired)
+            .expect_err("unknown encryption algorithms must fail validation");
+
+        assert!(error.to_string().contains("invalid encryption_algorithm"));
     }
 
     #[test]

@@ -1213,7 +1213,14 @@ mod tests {
                 }
             })
             .await
-            .expect("the real shared Gateway listener must admit the client mesh");
+            .unwrap_or_else(|error| {
+                panic!(
+                    "the real shared Gateway listener {bind_url} must admit the client mesh \
+                     from {client_host}: {error}; connector state: {:?}; events: {:?}",
+                    client.list_connectors(),
+                    client.management_events(),
+                )
+            });
 
             let rpc = client
                 .peer_manager()
