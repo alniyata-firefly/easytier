@@ -1969,6 +1969,7 @@ mod tests {
                     ip_version: IpVersion::V6,
                     socket_mark: Some(7),
                     netns: None,
+                    uplink: None,
                 }
             )]
         );

@@ -22,6 +22,7 @@ pub mod stun;
 pub mod tracing_rolling_appender;
 #[cfg(feature = "upnp")]
 pub mod upnp;
+pub(crate) mod uplink;
 
 pub use machine_id::{MachineIdOptions, resolve_machine_id};
 

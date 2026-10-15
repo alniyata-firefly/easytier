@@ -51,7 +51,9 @@
     "client_virtual_ip": "Client IPv4 / prefix length",
     "client_groups": "Client ACL groups",
     "ipv6_public_addr_provider": "Provide public IPv6 prefix",
-    "ipv6_public_addr_prefix": "Public IPv6 prefix"
+    "ipv6_public_addr_prefix": "Public IPv6 prefix",
+    "uplink_mode": "Uplink interface selection",
+    "uplink_interfaces": "Allowed interfaces"
   },
   "sections": {
     "connection": "Connection and runtime",
@@ -101,6 +103,12 @@
     "invalid": "Invalid node parameters",
     "forwardIpv6": "Use [IPv6] format for IPv6 addresses",
     "ipv4Cidr": "Enter a valid IPv4 CIDR",
-    "ipv6Cidr": "Enter a valid IPv6 prefix"
+    "ipv6Cidr": "Enter a valid IPv6 prefix",
+    "uplinkMode": "Select automatic or manual uplink selection",
+    "uplinkInterfaces": "Manual selection requires at least one interface. Names must be unique and contain no surrounding whitespace or control characters."
+  },
+  "uplink": {
+    "auto": "Automatic",
+    "manual": "Manual"
   }
 }

@@ -104,7 +104,7 @@ try {
     await page.getByLabel('用户名', { exact: true }).fill(state.username);
     await page.getByLabel('密码', { exact: true }).fill(state.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.getByRole('button', { name: '退出登录', exact: true }).waitFor(); authenticated = true;
+    await page.getByRole('button', { name: '账户菜单', exact: true }).waitFor(); authenticated = true;
   });
   await step('central managed instance exposes no ordinary edit stop or delete', async () => {
     await page.goto(`${base.origin}/#/h/deviceList/device/${deviceId}/${centralId}`);
@@ -247,7 +247,7 @@ try {
   }
   if (page && authenticated) {
     try { await page.keyboard.press('Escape'); } catch { /* no input is persisted */ }
-    try { await page.getByRole('button', { name: '退出登录', exact: true }).click(); await page.getByRole('button', { name: '登录', exact: true }).waitFor(); cleanup.own_session_logged_out = true; }
+    try { await page.getByRole('button', { name: '账户菜单', exact: true }).click(); await page.getByRole('button', { name: '退出登录', exact: true }).click(); await page.getByRole('button', { name: '登录', exact: true }).waitFor(); cleanup.own_session_logged_out = true; }
     catch { try { const response = await context.request.get(`${base.origin}/api/v1/auth/logout`); cleanup.own_session_logged_out = response.ok(); } catch { /* fixed cleanup status below */ } }
   }
   if (context) { try { await context.close(); cleanup.context_closed = true; } catch { /* status only */ } }

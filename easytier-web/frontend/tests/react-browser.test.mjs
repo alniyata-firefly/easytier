@@ -44,7 +44,7 @@ test('React network, membership, ACL, credentials and management-token workflows
     await page.getByLabel('密码', { exact: true }).fill(state.password);
     assert.equal(await page.getByLabel('密码', { exact: true }).getAttribute('type'), 'password');
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await page.getByRole('heading', { name: '网络概览', exact: true }).waitFor();
+    await page.getByRole('navigation', { name: '当前位置' }).getByText('概览', { exact: true }).waitFor();
     checked('real login and password masking');
     const baselineTokens = await request('GET', 'device-access-tokens');
     const baselineTokenIds = baselineTokens.tokens.map(value => value.id).sort();
@@ -63,7 +63,7 @@ test('React network, membership, ACL, credentials and management-token workflows
     await dialog().getByRole('checkbox', { name: /启用安全模式/ }).check();
     await dialog().getByRole('checkbox', { name: /优先使用 IPv6/ }).check();
     await dialog().getByRole('button', { name: '创建网络', exact: true }).click();
-    await page.getByRole('heading', { name: tag, exact: true }).waitFor();
+    await page.getByRole('navigation', { name: '当前位置' }).getByRole('link', { name: tag, exact: true }).waitFor();
     const networkId = decodeURIComponent(page.url().split('/networks/')[1]);
     networks.add(networkId);
     let network = await request('GET', `networks/${networkId}`);
@@ -75,7 +75,7 @@ test('React network, membership, ACL, credentials and management-token workflows
     await page.getByLabel('网络名称', { exact: true }).fill(`${tag}-edited`);
     await page.getByRole('checkbox', { name: /优先使用 IPv6/ }).uncheck();
     await page.getByRole('button', { name: '保存网络设置', exact: true }).click();
-    await page.getByRole('heading', { name: `${tag}-edited`, exact: true }).waitFor();
+    await page.getByRole('navigation', { name: '当前位置' }).getByRole('link', { name: `${tag}-edited`, exact: true }).waitFor();
     network = await request('GET', `networks/${networkId}`);
     assert.equal(network.prefer_ipv6, false);
     checked('network edit roundtrip');
@@ -170,7 +170,7 @@ test('React network, membership, ACL, credentials and management-token workflows
     await tab('网络设置');
     await page.getByRole('button', { name: '删除此网络', exact: true }).click();
     await dialog().getByRole('button', { name: '确认删除网络', exact: true }).click();
-    await page.getByRole('heading', { name: '网络', exact: true }).waitFor();
+    await page.getByRole('navigation', { name: '当前位置' }).getByRole('link', { name: '网络', exact: true }).waitFor();
     assert.ok(!(await request('GET', 'networks')).networks.some(value => value.network_id === networkId));
     networks.delete(networkId);
     checked('network delete through confirmation');
@@ -210,6 +210,7 @@ test('React network, membership, ACL, credentials and management-token workflows
     }), true, 'Only a supported locale preference may be stored; credentials must not persist');
     checked('token issue masked display copy rotate delete and no credential storage');
     assert.deepEqual(pageErrors, [], 'Browser must have no uncaught JavaScript errors');
+    await page.getByRole('button', { name: '账户菜单', exact: true }).click();
     await page.getByRole('button', { name: '退出登录', exact: true }).click();
     await page.getByRole('heading', { name: '登录控制台', exact: true }).waitFor();
     checked('logout invalidates local session');

@@ -199,8 +199,17 @@ class TauriVpnService : VpnService() {
             builder.addRoute(ipParts[0], ipParts[1].toInt())
         }
         
-        for (app in disallowedApplications) {
-            builder.addDisallowedApplication(app)
+        // The installed application ID can differ from the Kotlin namespace
+        // (for example a separately signed build). Always bypass this VPN for
+        // our own tunnel sockets using the native runtime identity.
+        for (app in (disallowedApplications.toList() + packageName).distinct()) {
+            try {
+                builder.addDisallowedApplication(app)
+            } catch (_: PackageManager.NameNotFoundException) {
+                // An optional excluded application may have been uninstalled;
+                // it cannot produce VPN traffic and must not prevent startup.
+                android.util.Log.w("EasyTierVpn", "Skipping an unavailable excluded application")
+            }
         }
 
         return builder.also {

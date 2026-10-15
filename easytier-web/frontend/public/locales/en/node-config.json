@@ -49,7 +49,9 @@
     "wireguard_listen": "WireGuard listen address",
     "client_name": "Client name",
     "client_virtual_ip": "Client IPv4 / prefix length",
-    "client_groups": "Client ACL groups"
+    "client_groups": "Client ACL groups",
+    "uplink_mode": "Uplink interface selection",
+    "uplink_interfaces": "Allowed interfaces"
   },
   "sections": {
     "connection": "Connection and runtime",
@@ -98,6 +100,12 @@
     "duplicateIp": "Client IP addresses must be unique",
     "invalid": "Invalid node parameters",
     "forwardIpv6": "Use [IPv6] format for IPv6 addresses",
-    "ipv4Cidr": "Enter a valid IPv4 CIDR"
+    "ipv4Cidr": "Enter a valid IPv4 CIDR",
+    "uplinkMode": "Select automatic or manual uplink selection",
+    "uplinkInterfaces": "Manual selection requires at least one interface. Names must be unique and contain no surrounding whitespace or control characters."
+  },
+  "uplink": {
+    "auto": "Automatic",
+    "manual": "Manual"
   }
 }

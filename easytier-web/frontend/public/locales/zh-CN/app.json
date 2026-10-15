@@ -14,10 +14,17 @@
     "close": "关闭导航",
     "skip": "跳到主要内容",
     "networkDetail": "网络详情",
-    "deviceDetail": "设备详情"
+    "deviceDetail": "设备详情",
+    "breadcrumb": "当前位置"
   },
-  "scope": { "central": "中央管理", "external": "外部管理" },
-  "connection": { "checking": "正在连接控制台", "retry": "重新连接" },
+  "scope": {
+    "central": "中央管理",
+    "external": "外部管理"
+  },
+  "connection": {
+    "checking": "正在连接控制台",
+    "retry": "重新连接"
+  },
   "page": {
     "loading": "正在加载页面",
     "failed": "页面未能显示，请刷新后重试。",
@@ -51,5 +58,17 @@
       "registration": "注册未完成，请检查用户名、密码和验证码。",
       "login": "登录失败，请检查用户名和密码。"
     }
+  },
+  "account": {
+    "title": "账户菜单",
+    "language": "语言"
+  },
+  "search": {
+    "label": "全局搜索",
+    "placeholder": "搜索网络、设备、令牌",
+    "results": "搜索结果",
+    "loading": "正在搜索",
+    "empty": "没有匹配的结果",
+    "partial": "部分结果暂时不可用"
   }
 }

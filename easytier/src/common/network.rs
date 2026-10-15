@@ -431,6 +431,47 @@ pub(crate) async fn collect_local_ip_addrs(net_ns: NetNS) -> GetIpListResponse {
     }
 }
 
+/// Policy-aware instance discovery. In particular, never supplement an allowed
+/// list with a default-route source: that route may belong to another VPN.
+pub(crate) async fn collect_uplink_ip_addrs(
+    context: &easytier_core::socket::SocketContext,
+) -> GetIpListResponse {
+    let selected = match super::uplink::selected_interfaces(context).await {
+        Ok(selected) => selected,
+        Err(error) => {
+            tracing::warn!(?error, "no permitted uplink addresses to publish");
+            return GetIpListResponse::default();
+        }
+    };
+    ip_list_from_uplink_interfaces(selected)
+}
+
+fn ip_list_from_uplink_interfaces(
+    selected: Vec<super::uplink::UplinkInterface>,
+) -> GetIpListResponse {
+    let mut ret = GetIpListResponse::default();
+    for interface in selected {
+        for addr in interface.addresses {
+            match addr.ip() {
+                IpAddr::V4(ip) => {
+                    if !ret.interface_ipv4s.contains(&ip.into()) {
+                        ret.interface_ipv4s.push(ip.into());
+                    }
+                }
+                IpAddr::V6(ip) => {
+                    if !ret.interface_ipv6s.contains(&ip.into()) {
+                        ret.interface_ipv6s.push(ip.into());
+                    }
+                }
+            }
+            if let Some(network) = describe_interface_address(&interface.name, addr) {
+                ret.interface_networks.push(network);
+            }
+        }
+    }
+    ret
+}
+
 async fn collect_local_ip_addrs_in_current_namespace() -> GetIpListResponse {
     let mut ret = GetIpListResponse::default();
 
@@ -486,6 +527,45 @@ async fn collect_local_ip_addrs_in_current_namespace() -> GetIpListResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_discovery_only_publishes_selected_addresses_with_prefixes() {
+        use network_interface::{Addr, V4IfAddr, V6IfAddr};
+        let result = ip_list_from_uplink_interfaces(vec![super::super::uplink::UplinkInterface {
+            name: "ens18".to_owned(),
+            index: 2,
+            addresses: vec![
+                Addr::V4(V4IfAddr {
+                    ip: "10.0.2.3".parse().unwrap(),
+                    netmask: Some("255.255.254.0".parse().unwrap()),
+                    broadcast: None,
+                }),
+                Addr::V6(V6IfAddr {
+                    ip: "fd00:1::3".parse().unwrap(),
+                    netmask: Some("ffff:ffff:ffff:ffff::".parse().unwrap()),
+                    broadcast: None,
+                }),
+            ],
+        }]);
+        assert_eq!(result.interface_ipv4s.len(), 1);
+        assert_eq!(result.interface_ipv6s.len(), 1);
+        assert!(result.public_ipv4.is_none());
+        assert!(result.public_ipv6.is_none());
+        assert_eq!(result.interface_networks.len(), 2);
+        assert!(
+            result
+                .interface_networks
+                .iter()
+                .all(|network| network.name == "ens18")
+        );
+        assert_eq!(result.interface_networks[0].prefix_length, Some(23));
+        assert_eq!(result.interface_networks[1].prefix_length, Some(64));
+        assert!(
+            ip_list_from_uplink_interfaces(Vec::new())
+                .interface_ipv6s
+                .is_empty()
+        );
+    }
 
     #[test]
     fn converts_contiguous_ip_masks_to_prefixes() {

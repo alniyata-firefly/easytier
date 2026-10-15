@@ -49,7 +49,9 @@
     "wireguard_listen": "WireGuard 监听地址",
     "client_name": "客户端名称",
     "client_virtual_ip": "客户端 IPv4 / 前缀长度",
-    "client_groups": "客户端 ACL 组"
+    "client_groups": "客户端 ACL 组",
+    "uplink_mode": "上联网卡选择",
+    "uplink_interfaces": "允许使用的接口"
   },
   "sections": {
     "connection": "连接与运行",
@@ -98,6 +100,12 @@
     "duplicateIp": "客户端 IP 地址不能重复",
     "invalid": "节点参数无效",
     "forwardIpv6": "IPv6 地址须使用 [IPv6] 格式",
-    "ipv4Cidr": "请输入有效的 IPv4 CIDR"
+    "ipv4Cidr": "请输入有效的 IPv4 CIDR",
+    "uplinkMode": "请选择自动识别或手动指定",
+    "uplinkInterfaces": "手动模式至少指定一个接口；名称不能重复、包含控制字符或首尾空白"
+  },
+  "uplink": {
+    "auto": "自动识别",
+    "manual": "手动指定"
   }
 }

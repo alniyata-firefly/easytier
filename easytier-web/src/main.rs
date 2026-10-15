@@ -17,10 +17,15 @@ use easytier::{
         error::Error,
         log,
     },
-    proto::rpc::standalone::{runtime_rpc_listener, runtime_udp_tunnel_listener},
+    proto::rpc::standalone::{
+        runtime_rpc_listener_with_context, runtime_udp_tunnel_listener_with_context,
+    },
     utils::panic::setup_panic_handler,
 };
-use easytier_core::{socket::SocketListener, tunnel::Tunnel};
+use easytier_core::{
+    socket::{SocketContext, SocketListener},
+    tunnel::Tunnel,
+};
 
 use easytier::tunnel::IpScheme;
 use mimalloc::MiMalloc;
@@ -253,6 +258,18 @@ impl LoggingConfigLoader for &Cli {
     }
 }
 
+fn underlay_listener_context(addr: std::net::SocketAddr) -> SocketContext {
+    let supported = cfg!(any(
+        all(target_os = "linux", not(target_env = "ohos")),
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "ios"
+    ));
+    SocketContext::default().with_uplink(
+        (supported && !addr.ip().is_loopback()).then(Default::default),
+    )
+}
+
 pub fn get_listener_by_url(
     scheme: IpScheme,
     l: &url::Url,
@@ -260,11 +277,17 @@ pub fn get_listener_by_url(
     Some(match scheme {
         IpScheme::Tcp => {
             let addr = l.socket_addrs(|| Some(11010)).ok()?.into_iter().next()?;
-            Box::new(runtime_rpc_listener(addr))
+            let context = underlay_listener_context(addr);
+            Box::new(runtime_rpc_listener_with_context(addr, context))
         }
         IpScheme::Udp => {
             let addr = l.socket_addrs(|| Some(11010)).ok()?.into_iter().next()?;
-            Box::new(runtime_udp_tunnel_listener(l.clone(), addr))
+            let context = underlay_listener_context(addr);
+            Box::new(runtime_udp_tunnel_listener_with_context(
+                l.clone(),
+                addr,
+                context,
+            ))
         }
         IpScheme::Ws => Box::new(WsTunnelListener::new(l.clone())),
         _ => return None,

@@ -223,7 +223,7 @@ async function doStartVpn(instanceId: string, generation: number, ipv4Addr: stri
     ipv4Addr: `${ipv4Addr}/${cidr}`,
     routes,
     dns,
-    disallowedApplications: ['com.kkrainbow.easytier'],
+    disallowedApplications: [],
     mtu: 1300,
   }
 

@@ -431,29 +431,61 @@ async fn connect_socket_with_cache(
     socket_mark: Option<u32>,
     ip_to_if_name: &IpToIfNameCache,
     net_ns: NetNS,
+    selected_source: Option<crate::socket::uplink::UplinkSource>,
+    need_protect: bool,
 ) -> Result<FakeTcpSocket, TunnelError> {
     let (local_addr, interface_name, mac, os_socket) = net_ns.run(|| {
-        let local_ip = get_local_ip_for_destination(remote_addr.ip())
+        let local_ip = selected_source
+            .as_ref()
+            .map(|source| source.address.ip())
+            .or_else(|| get_local_ip_for_destination(remote_addr.ip()))
             .ok_or(TunnelError::InternalError("Failed to get local ip".into()))?;
 
-        let os_socket = tokio::net::TcpSocket::new_v4()?;
+        let os_socket = if remote_addr.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()?
+        } else {
+            tokio::net::TcpSocket::new_v6()?
+        };
         // SO_MARK applies only to the kernel-visible "decoy" socket below.
         // The actual FakeTCP payload travels via crafted segments written
         // straight to the TUN device, which the kernel doesn't tag with
         // SO_MARK. Operators relying on fwmark for FakeTCP must mark the
         // TUN device's traffic with a separate nftables/iptables rule.
         crate::tunnel::common::apply_socket_mark(&socket2::SockRef::from(&os_socket), socket_mark)?;
-        os_socket.bind("0.0.0.0:0".parse().unwrap())?;
-        let local_addr = SocketAddr::new(local_ip, os_socket.local_addr()?.port());
-
         let (interface_name, mac) =
             ip_to_if_name
                 .get_ifname(&local_ip)
                 .ok_or(TunnelError::InternalError(
                     "Failed to get interface name".into(),
                 ))?;
-        Ok::<_, TunnelError>((local_addr, interface_name, mac, os_socket))
+        if selected_source
+            .as_ref()
+            .is_some_and(|source| source.interface != interface_name)
+        {
+            return Err(TunnelError::InvalidAddr(
+                "FakeTCP source interface differs from the selected uplink".into(),
+            ));
+        }
+        Ok::<_, TunnelError>((SocketAddr::new(local_ip, 0), interface_name, mac, os_socket))
     })?;
+
+    crate::socket_protector::protect_native_socket(
+        &socket2::SockRef::from(&os_socket),
+        need_protect,
+    )
+    .await?;
+    net_ns.run(|| -> Result<(), TunnelError> {
+        if selected_source.is_some() {
+            crate::tunnel::common::bind_socket_device(
+                &socket2::SockRef::from(&os_socket),
+                &local_addr,
+                Some(interface_name.clone()),
+            )?;
+        }
+        os_socket.bind(local_addr)?;
+        Ok(())
+    })?;
+    let local_addr = SocketAddr::new(local_addr.ip(), os_socket.local_addr()?.port());
 
     let tun = create_tun_off_runtime(interface_name, Some(remote_addr), local_addr, net_ns).await?;
     let stack = stack::Stack::new(tun, mac);
@@ -490,8 +522,19 @@ pub(crate) async fn connect_socket(
     remote_addr: SocketAddr,
     socket_mark: Option<u32>,
     net_ns: NetNS,
+    selected_source: Option<crate::socket::uplink::UplinkSource>,
+    need_protect: bool,
 ) -> Result<FakeTcpSocket, TunnelError> {
-    connect_socket_with_cache(remote_addr, socket_mark, &IpToIfNameCache::new(), net_ns).await
+    let cache = net_ns.run(IpToIfNameCache::new);
+    connect_socket_with_cache(
+        remote_addr,
+        socket_mark,
+        &cache,
+        net_ns,
+        selected_source,
+        need_protect,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -525,10 +568,15 @@ mod tests {
                 socket.write_all(b"pong").await.unwrap();
             });
 
-            let mut socket =
-                connect_socket("127.0.0.1:31011".parse().unwrap(), None, NetNS::new(None))
-                    .await
-                    .unwrap();
+            let mut socket = connect_socket(
+                "127.0.0.1:31011".parse().unwrap(),
+                None,
+                NetNS::new(None),
+                None,
+                true,
+            )
+            .await
+            .unwrap();
             server_ready_rx.await.unwrap();
             socket.write_all(b"ping").await.unwrap();
             let mut response = [0; 4];

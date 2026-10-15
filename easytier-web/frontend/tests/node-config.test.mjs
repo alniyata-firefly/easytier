@@ -33,6 +33,16 @@ test('Node parameter contracts use synthetic configuration only', async context 
         assert.equal(validateNodeParameters({ instance_recv_bps_limit: '18446744073709551615' }).length, 0);
         assert.equal(validateNodeParameters({ instance_recv_bps_limit: 9007199254740992 })[0].key, 'errors.uint64');
     });
+    await context.test('uplink manual selections validate and reset to automatic without stale interfaces', () => {
+        const manual = { uplink: { mode: 'manual', interfaces: ['eth0', 'Ethernet 2'] }, mtu: 1280 };
+        assert.deepEqual(validateNodeParameters(manual), []);
+        for (const interfaces of [[], ['eth0', 'eth0'], [' eth0'], ['eth0\0']]) assert.equal(validateNodeParameters({ uplink: { mode: 'manual', interfaces } })[0].key, 'errors.uplinkInterfaces');
+        assert.equal(validateNodeParameters({ uplink: { mode: 'invalid', interfaces: [] } })[0].key, 'errors.uplinkMode');
+        const reset = applyNodePatch(manual, { uplink: { mode: 'auto', interfaces: [] } });
+        assert.deepEqual(reset, { uplink: { mode: 'auto', interfaces: [] }, mtu: 1280 });
+        assert.deepEqual(validateNodeParameters(reset), []);
+        assert.deepEqual(manual.uplink.interfaces, ['eth0', 'Ethernet 2']);
+    });
     await context.test('editing one field preserves all unedited fields without filling defaults', () => {
         const unknown = { future_option: { nested: true }, peers: [{ uri: 'tcp://127.0.0.1:1', public_key: 'synthetic' }] };
         const initial = { ...unknown, no_tun: true };

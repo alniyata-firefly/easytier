@@ -14,7 +14,7 @@ export function OverviewPage({api,consoleInfo}: {api:ApiClient;consoleInfo:Conso
   const latest=[...(devices.data??[])].sort((a,b)=>Number(b.online)-Number(a.online)||(a.alias||a.hostname||'').localeCompare(b.alias||b.hostname||'')).slice(0,5);
   const number=(value:number|undefined)=>value===undefined?'—':new Intl.NumberFormat(i18n.resolvedLanguage).format(value);
   return <div className="page stack">
-    <header className="page-heading"><div><h1>{t('title')}</h1></div><div className="actions"><Button icon="refresh" tone="ghost" disabled={devices.loading||networks.loading} onClick={()=>{api.clear_snapshots();devices.refresh();networks.refresh();}}>{t('common:refresh')}</Button>{!consoleInfo.webhook_auth?<a className="button" href="#/h/tokens"><Icon name="plus"/>{t('connectDevice')}</a>:null}</div></header>
+    <header className="page-actions"><div className="actions"><Button icon="refresh" tone="ghost" disabled={devices.loading||networks.loading} onClick={()=>{api.clear_snapshots();devices.refresh();networks.refresh();}}>{t('common:refresh')}</Button>{!consoleInfo.webhook_auth?<a className="button" href="#/h/tokens"><Icon name="plus"/>{t('connectDevice')}</a>:null}</div></header>
     {devices.error||networks.error?<Alert tone="error">{devices.error||networks.error}</Alert>:null}
     <section className="summary-strip" aria-label={t('summary')}>
       <div className="summary-item"><span>{t('registered')}</span><strong>{number(devices.data?.length)}</strong></div>

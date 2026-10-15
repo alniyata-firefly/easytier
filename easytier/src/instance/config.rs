@@ -32,6 +32,12 @@ pub(crate) fn runtime_core_host_config() -> CoreInstanceHostConfig {
             all(target_os = "macos", feature = "macos-ne"),
             target_env = "ohos"
         )),
+        uplink_policy_supported: cfg!(any(
+            all(target_os = "linux", not(target_env = "ohos")),
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "ios"
+        )),
         smoltcp_available: cfg!(feature = "smoltcp"),
         requires_smoltcp: cfg!(any(
             target_os = "android",
@@ -68,6 +74,7 @@ pub(crate) fn runtime_core_host_config() -> CoreInstanceHostConfig {
 pub(crate) fn compact_runtime_core_host_config() -> CoreInstanceHostConfig {
     let mut config = runtime_core_host_config();
     config.force_exit_node = false;
+    config.uplink_policy_supported = false;
     config.host_routing.local_exit_node_fallback = false;
     config.public_ipv6_provider_supported = false;
     config.gateway_enabled = false;

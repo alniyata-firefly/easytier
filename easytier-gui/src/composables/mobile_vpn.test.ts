@@ -126,7 +126,7 @@ describe('mobile VPN reconciliation ownership', () => {
     await vpn.onNetworkInstanceUpdate('B')
 
     expect(mocks.startVpn).toHaveBeenCalledTimes(1)
-    expect(mocks.startVpn).toHaveBeenCalledWith(expect.objectContaining({ ipv4Addr: '10.0.0.2/24' }))
+    expect(mocks.startVpn).toHaveBeenCalledWith(expect.objectContaining({ ipv4Addr: '10.0.0.2/24', disallowedApplications: [] }))
   })
 
   it('stops the previous owner during pre-run even if the new instance never reaches post-run', async () => {

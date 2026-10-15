@@ -10,7 +10,7 @@ import { CredentialPanel } from '../components/CredentialPanel';
 import { AclPolicyPanel } from '../components/AclPolicyPanel';
 import { NetworkObservability } from '../components/NetworkObservability';
 
-export function NetworkPage({ api, networkId, consoleInfo }: { api: ApiClient; networkId: string; consoleInfo: ConsoleInfo }) {
+export function NetworkPage({ api, networkId, consoleInfo, onTitleChange }: { api: ApiClient; networkId: string; consoleInfo: ConsoleInfo; onTitleChange?: (label: string) => void }) {
     const { t } = useTranslation('networks');
     const resource = useResource(() => api.get_network(networkId), `network:${networkId}`, 5000);
     const members = useResource(() => api.list_network_members(networkId), `network-members:${networkId}`, 5000);
@@ -21,12 +21,13 @@ export function NetworkPage({ api, networkId, consoleInfo }: { api: ApiClient; n
     useEffect(() => { setTab('members'); setDeleting(false); setDeleteError(null); setSettingsRevision(0); }, [networkId]);
     const refresh = () => { api.clear_snapshots(); resource.refresh(); members.refresh(); };
     const network = resource.data;
+    useEffect(() => { onTitleChange?.(network?.display_name ?? ''); }, [network?.display_name, onTitleChange]);
     if (consoleInfo.webhook_auth) return <Empty title={t('detail.externalTitle')} />;
-    if (!network) return <div className="page"><header className="page-heading"><div><h1>{t('detail.title')}</h1></div><Button tone="ghost" onClick={() => navigate('/h/networks')}>{t('detail.back')}</Button></header>{resource.loading ? <Panel><p role="status" className="loading-lines">{t('list.loading')}</p></Panel> : <>{resource.error && <Alert tone="error">{resource.error}</Alert>}<Empty title={t('detail.unavailable')} action={<Button onClick={refresh}>{t('actions.retry')}</Button>} /></>}</div>;
+    if (!network) return <div className="page"><header className="page-heading"><div/><Button tone="ghost" onClick={() => navigate('/h/networks')}>{t('detail.back')}</Button></header>{resource.loading ? <Panel><p role="status" className="loading-lines">{t('list.loading')}</p></Panel> : <>{resource.error && <Alert tone="error">{resource.error}</Alert>}<Empty title={t('detail.unavailable')} action={<Button onClick={refresh}>{t('actions.retry')}</Button>} /></>}</div>;
     const tabs = [{ id: 'members', label: t('tabs.members'), count: members.data?.members.length }, { id: 'observability', label: t('tabs.observability') }, { id: 'acl', label: t('tabs.acl') }, ...(network.secure_mode ? [{ id: 'credentials', label: t('tabs.credentials') }] : []), { id: 'settings', label: t('tabs.settings') }];
     const currentTab = tabs.some(item => item.id === tab) ? tab : 'members';
     return <div className="page network-page">
-        <header className="page-heading"><div><button className="breadcrumb-link" onClick={() => navigate('/h/networks')}>{t('detail.breadcrumb')}</button><h1>{network.display_name}</h1><div className="entity-facts"><span>{networkMethodName(network.networking_method)}</span>{network.virtual_cidr && <span className="mono">{network.virtual_cidr}</span>}<span>{t(network.prefer_ipv6 ? 'preference.ipv6' : 'preference.default')}</span></div></div><Button tone="ghost" icon="refresh" busy={resource.loading || members.loading} onClick={refresh}>{t('actions.refresh')}</Button></header>
+        <header className="page-heading"><div><div className="entity-facts"><span>{networkMethodName(network.networking_method)}</span>{network.virtual_cidr && <span className="mono">{network.virtual_cidr}</span>}<span>{t(network.prefer_ipv6 ? 'preference.ipv6' : 'preference.default')}</span></div></div><Button tone="ghost" icon="refresh" busy={resource.loading || members.loading} onClick={refresh}>{t('actions.refresh')}</Button></header>
         {resource.error && <Alert tone="error">{t('detail.refreshFailed', { error: resource.error })}<Button tone="ghost" onClick={resource.refresh}>{t('actions.retry')}</Button></Alert>}
         <div className="deployment-summary" role="status"><span>{t('detail.deployment')}</span><Status state={network.deployment?.state ?? 'unknown'} />{network.deployment?.gateway && <><span className="muted">{t('detail.gateway')}</span><Status state={network.deployment.gateway.state} /><Status state={network.deployment.gateway.running ? 'running' : 'stopped'} /></>}</div>
         {network.deployment?.gateway?.last_error && <Alert tone="warning">{t('detail.gatewayError', { error: network.deployment.gateway.last_error })}</Alert>}

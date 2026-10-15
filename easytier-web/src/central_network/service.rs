@@ -1811,6 +1811,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn member_uplink_policy_persists_compiles_and_resets_without_losing_other_settings() {
+        use easytier_core::config::{api_input::NetworkConfigExt, toml::ConfigLoader};
+
+        let (service, user_id, _) = service().await;
+        let device_id = Uuid::new_v4();
+        register_device(&service, user_id, device_id).await;
+        let network = service
+            .create_network(user_id, standalone_settings(), None)
+            .await
+            .unwrap();
+        let network_id = Uuid::parse_str(&network.network_id).unwrap();
+        service
+            .add_members(
+                user_id,
+                network_id,
+                AddMembersReq {
+                    device_ids: vec![device_id.to_string()],
+                    temporary: false,
+                    ttl_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let manual = easytier::proto::api::manage::UplinkConfig {
+            mode: "manual".into(),
+            interfaces: vec!["Ethernet 2".into(), "eth1".into()],
+        };
+        let override_config = NetworkConfig {
+            uplink: Some(manual.clone()),
+            prefer_ipv6: Some(true),
+            no_tun: Some(true),
+            ..Default::default()
+        };
+        service
+            .set_member_config(user_id, network_id, device_id, override_config)
+            .await
+            .unwrap();
+        let stored = service
+            .get_member_config(user_id, network_id, device_id)
+            .await
+            .unwrap();
+        assert_eq!(stored.uplink.as_ref(), Some(&manual));
+        let intent = service.load(user_id, network_id).await.unwrap();
+        let effective = super::super::compiler::compile(&intent)
+            .unwrap()
+            .members
+            .remove(0)
+            .network_config;
+        assert_eq!(effective.uplink.as_ref(), Some(&manual));
+        let toml = effective.gen_config().unwrap();
+        assert_eq!(toml.get_uplink().interfaces, ["Ethernet 2", "eth1"]);
+        assert!(toml.get_flags().prefer_ipv6);
+
+        let mut auto = stored.clone();
+        auto.uplink = Some(easytier::proto::api::manage::UplinkConfig {
+            mode: "auto".into(),
+            interfaces: vec![],
+        });
+        service
+            .set_member_config(user_id, network_id, device_id, auto.clone())
+            .await
+            .unwrap();
+        let restored = service
+            .get_member_config(user_id, network_id, device_id)
+            .await
+            .unwrap();
+        assert_eq!(restored.uplink, auto.uplink);
+        assert_eq!(restored.prefer_ipv6, Some(true));
+        assert_eq!(restored.no_tun, Some(true));
+
+        let before = service.load(user_id, network_id).await.unwrap();
+        auto.uplink = Some(easytier::proto::api::manage::UplinkConfig {
+            mode: "manual".into(),
+            interfaces: vec![],
+        });
+        assert!(
+            service
+                .set_member_config(user_id, network_id, device_id, auto)
+                .await
+                .is_err()
+        );
+        assert_eq!(service.load(user_id, network_id).await.unwrap(), before);
+
+        service
+            .clear_member_config(user_id, network_id, device_id)
+            .await
+            .unwrap();
+        let intent = service.load(user_id, network_id).await.unwrap();
+        let effective = super::super::compiler::compile(&intent)
+            .unwrap()
+            .members
+            .remove(0)
+            .network_config;
+        assert_eq!(
+            effective.gen_config().unwrap().get_uplink(),
+            Default::default()
+        );
+    }
+
+    #[tokio::test]
     async fn global_prefer_ipv6_persists_compiles_and_survives_legacy_updates() {
         use easytier_core::management::remote_client::Storage as _;
 

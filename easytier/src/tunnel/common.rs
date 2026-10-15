@@ -68,7 +68,7 @@ impl Bindable for UdpSocket {
 fn setup_socket2_ext(
     socket2_socket: &socket2::Socket,
     bind_addr: &SocketAddr,
-    #[allow(unused_variables)] bind_dev: Option<String>,
+    bind_dev: Option<String>,
     only_v6: bool,
     reuse_addr: bool,
     reuse_port: bool,
@@ -76,7 +76,7 @@ fn setup_socket2_ext(
     #[cfg(target_os = "windows")]
     {
         let is_udp = matches!(socket2_socket.r#type()?, socket2::Type::DGRAM);
-        crate::arch::windows::setup_socket_for_win(socket2_socket, bind_addr, bind_dev, is_udp)?;
+        crate::arch::windows::setup_socket_for_win(socket2_socket, bind_addr, None, is_udp)?;
     }
 
     if bind_addr.is_ipv6() {
@@ -94,16 +94,19 @@ fn setup_socket2_ext(
         let _ = reuse_port;
     }
 
-    if let Err(e) = socket2_socket.bind(&socket2::SockAddr::from(*bind_addr)) {
-        if bind_addr.is_ipv4() {
-            return Err(e.into());
-        } else {
-            tracing::warn!(?e, "bind failed, do not return error for ipv6");
-        }
-    }
+    bind_socket_device(socket2_socket, bind_addr, bind_dev)?;
+    socket2_socket.bind(&socket2::SockAddr::from(*bind_addr))?;
+    Ok(())
+}
 
-    // linux/mac does not use interface of bind_addr to send packet, so we need to bind device
-    // win can handle this with bind correctly
+pub(crate) fn bind_socket_device(
+    socket2_socket: &socket2::Socket,
+    #[allow(unused_variables)] bind_addr: &SocketAddr,
+    #[allow(unused_variables)] bind_dev: Option<String>,
+) -> Result<(), TunnelError> {
+    #[cfg(target_os = "windows")]
+    crate::arch::windows::setup_socket_for_win(socket2_socket, bind_addr, bind_dev, false)?;
+
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     if let Some(dev_name) = bind_dev {
         // use IP_BOUND_IF to bind device
@@ -116,13 +119,12 @@ fn setup_socket2_ext(
                 "network interface not found: {dev_name}"
             )));
         };
-        tracing::warn!(?dev_idx, ?dev_name, "bind device");
+        tracing::trace!(?dev_idx, ?dev_name, "bind device");
         if bind_addr.is_ipv4() {
             socket2_socket.bind_device_by_index_v4(Some(dev_idx))?;
         } else {
             socket2_socket.bind_device_by_index_v6(Some(dev_idx))?;
         }
-        tracing::warn!(?dev_idx, ?dev_name, "bind device done");
     }
 
     #[cfg(any(
@@ -261,6 +263,19 @@ pub(crate) mod tests {
     };
 
     use crate::common::netns::NetNS;
+
+    #[tokio::test]
+    async fn ipv6_source_bind_failure_is_returned_without_wildcard_fallback() {
+        let result = super::bind::<tokio::net::UdpSocket>()
+            .addr("[2001:db8:ffff::dead]:0".parse().unwrap())
+            .dev(super::BindDev::Disabled)
+            .call()
+            .await;
+        assert!(
+            result.is_err(),
+            "an invalid IPv6 source must never become an unconstrained socket"
+        );
+    }
 
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     #[test]

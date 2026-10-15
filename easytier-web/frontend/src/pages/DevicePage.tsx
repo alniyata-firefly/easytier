@@ -17,7 +17,7 @@ type Action = 'edit' | 'new' | 'stop' | 'start' | 'delete';
 function uuid(value: Utils.UUID | string): string { return typeof value === 'string' ? value.toLowerCase() : Utils.UuidToStr(value); }
 const validId = (value: string) => /^[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}$/i.test(value);
 
-export function DevicePage({ api, deviceId, instanceId }: { api: ApiClient; deviceId: string; instanceId?: string }) {
+export function DevicePage({ api, deviceId, instanceId, onTitleChange }: { api: ApiClient; deviceId: string; instanceId?: string; onTitleChange?: (label: string, instance?: string) => void }) {
   const { t } = useTranslation('devices');
   const remote = useMemo(() => api.get_remote_client(deviceId), [api, deviceId]);
   const devices = useResource(() => api.list_machines().then(rows => rows.map(Utils.buildDeviceInfo)), `device:${deviceId}`, 6000);
@@ -73,12 +73,13 @@ export function DevicePage({ api, deviceId, instanceId }: { api: ApiClient; devi
     } catch (failure) { setFailure(errorDescriptor(failure)); }
     finally { actionLock.current = false; setBusy(false); }
   };
+  useEffect(() => { onTitleChange?.(device?.alias || device?.hostname || deviceId, selected?.meta?.instance_name || selected?.meta?.network_name || selectedId); }, [device?.alias, device?.hostname, deviceId, selected?.meta?.instance_name, selected?.meta?.network_name, selectedId, onTitleChange]);
   const runtimeAvailable = online && !!selected?.running;
   const tabs = [{ id: 'overview', label: t('tabs.overview') }, { id: 'metrics', label: t('tabs.metrics') }, { id: 'peers', label: t('tabs.peers') }, { id: 'routes', label: t('tabs.routes') }, { id: 'acl', label: t('tabs.acl') }, { id: 'toml', label: t('tabs.toml') }, { id: 'logger', label: t('tabs.logger') }];
   const close = () => { if (!busy) { setAction(undefined); setTarget(undefined); setFailure(undefined); } };
 
   return <div className="page stack">
-    <header className="page-heading"><div><a className="breadcrumb-link" href="#/h/deviceList">{t('labels.device')} /</a><h1>{device?.alias || device?.hostname || t('page.detail')}</h1><p className="mono">{deviceId}</p></div><div className="actions"><Status state={!device || devices.error ? 'unknown' : online ? 'online' : 'offline'}/><Button icon="refresh" tone="ghost" busy={devices.loading || instances.loading} onClick={refresh}>{t('actions.refresh')}</Button><Button icon="plus" disabled={!device || !!instances.error || busy} onClick={() => open('new')}>{t('actions.newInstance')}</Button></div></header>
+    <header className="page-heading"><div className="entity-secondary mono">{deviceId}</div><div className="actions"><Status state={!device || devices.error ? 'unknown' : online ? 'online' : 'offline'}/><Button icon="refresh" tone="ghost" busy={devices.loading || instances.loading} onClick={refresh}>{t('actions.refresh')}</Button><Button icon="plus" disabled={!device || !!instances.error || busy} onClick={() => open('new')}>{t('actions.newInstance')}</Button></div></header>
     {devices.error && <Alert tone="error">{devices.error}</Alert>}
     {instances.error && <Alert tone="error">{t('instance.listFailure', { error: instances.error })}</Alert>}
     <Panel title={t('instance.title')} action={<span className="muted">{t('instance.count', { count: rows.length, countFormatted: rows.length.toLocaleString(currentLocale()) })}</span>}>

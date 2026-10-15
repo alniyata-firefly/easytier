@@ -312,6 +312,7 @@ mod tests {
                 ip_version,
                 socket_mark: Some(7),
                 netns: None,
+                uplink: None,
             },
         )
     }

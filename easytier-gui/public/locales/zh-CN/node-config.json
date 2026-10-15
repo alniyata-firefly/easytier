@@ -51,7 +51,9 @@
     "client_virtual_ip": "客户端 IPv4 / 前缀长度",
     "client_groups": "客户端 ACL 组",
     "ipv6_public_addr_provider": "提供 IPv6 公网前缀",
-    "ipv6_public_addr_prefix": "IPv6 公网前缀"
+    "ipv6_public_addr_prefix": "IPv6 公网前缀",
+    "uplink_mode": "上联网卡选择",
+    "uplink_interfaces": "允许使用的接口"
   },
   "sections": {
     "connection": "连接与运行",
@@ -101,6 +103,12 @@
     "invalid": "节点参数无效",
     "forwardIpv6": "IPv6 地址须使用 [IPv6] 格式",
     "ipv4Cidr": "请输入有效的 IPv4 CIDR",
-    "ipv6Cidr": "请输入有效的 IPv6 前缀"
+    "ipv6Cidr": "请输入有效的 IPv6 前缀",
+    "uplinkMode": "请选择自动识别或手动指定",
+    "uplinkInterfaces": "手动模式至少指定一个接口；名称不能重复、包含控制字符或首尾空白"
+  },
+  "uplink": {
+    "auto": "自动识别",
+    "manual": "手动指定"
   }
 }

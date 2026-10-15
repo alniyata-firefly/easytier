@@ -144,6 +144,7 @@ pub(super) fn new_wasi_core_runtime(
         packet_sink,
     ));
     let mut adapters = CoreHostAdapters::new(host, dns, packet_sink, process_runtime);
+    adapters.config.uplink_policy_supported = false;
     adapters.instance_runtime = Arc::new(WasiInstanceRuntimeHost);
     adapters.events = Arc::new(WasiHostEventSink::new(event_sink));
     #[cfg(feature = "wasm-host-tunnel-outbound")]

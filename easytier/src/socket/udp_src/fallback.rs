@@ -9,6 +9,19 @@ pub(crate) fn enable_recv_pktinfo(_socket: &UdpSocket) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn send_to_with_src_ipv4_on_interface(
+    _socket: &UdpSocket,
+    _src_ip: Ipv4Addr,
+    _src_ifindex: u32,
+    _dst_addr: SocketAddr,
+    _buf: &[u8],
+) -> io::Result<usize> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "UDP output-interface selection is not supported on this platform",
+    ))
+}
+
 pub(crate) async fn recv_from_with_dst_ip(
     socket: &UdpSocket,
     buf: &mut [u8],
@@ -57,7 +70,7 @@ async fn send_to_with_src_ipv4(
         .await
 }
 
-fn send_to_with_src_ipv6(
+pub(crate) fn send_to_with_src_ipv6(
     _socket: &UdpSocket,
     _src_ip: Ipv6Addr,
     _src_ifindex: u32,

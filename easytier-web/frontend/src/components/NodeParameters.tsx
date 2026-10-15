@@ -62,6 +62,8 @@ export function NodeParameters({ mode, value, onPatch, busy = false, onValidityC
     const listField = (key: string) => <Field label={field(key)} error={errorAt(key)}>
         <TextDraft label={field(key)} value={listValue(value[key])} multiline busy={busy} onChange={text => onPatch({ [key]: nodeList(text) })} />
     </Field>;
+    const uplink = isConfigRecord(value.uplink) ? value.uplink : undefined;
+    const uplinkMode = uplink?.mode === 'manual' ? 'manual' : 'auto';
     const forwards = Array.isArray(value.port_forwards) ? value.port_forwards : [];
     const portal = isConfigRecord(value.vpn_portal_config) ? value.vpn_portal_config : undefined;
     const clients = Array.isArray(portal?.clients) ? portal.clients : [];
@@ -80,6 +82,15 @@ export function NodeParameters({ mode, value, onPatch, busy = false, onValidityC
         </fieldset>
         <fieldset className="node-parameter-section form-stack" disabled={busy}>
             <legend>{t('sections.interface')}</legend>
+            <Field label={field('uplink_mode')} error={errorAt('uplink') ?? errorAt('uplink.mode')}>
+                <select aria-label={field('uplink_mode')} value={uplinkMode} onChange={event => onPatch({ uplink: event.target.value === 'manual' ? { mode: 'manual', interfaces: [] } : { mode: 'auto', interfaces: [] } })}>
+                    <option value="auto">{t('uplink.auto')}</option><option value="manual">{t('uplink.manual')}</option>
+                </select>
+            </Field>
+            {uplinkMode === 'manual' && <Field label={field('uplink_interfaces')} error={errorAt('uplink.interfaces')}>
+                <TextDraft label={field('uplink_interfaces')} value={listValue(uplink?.interfaces)} multiline busy={busy}
+                    onChange={text => onPatch({ uplink: { mode: 'manual', interfaces: text.split('\n').map(name => name.trim()).filter(Boolean) } })} />
+            </Field>}
             <div className="form-grid">{textField('dev_name')}{textField('mtu', true)}</div>
             <Field label={field('instance_recv_bps_limit')} error={errorAt('instance_recv_bps_limit')}>
                 <TextDraft label={field('instance_recv_bps_limit')} value={textValue(value.instance_recv_bps_limit)} numeric busy={busy} onChange={text => {

@@ -110,6 +110,7 @@ const FORM_MANAGED_TOML_FIELDS: &[&str] = &[
     "acl",
     "credential_file",
     "managed_credentials",
+    "uplink",
 ];
 
 #[cfg(all(
@@ -251,6 +252,7 @@ impl NetworkConfigExt for NetworkConfig {
                 .parse()
                 .with_context(|| format!("failed to parse instance id: {:?}", self.instance_id))?,
         );
+        cfg.set_uplink(self.uplink.clone().unwrap_or_default().try_into()?);
         cfg.set_hostname(self.hostname.clone());
         cfg.set_dhcp(self.dhcp.unwrap_or_default());
         cfg.set_inst_name(self.network_name.clone().unwrap_or_default());
@@ -785,6 +787,7 @@ impl NetworkConfigExt for NetworkConfig {
         result.disable_p2p = Some(flags.disable_p2p);
         result.p2p_only = Some(flags.p2p_only);
         result.lazy_p2p = Some(flags.lazy_p2p);
+        result.uplink = Some(config.get_uplink().into());
         result.bind_device = Some(flags.bind_device);
         result.socket_mark = flags.socket_mark;
         result.no_tun = Some(flags.no_tun);
@@ -1068,6 +1071,76 @@ disable_p2p = true
                 .as_table()
                 .unwrap()
                 .contains_key("disable_p2p")
+        );
+    }
+}
+
+#[cfg(test)]
+mod uplink_tests {
+    use super::*;
+    use crate::config::uplink::{UplinkConfig, UplinkMode};
+
+    #[test]
+    fn management_uplink_roundtrip_preserves_manual_selection_and_reset() {
+        let config = NetworkConfig {
+            networking_method: Some(NetworkingMethod::Standalone as i32),
+            uplink: Some(manage::UplinkConfig {
+                mode: "manual".to_owned(),
+                interfaces: vec!["eth0".to_owned(), "ppp0".to_owned()],
+            }),
+            ..Default::default()
+        };
+        let toml = config.gen_config().unwrap();
+        assert_eq!(
+            toml.get_uplink(),
+            UplinkConfig {
+                mode: UplinkMode::Manual,
+                interfaces: vec!["eth0".to_owned(), "ppp0".to_owned()]
+            }
+        );
+        let mut roundtrip = NetworkConfig::new_from_config(&toml).unwrap();
+        assert_eq!(roundtrip.uplink, config.uplink);
+        roundtrip.uplink = Some(UplinkConfig::default().into());
+        assert_eq!(
+            roundtrip.gen_config().unwrap().get_uplink(),
+            UplinkConfig::default()
+        );
+        for policy in [
+            manage::UplinkConfig {
+                mode: "manual".to_owned(),
+                interfaces: vec![],
+            },
+            manage::UplinkConfig {
+                mode: "unknown".to_owned(),
+                interfaces: vec![],
+            },
+        ] {
+            assert!(
+                NetworkConfig {
+                    uplink: Some(policy),
+                    ..Default::default()
+                }
+                .gen_config()
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "browser-config")]
+    fn browser_merge_replaces_previous_uplink_policy_instead_of_restoring_it() {
+        let original = "[uplink]\nmode = 'manual'\ninterfaces = ['eth0']";
+        let config = NetworkConfig {
+            networking_method: Some(NetworkingMethod::Standalone as i32),
+            uplink: Some(UplinkConfig::default().into()),
+            ..Default::default()
+        };
+        let merged = merge_network_config_toml(original, &config).unwrap();
+        assert_eq!(
+            TomlConfigLoader::new_from_str(&merged)
+                .unwrap()
+                .get_uplink(),
+            UplinkConfig::default()
         );
     }
 }

@@ -21,7 +21,7 @@ use crate::{
     common::{
         dns::RuntimeDnsResolver,
         netns::NetNS,
-        network::{collect_interfaces, collect_local_ip_addrs},
+        network::{collect_interfaces, collect_local_ip_addrs, collect_uplink_ip_addrs},
     },
     proto::peer_rpc::GetIpListResponse,
     socket::{
@@ -63,8 +63,15 @@ impl VirtualTcpSocketFactory for NativeHostRuntime {
             let remote_addr = options.remote_addr;
             let socket_mark = options.bind.context.socket_mark;
             let net_ns = NetNS::from_socket_context(&options.bind.context);
+            let source = if options.bind.context.uplink.is_some() {
+                Some(crate::socket::uplink::source_for_remote(&options.bind.context, remote_addr,
+                    options.bind.local_addr.map(|address| address.ip()),
+                    options.bind.bind_device.as_deref().filter(|name| !name.is_empty()),
+                    options.bind.need_protect).await?)
+            } else { None };
             let socket =
-                crate::socket::fake_tcp::connect_socket(remote_addr, socket_mark, net_ns).await?;
+                crate::socket::fake_tcp::connect_socket(remote_addr, socket_mark, net_ns,
+                    source, options.bind.need_protect).await?;
             return Ok(RuntimeTcpSocket::from_fake_tcp(socket));
         }
 
@@ -108,6 +115,9 @@ impl ConnectorRuntime for NativeHostRuntime {
         remote_addr: SocketAddr,
         context: SocketContext,
     ) -> anyhow::Result<SocketAddr> {
+        if context.uplink.is_some() && !remote_addr.ip().is_loopback() {
+            return Ok(crate::socket::uplink::source_for_remote(&context, remote_addr, None, None, true).await?.address);
+        }
         let bind_addr = match remote_addr {
             SocketAddr::V4(_) => {
                 SocketAddr::V4(SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0))
@@ -129,6 +139,15 @@ impl ConnectorRuntime for NativeHostRuntime {
         ip: std::net::Ipv6Addr,
         context: SocketContext,
     ) -> Option<PreferredIpv6Source> {
+        if context.uplink.is_some() {
+            return crate::common::uplink::interface_for_local_ip(&context, IpAddr::V6(ip))
+                .await
+                .ok()
+                .map(|interface| PreferredIpv6Source {
+                    ip,
+                    ifindex: interface.index,
+                });
+        }
         collect_interfaces(NetNS::from_socket_context(&context), false)
             .await
             .into_iter()
@@ -145,7 +164,11 @@ impl ConnectorRuntime for NativeHostRuntime {
     }
 
     async fn collect_ip_addrs(&self, context: &SocketContext) -> GetIpListResponse {
-        collect_local_ip_addrs(NetNS::from_socket_context(context)).await
+        if context.uplink.is_some() {
+            collect_uplink_ip_addrs(context).await
+        } else {
+            collect_local_ip_addrs(NetNS::from_socket_context(context)).await
+        }
     }
 }
 

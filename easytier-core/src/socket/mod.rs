@@ -76,6 +76,8 @@ pub struct SocketContext {
     pub ip_version: IpVersion,
     pub socket_mark: Option<u32>,
     pub netns: Option<NetNamespace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uplink: Option<crate::config::uplink::UplinkConfig>,
 }
 
 impl SocketContext {
@@ -93,6 +95,11 @@ impl SocketContext {
         self
     }
 
+    pub fn with_uplink(mut self, uplink: Option<crate::config::uplink::UplinkConfig>) -> Self {
+        self.uplink = uplink;
+        self
+    }
+
     pub fn with_netns(mut self, netns: Option<NetNamespace>) -> Self {
         self.netns = netns;
         self
@@ -105,6 +112,30 @@ impl Default for SocketContext {
             ip_version: IpVersion::Both,
             socket_mark: None,
             netns: None,
+            uplink: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod uplink_tests {
+    use super::*;
+    use crate::config::uplink::{UplinkConfig, UplinkMode};
+
+    #[test]
+    fn uplink_socket_context_preserves_legacy_json_and_roundtrips_policy() {
+        let legacy = serde_json::json!({ "ip_version": "V6", "socket_mark": 7, "netns": null });
+        let context: SocketContext = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(context.uplink.is_none());
+        assert_eq!(serde_json::to_value(&context).unwrap(), legacy);
+        let context = context.with_uplink(Some(UplinkConfig {
+            mode: UplinkMode::Manual,
+            interfaces: vec!["Ethernet 2".into()],
+        }));
+        let encoded = serde_json::to_value(&context).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SocketContext>(encoded).unwrap(),
+            context
+        );
     }
 }

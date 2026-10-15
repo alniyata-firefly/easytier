@@ -73,6 +73,15 @@ pub(crate) async fn recv_datagram_with_dst_ip(
     capacity: usize,
 ) -> io::Result<(BytesMut, SocketAddr, Option<IpAddr>)> {
     let mut payload = BytesMut::with_capacity(capacity);
+    let (remote_addr, dst_ip) = recv_datagram_into_with_dst_ip(socket, &mut payload).await?;
+    Ok((payload, remote_addr, dst_ip))
+}
+
+pub(crate) async fn recv_datagram_into_with_dst_ip(
+    socket: &UdpSocket,
+    payload: &mut BytesMut,
+) -> io::Result<(SocketAddr, Option<IpAddr>)> {
+    let capacity = payload.capacity();
     let (len, remote_addr, dst_ip) = socket
         .async_io(tokio::io::Interest::READABLE, || {
             loop {
@@ -95,7 +104,7 @@ pub(crate) async fn recv_datagram_with_dst_ip(
     unsafe {
         payload.set_len(len);
     }
-    Ok((payload, remote_addr, dst_ip))
+    Ok((remote_addr, dst_ip))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -354,6 +363,17 @@ fn send_to_with_src_ipv4(
     dst_addr: SocketAddrV4,
     buf: &[u8],
 ) -> io::Result<usize> {
+    send_to_with_src_ipv4_on_interface(socket, src_ip, 0, dst_addr.into(), buf)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn send_to_with_src_ipv4_on_interface(
+    socket: &UdpSocket,
+    src_ip: Ipv4Addr,
+    src_ifindex: u32,
+    dst_addr: SocketAddr,
+    buf: &[u8],
+) -> io::Result<usize> {
     use std::{mem, os::fd::AsRawFd, ptr};
 
     use nix::libc;
@@ -362,7 +382,12 @@ fn send_to_with_src_ipv4(
     struct ControlBuffer([u8; 128]);
 
     let pktinfo = libc::in_pktinfo {
-        ipi_ifindex: 0,
+        ipi_ifindex: i32::try_from(src_ifindex).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "IPv4 interface index out of range",
+            )
+        })?,
         ipi_spec_dst: libc::in_addr {
             s_addr: u32::from(src_ip).to_be(),
         },
@@ -372,7 +397,7 @@ fn send_to_with_src_ipv4(
         iov_base: buf.as_ptr() as *mut libc::c_void,
         iov_len: buf.len(),
     };
-    let dst_addr = socket2::SockAddr::from(std::net::SocketAddr::V4(dst_addr));
+    let dst_addr = socket2::SockAddr::from(dst_addr);
     let control_len =
         unsafe { libc::CMSG_SPACE(mem::size_of::<libc::in_pktinfo>() as libc::c_uint) as usize };
     let mut control = ControlBuffer([0u8; 128]);
@@ -485,6 +510,44 @@ fn send_to_with_src_ipv4(
             Ok(ret as usize)
         }
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub(crate) fn send_to_with_src_ipv4_on_interface(
+    socket: &UdpSocket,
+    src_ip: Ipv4Addr,
+    src_ifindex: u32,
+    dst_addr: SocketAddr,
+    buf: &[u8],
+) -> io::Result<usize> {
+    std::num::NonZeroU32::new(src_ifindex).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "missing UDP uplink interface index",
+        )
+    })?;
+    // Strict policy passes a permanently IP_BOUND_IF-bound backing socket.
+    // Per-send mutation would clear that binding and race other interfaces.
+    send_to_with_src_ipv4_to_addr(socket, src_ip, dst_addr, buf)
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+)))]
+pub(crate) fn send_to_with_src_ipv4_on_interface(
+    _socket: &UdpSocket,
+    _src_ip: Ipv4Addr,
+    _src_ifindex: u32,
+    _dst_addr: SocketAddr,
+    _buf: &[u8],
+) -> io::Result<usize> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "UDP output-interface selection is not supported on this platform",
+    ))
 }
 
 #[cfg(not(any(

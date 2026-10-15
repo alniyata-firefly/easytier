@@ -102,6 +102,20 @@ export function validateNodeParameters(value: NodeConfigRecord): NodeParameterIs
     for (const key of [...NODE_BOOLEAN_FLAGS, 'prefer_ipv6', 'ipv6_public_addr_provider', 'enable_relay_network_whitelist', 'enable_manual_routes', 'enable_socks5']) {
         if (present(value[key]) && typeof value[key] !== 'boolean') add(key, 'errors.boolean');
     }
+    if (value.uplink !== undefined && value.uplink !== null) {
+        const uplink = value.uplink;
+        if (!isConfigRecord(uplink)) add('uplink', 'errors.object');
+        else {
+            const mode = uplink.mode ?? 'auto';
+            if (mode !== 'auto' && mode !== 'manual' && mode !== '') add('uplink.mode', 'errors.uplinkMode');
+            if (uplink.interfaces !== undefined && (!Array.isArray(uplink.interfaces) || uplink.interfaces.some(name => typeof name !== 'string'))) add('uplink.interfaces', 'errors.stringList');
+            else {
+                const names = (uplink.interfaces ?? []) as string[];
+                if ((mode === 'manual' && names.length === 0) || ((mode === 'auto' || mode === '') && names.length > 0)
+                    || names.some(name => !name || name.trim() !== name || /\p{Cc}/u.test(name)) || new Set(names).size !== names.length) add('uplink.interfaces', 'errors.uplinkInterfaces');
+            }
+        }
+    }
     if (present(value.dev_name) && typeof value.dev_name !== 'string') add('dev_name', 'errors.text');
     if (value.ipv6_public_addr_provider === true && (typeof value.ipv6_public_addr_prefix !== 'string' || !value.ipv6_public_addr_prefix.includes(':') || !validCidr(value.ipv6_public_addr_prefix))) add('ipv6_public_addr_prefix', 'errors.ipv6Cidr');
     if (present(value.mtu) && !integerIn(value.mtu, 400, 1380)) add('mtu', 'errors.range', { min: 400, max: 1380 });

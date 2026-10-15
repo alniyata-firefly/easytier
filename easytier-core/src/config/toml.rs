@@ -6,8 +6,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::normalize_secure_mode_config;
 pub use super::{EncryptionAlgorithm, gateway::PortForwardConfig};
+use super::{normalize_secure_mode_config, uplink::UplinkConfig};
 use anyhow::Context;
 #[cfg(feature = "rich-config-errors")]
 use ariadne::{CharSet, Config as AriadneConfig, IndexType, Label, Report, ReportKind, Source};
@@ -184,6 +184,9 @@ pub trait ConfigLoader: Send + Sync {
 
     fn get_inst_name(&self) -> String;
     fn set_inst_name(&self, name: String);
+
+    fn get_uplink(&self) -> UplinkConfig;
+    fn set_uplink(&self, uplink: UplinkConfig);
 
     fn get_netns(&self) -> Option<String>;
     fn set_netns(&self, ns: Option<String>);
@@ -522,6 +525,7 @@ impl std::fmt::Debug for ManagedCredentialConfig {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(feature = "config-write", derive(Serialize))]
 struct Config {
+    uplink: Option<UplinkConfig>,
     netns: Option<String>,
     hostname: Option<String>,
     instance_name: Option<String>,
@@ -707,6 +711,9 @@ impl TomlConfig {
     }
 
     fn new_from_config(mut config: Config) -> Result<Self, anyhow::Error> {
+        if let Some(uplink) = &config.uplink {
+            uplink.validate().context("invalid [uplink] config")?;
+        }
         config.flags_struct = Some(
             Self::gen_flags(config.flags.clone().unwrap_or_default())
                 .context("failed to parse flags")?,
@@ -764,6 +771,19 @@ impl TomlConfig {
 mod snapshot;
 
 impl ConfigLoader for TomlConfig {
+    fn get_uplink(&self) -> UplinkConfig {
+        self.config
+            .lock()
+            .unwrap()
+            .uplink
+            .clone()
+            .unwrap_or_default()
+    }
+
+    fn set_uplink(&self, uplink: UplinkConfig) {
+        self.config.lock().unwrap().uplink = Some(uplink);
+    }
+
     fn get_inst_name(&self) -> String {
         self.config
             .lock()
@@ -2037,6 +2057,46 @@ mod diagnostic_compatibility_tests {
             error
                 .chain()
                 .any(|cause| cause.to_string().contains("failed to parse flags"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod uplink_tests {
+    use super::*;
+    use crate::config::uplink::UplinkMode;
+
+    #[test]
+    fn uplink_toml_defaults_and_validation() {
+        assert_eq!(TomlConfig::default().get_uplink(), UplinkConfig::default());
+        let config =
+            TomlConfig::new_from_str("[uplink]\nmode = 'manual'\ninterfaces = ['eth0', 'ppp0']")
+                .unwrap();
+        assert_eq!(config.get_uplink().mode, UplinkMode::Manual);
+        assert_eq!(config.get_uplink().interfaces, ["eth0", "ppp0"]);
+        for config in [
+            "[uplink]\nmode = 'manual'",
+            "[uplink]\nmode = 'auto'\ninterfaces = ['eth0']",
+            "[uplink]\nmode = 'manual'\ninterfaces = ['eth0', 'eth0']",
+        ] {
+            assert!(TomlConfig::new_from_str(config).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "config-write")]
+    fn uplink_toml_roundtrip_and_manual_reset() {
+        let config =
+            TomlConfig::new_from_str("[uplink]\nmode = 'manual'\ninterfaces = ['eth0', 'ppp0']")
+                .unwrap();
+        let parsed = TomlConfig::new_from_str(&config.dump()).unwrap();
+        assert_eq!(parsed.get_uplink(), config.get_uplink());
+        parsed.set_uplink(UplinkConfig::default());
+        assert_eq!(
+            TomlConfig::new_from_str(&parsed.dump())
+                .unwrap()
+                .get_uplink(),
+            UplinkConfig::default()
         );
     }
 }

@@ -7,9 +7,9 @@ import { NodeParameters } from './NodeParameters';
 import { InstanceAclEditor, validateInstanceAcl } from './InstanceAclEditor';
 import { Alert, Button, Dialog, Field, Tabs } from './ui';
 
-export function NetworkEditor({ initial, onClose, onSaved, client, allowRemoteSave }: {
+export function NetworkEditor({ initial, onClose, onSaved, client, allowRemoteSave, supportsUplinkSelection = true }: {
   initial: NetworkTypes.NetworkConfig; onClose: () => void; onSaved: () => void;
-  client: GUIRemoteClient; allowRemoteSave: boolean;
+  client: GUIRemoteClient; allowRemoteSave: boolean; supportsUplinkSelection?: boolean;
 }) {
   const { t } = useTranslation('client');
   const [config, setConfig] = useState<NetworkTypes.NetworkConfig>(() => structuredClone(initial));
@@ -18,7 +18,8 @@ export function NetworkEditor({ initial, onClose, onSaved, client, allowRemoteSa
   const [toml, setToml] = useState('');
   const patch = (next: NodeConfigRecord) => setConfig(old => applyNodePatch(old as unknown as NodeConfigRecord, next) as unknown as NetworkTypes.NetworkConfig);
   const valid = (config.network_name ?? '').trim().length > 0 && (!credentialMode || !!config.credential_secret?.trim())
-    && validateNodeParameters(config as unknown as NodeConfigRecord).length === 0 && !validateInstanceAcl(config.acl);
+    && validateNodeParameters(config as unknown as NodeConfigRecord).length === 0 && !validateInstanceAcl(config.acl)
+    && (supportsUplinkSelection || config.uplink?.mode !== 'manual');
   const save = async (start: boolean) => {
     if (!valid || busy) return;
     setBusy(true); setError('');
@@ -51,7 +52,7 @@ export function NetworkEditor({ initial, onClose, onSaved, client, allowRemoteSa
       <Field label={t('networkingMethod')}><select value={config.networking_method} onChange={event => patch({ networking_method: Number(event.target.value) })}><option value={NetworkTypes.NetworkingMethod.Manual}>{t('manualPeers')}</option><option value={NetworkTypes.NetworkingMethod.PublicServer}>{t('publicServer')}</option><option value={NetworkTypes.NetworkingMethod.Standalone}>{t('standalone')}</option></select></Field>
       {config.networking_method === NetworkTypes.NetworkingMethod.PublicServer ? <Field label={t('publicServerUrl')}><input value={config.public_server_url ?? ''} onChange={event => patch({ public_server_url: event.target.value })}/></Field> : config.networking_method === NetworkTypes.NetworkingMethod.Manual ? <Field label={t('peers')}><ListInput value={config.peer_urls} onChange={value => patch({ peer_urls: value })}/></Field> : null}
     </fieldset>}
-    {tab === 'parameters' && <NodeParameters mode="instance" value={config as unknown as NodeConfigRecord} onPatch={patch} busy={busy}/>}
+    {tab === 'parameters' && <NodeParameters supportsUplinkSelection={supportsUplinkSelection} mode="instance" value={config as unknown as NodeConfigRecord} onPatch={patch} busy={busy}/>}
     {tab === 'acl' && <InstanceAclEditor value={config.acl} onChange={acl => patch({ acl })} busy={busy}/>}
     {tab === 'toml' && <pre className="code-block">{toml || '—'}</pre>}
   </Dialog>;

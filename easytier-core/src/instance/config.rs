@@ -44,6 +44,7 @@ pub struct CoreInstanceHostConfig {
     pub host_routing: HostRoutingPolicy,
     pub force_exit_node: bool,
     pub allow_interface_bind: bool,
+    pub uplink_policy_supported: bool,
     pub smoltcp_available: bool,
     pub requires_smoltcp: bool,
     pub icmp_failure_is_fatal: bool,
@@ -70,6 +71,7 @@ impl Default for CoreInstanceHostConfig {
             host_routing: HostRoutingPolicy::default(),
             force_exit_node: false,
             allow_interface_bind: true,
+            uplink_policy_supported: true,
             smoltcp_available: false,
             requires_smoltcp: false,
             icmp_failure_is_fatal: false,
@@ -172,6 +174,13 @@ impl CoreInstanceConfig {
         config: &TomlConfig,
         host: &CoreInstanceHostConfig,
     ) -> anyhow::Result<Self> {
+        config.get_uplink().validate()?;
+        if !host.uplink_policy_supported
+            && !host.ignore_unsupported_config
+            && config.get_uplink().mode == crate::config::uplink::UplinkMode::Manual
+        {
+            anyhow::bail!("manual uplink interface selection is not supported by this Host");
+        }
         let flags = host.runtime_flags(config.get_flags());
         let instance_id = config.get_id();
         let identity: crate::config::NetworkIdentity = config.get_network_identity().into();
@@ -184,7 +193,8 @@ impl CoreInstanceConfig {
         let network_name = identity.network_name.clone();
         let socket_context = SocketContext::default()
             .with_socket_mark(flags.socket_mark)
-            .with_netns(config.get_netns().map(NetNamespace::new));
+            .with_netns(config.get_netns().map(NetNamespace::new))
+            .with_uplink(host.uplink_policy_supported.then(|| config.get_uplink()));
         let hostname = match config.get_hostname() {
             hostname if !hostname.is_empty() => hostname,
             _ => host.hostname_fallback.clone().unwrap_or_default(),
@@ -674,6 +684,39 @@ disable_p2p = true
             normalized.connectivity.endpoint_discovery.srv_protocols,
             ["host-protocol"]
         );
+    }
+
+    #[test]
+    fn uplink_policy_is_retained_but_not_activated_on_unsupported_hosts() {
+        let config =
+            TomlConfig::new_from_str("[uplink]\nmode = 'manual'\ninterfaces = ['Ethernet 2']")
+                .unwrap();
+        let host = CoreInstanceHostConfig {
+            uplink_policy_supported: false,
+            ignore_unsupported_config: true,
+            ..Default::default()
+        };
+        let normalized = CoreInstanceConfig::from_toml_with_host(&config, &host).unwrap();
+        assert!(
+            normalized
+                .connectivity
+                .manual
+                .tcp_bind
+                .context
+                .uplink
+                .is_none()
+        );
+        assert_eq!(config.get_uplink().interfaces, ["Ethernet 2"]);
+        let supported = CoreInstanceConfig::from_toml(&config).unwrap();
+        assert_eq!(
+            supported.connectivity.manual.tcp_bind.context.uplink,
+            Some(config.get_uplink())
+        );
+        let strict = CoreInstanceHostConfig {
+            uplink_policy_supported: false,
+            ..Default::default()
+        };
+        assert!(CoreInstanceConfig::from_toml_with_host(&config, &strict).is_err());
     }
 
     #[test]

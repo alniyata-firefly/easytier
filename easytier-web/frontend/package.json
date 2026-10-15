@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "test": "node --test tests/react-contracts.test.mjs tests/node-config.test.mjs",
     "test:browser": "node --test tests/react-browser.test.mjs",
-    "test:e2e:native": "node --test --test-concurrency=1 tests/device-auth-e2e.test.mjs tests/central-native-e2e.test.mjs tests/observability-native-e2e.test.mjs"
+    "test:e2e:native": "node --test --test-concurrency=1 tests/device-auth-e2e.test.mjs tests/central-native-e2e.test.mjs tests/observability-native-e2e.test.mjs",
+    "test:browser:layout": "node tests/console-layout-browser.test.mjs",
+    "test:browser:uplink": "node tests/uplink-ui-browser.test.mjs"
   },
   "dependencies": {
     "@protobuf-ts/runtime": "2.11.1",

@@ -7,6 +7,7 @@ use std::{
 };
 
 use easytier_core::{
+    socket::SocketContext,
     socket::tcp::{
         TcpBindOptions, TcpConnectOptions, TcpListenOptions, TcpListenPurpose, TcpSocketPurpose,
         VirtualTcpListener, VirtualTcpSocket, VirtualTcpSplit,
@@ -182,9 +183,12 @@ impl VirtualTcpSocket for RuntimeTcpSocket {
 
 #[derive(Debug)]
 pub struct RuntimeTcpListener {
-    listener: TcpListener,
+    listeners: Vec<TcpListener>,
+    local_addr: SocketAddr,
     purpose: TcpListenPurpose,
     need_protect: bool,
+    uplink_context: Option<SocketContext>,
+    _port_lease: Option<std::sync::Arc<()>>,
 }
 
 #[async_trait::async_trait]
@@ -192,11 +196,35 @@ impl VirtualTcpListener for RuntimeTcpListener {
     type Socket = RuntimeTcpSocket;
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.listener.local_addr()
+        Ok(self.local_addr)
     }
 
     async fn accept(&self) -> io::Result<(Self::Socket, SocketAddr)> {
-        let (stream, addr) = self.listener.accept().await?;
+        let (stream, addr) = loop {
+            use futures::{StreamExt, stream::FuturesUnordered};
+            let mut accepts: FuturesUnordered<_> = self
+                .listeners
+                .iter()
+                .map(|listener| listener.accept())
+                .collect();
+            let (stream, addr) = accepts.next().await.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "TCP listener has no bound uplink sockets",
+                )
+            })??;
+            if let Some(context) = &self.uplink_context {
+                let local_ip = super::uplink::normalized_ip(stream.local_addr()?.ip());
+                if !local_ip.is_loopback()
+                    && crate::common::uplink::interface_for_local_ip(context, local_ip)
+                        .await
+                        .is_err()
+                {
+                    continue;
+                }
+            }
+            break (stream, addr);
+        };
         protect_native_socket(&SockRef::from(&stream), self.need_protect).await?;
         if self.purpose == TcpListenPurpose::ProxyNat {
             prepare_proxy_tcp_socket(&stream)?;
@@ -303,15 +331,124 @@ pub(crate) async fn bind_tcp_listener(
     let addr = bind_options.local_addr.ok_or_else(|| {
         TunnelError::InvalidAddr("tcp listener requires a local bind address".to_owned())
     })?;
+    let uses_uplink = bind_options.context.uplink.is_some()
+        && matches!(
+            purpose,
+            TcpListenPurpose::DirectConnect
+                | TcpListenPurpose::HolePunch
+                | TcpListenPurpose::ManualConnect
+        )
+        && !addr.ip().is_loopback();
+    if uses_uplink {
+        if let Some(device) = super::uplink::validate_local_bind(
+            &bind_options.context,
+            Some(addr),
+            bind_options.bind_device.as_deref(),
+        )
+        .await?
+        {
+            if let BindDev::Custom(device) = device {
+                bind_options.bind_device = Some(device);
+            }
+        }
+    }
     if bind_options.bind_device.is_none() && purpose == TcpListenPurpose::PortLease {
         bind_options.bind_device = Some(String::new());
     }
-    let listener = create_tcp_socket(addr, &bind_options).await?.listen(1024)?;
+    let listeners = if uses_uplink && addr.ip().is_unspecified() {
+        bind_uplink_tcp_listeners(addr, &bind_options).await?
+    } else {
+        vec![create_tcp_socket(addr, &bind_options).await?.listen(1024)?]
+    };
+    let mut local_addr = addr;
+    local_addr.set_port(listeners[0].local_addr()?.port());
+    let port_lease = if uses_uplink {
+        Some(super::uplink::lease_uplink_port(
+            &bind_options.context,
+            local_addr,
+            bind_options.only_v6,
+            super::uplink::UplinkPortProtocol::Tcp,
+        )?)
+    } else {
+        None
+    };
     Ok(RuntimeTcpListener {
-        listener,
+        listeners,
+        local_addr,
         purpose,
         need_protect: bind_options.need_protect,
+        uplink_context: uses_uplink.then_some(bind_options.context),
+        _port_lease: port_lease,
     })
+}
+
+/// A wildcard TCP socket can send SYN-ACK before accept() is called. Restrict
+/// every listening socket before listen(), rather than relying on an accepted
+/// child's source-address check after the handshake has already happened.
+async fn bind_uplink_tcp_listeners(
+    requested: SocketAddr,
+    options: &TcpBindOptions,
+) -> Result<Vec<TcpListener>, TunnelError> {
+    let interfaces = crate::common::uplink::selected_interfaces(&options.context).await?;
+    let selected_device = options
+        .bind_device
+        .as_deref()
+        .filter(|name| !name.is_empty());
+    let mut listeners = Vec::new();
+    let mut port = requested.port();
+    let mut last_error = None;
+    for interface in interfaces {
+        if selected_device.is_some_and(|name| name != interface.name) {
+            continue;
+        }
+        // Linux and Apple device-bound listeners keep following address
+        // changes on that NIC, including a renewed IPv6 prefix. Windows and
+        // Android bind each allowed address because their unicast-interface
+        // option alone does not constrain wildcard ingress.
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+        let addresses = vec![requested.ip()];
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+        let addresses: Vec<_> = interface
+            .addresses
+            .iter()
+            .map(|address| address.ip())
+            .filter(|ip| ip.is_ipv4() == requested.is_ipv4())
+            .collect();
+        for ip in addresses {
+            let mut bind_options = options.clone();
+            let address = SocketAddr::new(ip, port);
+            bind_options.local_addr = Some(address);
+            bind_options.bind_device = Some(interface.name.clone());
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+            {
+                bind_options.reuse_addr = Some(true);
+                bind_options.reuse_port = true;
+            }
+            match create_tcp_socket(address, &bind_options)
+                .await
+                .and_then(|socket| socket.listen(1024).map_err(Into::into))
+            {
+                Ok(listener) => {
+                    if port == 0 {
+                        port = listener.local_addr()?.port();
+                    }
+                    listeners.push(listener);
+                }
+                Err(error) => {
+                    tracing::debug!(interface = %interface.name, %address, %error, "uplink TCP listener bind failed");
+                    last_error = Some(error);
+                }
+            }
+        }
+    }
+    if listeners.is_empty() {
+        return Err(last_error.unwrap_or_else(|| {
+            TunnelError::InvalidAddr(format!(
+                "no allowed uplink supports TCP listener {requested}"
+            ))
+        }));
+    }
+    Ok(listeners)
 }
 
 pub(crate) async fn connect_tcp(
@@ -319,7 +456,33 @@ pub(crate) async fn connect_tcp(
 ) -> Result<RuntimeTcpSocket, TunnelError> {
     let remote_addr = options.remote_addr;
     let purpose = options.purpose;
-    let bind_options = options.bind;
+    let mut bind_options = options.bind;
+    if bind_options.context.uplink.is_some()
+        && !super::uplink::normalized_ip(remote_addr.ip()).is_loopback()
+        && matches!(
+            purpose,
+            TcpSocketPurpose::DirectConnect
+                | TcpSocketPurpose::ManualConnect
+                | TcpSocketPurpose::HolePunch
+                | TcpSocketPurpose::StunProbe
+                | TcpSocketPurpose::DataPlane
+        )
+    {
+        let source = super::uplink::source_for_remote(
+            &bind_options.context,
+            remote_addr,
+            bind_options.local_addr.map(|address| address.ip()),
+            bind_options
+                .bind_device
+                .as_deref()
+                .filter(|device| !device.is_empty()),
+            bind_options.need_protect,
+        )
+        .await?;
+        let port = bind_options.local_addr.map_or(0, |local| local.port());
+        bind_options.local_addr = Some(SocketAddr::new(source.address.ip(), port));
+        bind_options.bind_device = Some(source.interface);
+    }
 
     let socket = create_tcp_socket(remote_addr, &bind_options).await?;
     let stream = socket.connect(remote_addr).await?;
@@ -362,6 +525,47 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
+
+    #[tokio::test]
+    async fn tcp_listener_multiplexes_all_bound_uplink_sockets() {
+        let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addresses = [first.local_addr().unwrap(), second.local_addr().unwrap()];
+        let listener = RuntimeTcpListener {
+            listeners: vec![first, second],
+            local_addr: addresses[0],
+            purpose: TcpListenPurpose::DirectConnect,
+            need_protect: false,
+            uplink_context: None,
+            _port_lease: None,
+        };
+        for address in addresses {
+            let (client, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+            let mut client = client.unwrap();
+            let (mut accepted, _) = accepted.unwrap();
+            assert_eq!(accepted.local_addr().unwrap(), address);
+            client.write_all(b"uplink").await.unwrap();
+            let mut payload = [0; 6];
+            accepted.read_exact(&mut payload).await.unwrap();
+            assert_eq!(&payload, b"uplink");
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_uplink_policy_rejects_nonexistent_manual_device_before_connect() {
+        let context = SocketContext::default().with_uplink(Some(
+            easytier_core::config::uplink::UplinkConfig {
+                mode: easytier_core::config::uplink::UplinkMode::Manual,
+                interfaces: vec!["et-no-such-uplink".into()],
+            },
+        ));
+        let result = connect_tcp(
+            TcpConnectOptions::direct_connect("192.0.2.1:9".parse().unwrap())
+                .with_bind(TcpBindOptions::default().with_context(context)),
+        )
+        .await;
+        assert!(result.is_err());
+    }
 
     #[tokio::test]
     async fn runtime_tcp_owned_split_preserves_full_duplex_and_shutdown() {

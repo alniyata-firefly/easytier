@@ -18,7 +18,7 @@ impl NetNSGuard {
     pub fn new(ns: Option<String>) -> Box<Self> {
         let old_ns = if ns.is_some() {
             let old_ns = if cfg!(target_os = "linux") {
-                Some(std::fs::File::open("/proc/self/ns/net").unwrap())
+                Some(std::fs::File::open("/proc/thread-self/ns/net").unwrap())
             } else {
                 None
             };

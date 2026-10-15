@@ -94,6 +94,7 @@ pub struct GlobalCtx {
 
     flags: ArcSwap<Flags>,
     runtime_endpoint_protocols: Option<HashSet<String>>,
+    uplink_policy_supported: bool,
 }
 
 impl std::fmt::Debug for GlobalCtx {
@@ -118,7 +119,8 @@ impl PublicIpv6Host for GlobalCtx {
     ) -> HashSet<Ipv6Addr> {
         let context = SocketContext::default()
             .with_socket_mark(self.get_flags().socket_mark)
-            .with_netns(self.net_ns.name().map(NetNamespace::new));
+            .with_netns(self.net_ns.name().map(NetNamespace::new))
+            .with_uplink(self.uplink_config());
         let ip_list = crate::host_runtime::native_host_runtime()
             .collect_ip_addrs(&context)
             .await;
@@ -143,7 +145,7 @@ impl PublicIpv6Host for GlobalCtx {
 
 impl GlobalCtx {
     pub fn new(config_fs: impl ConfigLoader + 'static) -> Self {
-        Self::new_inner(config_fs, None, None)
+        Self::new_inner(config_fs, None, None, true)
     }
 
     pub(crate) fn new_with_runtime_config(
@@ -161,13 +163,19 @@ impl GlobalCtx {
                 .map(|protocol| protocol.to_ascii_lowercase())
                 .collect()
         });
-        Self::new_inner(config_fs, Some(&runtime), protocols)
+        Self::new_inner(
+            config_fs,
+            Some(&runtime),
+            protocols,
+            host.uplink_policy_supported,
+        )
     }
 
     fn new_inner(
         config_fs: impl ConfigLoader + 'static,
         runtime: Option<&CoreInstanceRuntimeConfig>,
         runtime_endpoint_protocols: Option<HashSet<String>>,
+        uplink_policy_supported: bool,
     ) -> Self {
         let id = config_fs.get_id();
         let network = config_fs.get_network_identity();
@@ -208,7 +216,13 @@ impl GlobalCtx {
 
             flags: ArcSwap::new(Arc::new(flags)),
             runtime_endpoint_protocols,
+            uplink_policy_supported,
         }
+    }
+
+    pub(crate) fn uplink_config(&self) -> Option<easytier_core::config::uplink::UplinkConfig> {
+        self.uplink_policy_supported
+            .then(|| self.config.get_uplink())
     }
 
     pub(crate) fn runtime_ipv4(peer: &PeerRuntimeSnapshot) -> Option<cidr::Ipv4Inet> {

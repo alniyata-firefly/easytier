@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateNodeParameters, prepareNodeParametersForBackend, parseUint64Input } from './node-config';
+import { applyNodePatch, validateNodeParameters, prepareNodeParametersForBackend, parseUint64Input } from './node-config';
 import { NetworkTypes } from './shared';
 
 describe('client configuration boundaries', () => {
@@ -43,5 +43,19 @@ describe('client configuration boundaries', () => {
     expect(validateNodeParameters({ port_forwards: [valid] })).toEqual([]);
     expect(prepareNodeParametersForBackend({ port_forwards: [valid] }).port_forwards).toEqual([{ ...valid, bind_ip: '[::]', dst_ip: '[2001:db8::2]' }]);
     expect(validateNodeParameters({ port_forwards: [{ ...valid, dst_port: 65536 }] }).some(issue => issue.path === 'port_forwards.0.dst_port')).toBe(true);
+  });
+});
+
+
+describe('uplink interface policy', () => {
+  it('validates allowlists and clears manual selection when switching to automatic', () => {
+    const manual = { uplink: { mode: 'manual', interfaces: ['eth0', 'Ethernet 2'] }, mtu: 1280 };
+    expect(validateNodeParameters(manual)).toEqual([]);
+    for (const interfaces of [[], ['eth0', 'eth0'], [' eth0'], ['eth0\0']]) expect(validateNodeParameters({ uplink: { mode: 'manual', interfaces } })[0].key).toBe('errors.uplinkInterfaces');
+    expect(validateNodeParameters({ uplink: { mode: 'unknown' } })[0].key).toBe('errors.uplinkMode');
+    const reset = applyNodePatch(manual, { uplink: { mode: 'auto', interfaces: [] } });
+    expect(validateNodeParameters(reset)).toEqual([]);
+    expect(reset.uplink).toEqual({ mode: 'auto', interfaces: [] });
+    expect(manual.uplink.interfaces).toEqual(['eth0', 'Ethernet 2']);
   });
 });

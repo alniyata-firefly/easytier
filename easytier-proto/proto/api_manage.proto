@@ -107,6 +107,13 @@ message NetworkConfig {
   repeated ManagedCredentialConfig managed_credentials = 71;
   optional bool prefer_peer_relay = 72;
   optional bool prefer_ipv6 = 73;
+  optional UplinkConfig uplink = 74;
+}
+
+message UplinkConfig {
+  // Empty mode is treated as auto for older clients.
+  string mode = 1;
+  repeated string interfaces = 2;
 }
 
 message ManagedCredentialConfig {

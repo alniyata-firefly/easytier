@@ -536,6 +536,16 @@ fn send_to_with_src_ipv4_windows(
     dst_addr: SocketAddr,
     buf: &[u8],
 ) -> io::Result<usize> {
+    send_to_with_src_ipv4_on_interface(socket, src_ip, 0, dst_addr, buf)
+}
+
+pub(crate) fn send_to_with_src_ipv4_on_interface(
+    socket: &UdpSocket,
+    src_ip: Ipv4Addr,
+    src_ifindex: u32,
+    dst_addr: SocketAddr,
+    buf: &[u8],
+) -> io::Result<usize> {
     use std::{mem, os::windows::io::AsRawSocket, ptr};
 
     use windows::{
@@ -580,7 +590,7 @@ fn send_to_with_src_ipv4_windows(
                 S_addr: u32::from(src_ip).to_be(),
             },
         },
-        ipi_ifindex: 0,
+        ipi_ifindex: src_ifindex,
     };
 
     unsafe {

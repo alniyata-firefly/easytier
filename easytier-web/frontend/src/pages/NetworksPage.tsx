@@ -10,17 +10,15 @@ export function NetworksPage({ api, consoleInfo }: { api: ApiClient; consoleInfo
     const { t } = useTranslation('networks');
     const resource = useResource(() => api.list_networks(), 'central-networks', 5000);
     const gateway = useResource(() => api.get_gateway_info(), 'network-gateway');
-    const [search, setSearch] = useState('');
+    const [search, setSearch] = useState(() => new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('q') ?? '');
     const [create, setCreate] = useState(false);
     const [busy, setBusy] = useState(false);
     const notice = useNotice();
     const networks = useMemo(() => (resource.data ?? []).filter(network => `${network.display_name} ${network.network_name}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())).sort((a, b) => a.display_name.localeCompare(b.display_name)), [resource.data, search]);
     if (consoleInfo.webhook_auth) return <Empty title={t('list.externalTitle')} />;
     return <div className="page networks-page">
-        <header className="page-heading"><div><h1>{t('list.title')}</h1></div><Button icon="plus" onClick={() => setCreate(true)} disabled={gateway.loading}>{t('list.create')}</Button></header>
         {resource.error && <Alert tone="error">{t('list.readFailed', { error: resource.error })} <Button tone="ghost" onClick={resource.refresh}>{t('actions.retry')}</Button></Alert>}
-        <Panel action={<Button icon="refresh" tone="ghost" busy={resource.loading} onClick={() => { api.clear_snapshots(); resource.refresh(); }}>{t('actions.refresh')}</Button>}>
-            <div className="list-toolbar"><label className="search-field"><span className="sr-only">{t('list.search')}</span><input aria-label={t('list.search')} type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder={t('list.searchPlaceholder')} /></label><span className="muted">{resource.data === undefined ? t('actions.loading') : t('list.count', { count: networks.length })}</span></div>
+        <Panel className="list-panel" title={resource.data === undefined ? t('actions.loading') : t('list.count', { count: networks.length })} action={<div className="list-header-actions"><label className="search-field"><span className="sr-only">{t('list.search')}</span><input aria-label={t('list.search')} type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder={t('list.searchPlaceholder')} /></label><Button icon="refresh" tone="ghost" busy={resource.loading} onClick={() => { api.clear_snapshots(); resource.refresh(); }}>{t('actions.refresh')}</Button><Button icon="plus" onClick={() => setCreate(true)} disabled={gateway.loading}>{t('list.create')}</Button></div>}>
             {resource.loading && !resource.data ? <div className="loading-lines" role="status">{t('list.loading')}</div> : resource.data?.length === 0 ? <Empty title={t('list.emptyTitle')} action={<Button onClick={() => setCreate(true)}>{t('list.create')}</Button>} /> : networks.length === 0 && resource.data ? <Empty title={t('list.noMatches')} action={<Button tone="ghost" onClick={() => setSearch('')}>{t('actions.clearSearch')}</Button>} /> : <div className="entity-list network-list">
                 {networks.map(network => <article key={network.network_id} className="entity-row">
                     <button className="entity-name" onClick={() => navigate(networkPath(network.network_id))}><span className="entity-symbol" aria-hidden="true">◇</span><span><strong>{network.display_name}</strong><small className="mono">{network.network_name}</small></span></button>

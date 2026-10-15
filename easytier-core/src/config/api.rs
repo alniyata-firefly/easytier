@@ -142,6 +142,7 @@ pub fn network_config_from_toml(config: &TomlConfig) -> NetworkConfig {
     result.disable_p2p = Some(flags.disable_p2p);
     result.p2p_only = Some(flags.p2p_only);
     result.lazy_p2p = Some(flags.lazy_p2p);
+    result.uplink = Some(config.get_uplink().into());
     result.bind_device = Some(flags.bind_device);
     result.socket_mark = flags.socket_mark;
     result.no_tun = Some(flags.no_tun);

@@ -26,7 +26,8 @@ impl NativeInstanceEnvironment {
     fn new(global_ctx: ArcGlobalCtx, runtime: Arc<NativeHostRuntime>) -> Self {
         let socket_context = SocketContext::default()
             .with_socket_mark(global_ctx.get_flags().socket_mark)
-            .with_netns(global_ctx.net_ns.name().map(NetNamespace::new));
+            .with_netns(global_ctx.net_ns.name().map(NetNamespace::new))
+            .with_uplink(global_ctx.uplink_config());
         Self {
             global_ctx,
             runtime,

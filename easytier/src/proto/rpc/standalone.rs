@@ -3,6 +3,7 @@ use easytier_core::{
         TcpTunnelDialer, TcpTunnelListener, TunnelDialer, UdpTunnelDialer, UdpTunnelListener,
     },
     rpc::standalone::StandAloneClient,
+    socket::SocketContext,
     socket::SocketListener,
     socket::tcp::TcpBindOptions,
     socket::udp::{UdpBindOptions, UdpSessionListenRequest},
@@ -29,8 +30,16 @@ pub fn runtime_rpc_client(remote_url: url::Url) -> RuntimeRpcClient {
 }
 
 pub fn runtime_rpc_listener(local_addr: std::net::SocketAddr) -> RuntimeRpcListener {
+    runtime_rpc_listener_with_context(local_addr, SocketContext::default())
+}
+
+pub fn runtime_rpc_listener_with_context(
+    local_addr: std::net::SocketAddr,
+    context: SocketContext,
+) -> RuntimeRpcListener {
     // RPC clients may arrive through TUN; their replies must retain VPN routing.
     let bind = TcpBindOptions::default()
+        .with_context(context)
         .with_local_addr(Some(local_addr))
         .with_only_v6(true)
         .with_need_protect(false);
@@ -45,7 +54,16 @@ pub fn runtime_udp_tunnel_listener(
     local_url: url::Url,
     local_addr: std::net::SocketAddr,
 ) -> impl SocketListener<Accepted = Box<dyn Tunnel>> {
+    runtime_udp_tunnel_listener_with_context(local_url, local_addr, SocketContext::default())
+}
+
+pub fn runtime_udp_tunnel_listener_with_context(
+    local_url: url::Url,
+    local_addr: std::net::SocketAddr,
+    context: SocketContext,
+) -> impl SocketListener<Accepted = Box<dyn Tunnel>> {
     let bind = UdpBindOptions::port_bound_listener(local_addr)
+        .with_context(context)
         .with_bind_device(TunnelUrl::from(local_url.clone()).bind_dev())
         .with_only_v6(true);
     UdpTunnelListener::new_with_request(
