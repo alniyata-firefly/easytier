@@ -1,10 +1,15 @@
 import { cloneElement, createContext, isValidElement, useCallback, useContext, useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type ReactElement, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { isLanguage } from '../lib/i18n';
+import brandMarkUrl from '../../../../assets/brand/easytier.svg?url';
 
 export function LanguageSwitch({className=''}: {className?:string}) {
   const {t,i18n}=useTranslation('common');
   return <label className={`language-switcher ${className}`}><span className="sr-only">{t('language.label')}</span><select aria-label={t('language.label')} value={i18n.resolvedLanguage==='en'?'en':'zh-CN'} onChange={event=>{if(isLanguage(event.target.value))void i18n.changeLanguage(event.target.value);}}><option value="zh-CN">{t('language.zhCN')}</option><option value="en">{t('language.en')}</option></select></label>;
+}
+
+export function BrandMark({size = 24}: {size?: number}) {
+  return <img src={brandMarkUrl} alt="" aria-hidden="true" width={size} height={size} draggable={false}/>;
 }
 
 export function Icon({name, size = 20}: {name: string; size?: number}) {
@@ -27,6 +32,8 @@ export function Icon({name, size = 20}: {name: string; size?: number}) {
     logout: <><path d="M9 4H4v16h5m5-16 7 8-7 8m-6-8h13"/></>,
     shield: <><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z"/><path d="m8 12 3 3 5-6"/></>,
     arrow: <path d="m9 5 7 7-7 7"/>,
+    up: <path d="M12 20V4m-6 6 6-6 6 6"/>,
+    down: <path d="M12 4v16m-6-6 6 6 6-6"/>,
     server: <><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6h.01M7 17h.01m4-11h6m-6 11h6"/></>,
     gateway: <><rect x="3" y="5" width="18" height="10" rx="2"/><path d="M7 9h.01M10 9h.01m4 0h3M12 15v4m-5 0h10"/></>,
     router: <><rect x="3" y="11" width="18" height="8" rx="2"/><path d="M6 11V5m12 6V5M7 15h.01M10 15h.01m4 0h3"/></>,

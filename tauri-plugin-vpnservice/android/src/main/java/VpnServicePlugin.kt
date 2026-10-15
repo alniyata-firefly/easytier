@@ -27,6 +27,11 @@ class StartVpnArgs {
     var mtu: Int? = null
 }
 
+@InvokeArg
+class SetClientEnabledArgs {
+    var enabled: Boolean = false
+}
+
 @TauriPlugin
 class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
     companion object {
@@ -95,6 +100,12 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
     fun startVpn(invoke: Invoke) {
         val args = invoke.parseArgs(StartVpnArgs::class.java)
         activity.runOnUiThread {
+            if (!TauriVpnService.isClientEnabled(activity)) {
+                val ret = JSObject()
+                ret.put("errorMsg", "client_paused")
+                invoke.resolve(ret)
+                return@runOnUiThread
+            }
             println("start vpn in plugin, args: $args")
 
             TauriVpnService.self?.onRevoke()
@@ -122,13 +133,35 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
+    fun setClientEnabled(invoke: Invoke) {
+        val args = invoke.parseArgs(SetClientEnabledArgs::class.java)
+        activity.runOnUiThread {
+            try {
+                TauriVpnService.clientForegroundPolicy(activity).setEnabled(args.enabled)
+                invoke.resolve(JSObject())
+            } catch (_: Exception) {
+                invoke.reject("Failed to update the client background service")
+            }
+        }
+    }
+
+    @Command
     fun stopVpn(invoke: Invoke) {
         activity.runOnUiThread {
             println("stop vpn in plugin")
-            TauriVpnService.self?.onRevoke()
-            activity.stopService(Intent(activity, TauriVpnService::class.java))
-            println("stop vpn in plugin end")
-            invoke.resolve(JSObject())
+            var failed = false
+            try {
+                TauriVpnService.self?.onRevoke()
+            } catch (_: Exception) {
+                failed = true
+            }
+            try {
+                activity.stopService(Intent(activity, TauriVpnService::class.java))
+            } catch (_: Exception) {
+                failed = true
+            }
+            if (failed) invoke.reject("Failed to stop the Android VPN service")
+            else invoke.resolve(JSObject())
         }
     }
 

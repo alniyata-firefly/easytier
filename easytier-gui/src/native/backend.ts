@@ -39,5 +39,7 @@ export const initRpcConnection = (isNormalMode: boolean, url?: string) => invoke
 export const isClientRunning = () => invoke<boolean>('is_client_running')
 export const initWebClient = (url?: string) => invoke('init_web_client', { url })
 export const isWebClientConnected = () => invoke<boolean>('is_web_client_connected')
+export const stopLocalClient = () => invoke<void>('stop_local_client')
+export const resumeLocalClient = () => invoke<void>('resume_local_client')
 
 export async function getNetworkInterfaces(instanceId?: string) { return normalizeUplinkInventory(await invoke('get_network_interfaces', { instanceId })) }

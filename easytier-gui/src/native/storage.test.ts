@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_NETWORK_CONFIG } from '../../../easytier-web/frontend-lib/src/types/network'
-import { loadEnabledNetworks, loadMode, loadStoredConfigs, parseStoredConfigs, saveEnabledNetworks, saveStoredConfigs } from './storage'
+import { loadEnabledNetworks, loadMode, loadStoredConfigs, parseStoredConfigs, saveEnabledNetworks, saveStoredConfigs, loadLocalClientPaused, saveLocalClientPaused } from './storage'
 
 vi.mock('@tauri-apps/plugin-os', () => ({ type: () => 'windows' }))
 const store = new Map<string, string>()
@@ -10,6 +10,16 @@ beforeEach(() => {
   vi.stubGlobal('localStorage', { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => { store.set(key, value) } })
 })
 describe('existing GUI persistence migration', () => {
+  it('persists a local pause without touching credentials, saved networks or the enabled list', () => {
+    const retained = { app_mode: 'fixture-mode-and-token', networkList: 'fixture-configs', enabled_networks: 'fixture-enabled', last_network_instance_id: fixtureId }
+    for (const [key, value] of Object.entries(retained)) store.set(key, value)
+    expect(loadLocalClientPaused()).toBe(false)
+    saveLocalClientPaused(true)
+    expect(loadLocalClientPaused()).toBe(true)
+    for (const [key, value] of Object.entries(retained)) expect(store.get(key)).toBe(value)
+    saveLocalClientPaused(false)
+    expect(loadLocalClientPaused()).toBe(false)
+  })
   it('loads old bare configurations as legacy without creating new instance IDs', () => {
     const config = { ...DEFAULT_NETWORK_CONFIG(), instance_id: fixtureId }
     store.set('networkList', JSON.stringify([config]))

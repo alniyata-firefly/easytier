@@ -48,10 +48,18 @@ where
     T: SocketListener<Accepted = Box<dyn Tunnel>> + 'static,
 {
     pub fn from_tunnel(tunnel: T, instance_manager: Arc<NativeInstanceManager>) -> Self {
+        Self::from_tunnel_with_hooks(tunnel, instance_manager, Arc::new(DefaultHooks))
+    }
+
+    pub fn from_tunnel_with_hooks(
+        tunnel: T,
+        instance_manager: Arc<NativeInstanceManager>,
+        hooks: Arc<dyn easytier_core::management::InstanceMutationHooks>,
+    ) -> Self {
         let rpc_server = ManagementServer::new(
             tunnel,
             instance_manager,
-            Arc::new(DefaultHooks),
+            hooks,
             Arc::new(NativeConfigFileStorage),
             Arc::new(NativeLoggerControl),
         );

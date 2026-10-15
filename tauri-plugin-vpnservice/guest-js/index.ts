@@ -48,6 +48,10 @@ export async function stop_vpn(): Promise<InvokeResponse | null> {
   return await invoke<InvokeResponse>('plugin:vpnservice|stop_vpn', {})
 }
 
+export async function set_client_enabled(enabled: boolean): Promise<InvokeResponse | null> {
+  return await invoke<InvokeResponse>('plugin:vpnservice|set_client_enabled', { enabled })
+}
+
 export async function get_vpn_status(): Promise<VpnStatusResponse | null> {
   return await invoke<VpnStatusResponse>('plugin:vpnservice|get_vpn_status', {})
 }

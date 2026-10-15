@@ -175,6 +175,32 @@ Denies the register_listener command without any pre-configured scope.
 <tr>
 <td>
 
+`vpnservice:allow-set-client-enabled`
+
+</td>
+<td>
+
+Enables the set_client_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vpnservice:deny-set-client-enabled`
+
+</td>
+<td>
+
+Denies the set_client_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `vpnservice:allow-start-vpn`
 
 </td>

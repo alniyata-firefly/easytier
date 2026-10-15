@@ -367,6 +367,18 @@
           "markdownDescription": "Denies the register_listener command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_client_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-client-enabled",
+          "markdownDescription": "Enables the set_client_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_client_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-client-enabled",
+          "markdownDescription": "Denies the set_client_enabled command without any pre-configured scope."
+        },
+        {
           "description": "Enables the start_vpn command without any pre-configured scope.",
           "type": "string",
           "const": "allow-start-vpn",

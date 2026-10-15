@@ -17,6 +17,7 @@ class MainActivity : TauriActivity() {
     }
 
     private fun initService() {
+        if (!com.plugin.vpnservice.TauriVpnService.isClientEnabled(this)) return
         val serviceIntent = Intent(this, MainForegroundService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(serviceIntent)

@@ -21,11 +21,16 @@ class MainForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!com.plugin.vpnservice.TauriVpnService.isClientEnabled(this)) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("EasyTier is running")
             .setContentText("EasyTier background service is active")
-            .setSmallIcon(android.R.drawable.ic_menu_manage)
+            .setSmallIcon(com.plugin.vpnservice.R.drawable.vpn_tile_icon)
             .build()
        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(

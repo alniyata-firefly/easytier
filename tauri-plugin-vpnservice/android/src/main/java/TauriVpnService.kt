@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.Context
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -32,11 +33,50 @@ class TauriVpnService : VpnService() {
 
         private const val NOTIFICATION_CHANNEL_ID = "easytier_vpn_channel"
         private const val NOTIFICATION_ID = 1356
+
+        private const val CLIENT_PREFERENCES = "easytier_client_lifecycle"
+        private const val CLIENT_ENABLED = "enabled"
+
+        fun isClientEnabled(context: Context): Boolean =
+            context.getSharedPreferences(CLIENT_PREFERENCES, Context.MODE_PRIVATE)
+                .getBoolean(CLIENT_ENABLED, true)
+
+        fun clientForegroundPolicy(context: Context): ClientForegroundPolicy =
+            ClientForegroundPolicy(
+                readEnabled = { isClientEnabled(context) },
+                writeEnabled = { enabled ->
+                    context.getSharedPreferences(CLIENT_PREFERENCES, Context.MODE_PRIVATE)
+                        .edit().putBoolean(CLIENT_ENABLED, enabled).apply()
+                },
+                updateService = { enabled -> updateMainForegroundService(context, enabled) },
+            )
+
+        private fun updateMainForegroundService(context: Context, enabled: Boolean) {
+            val services = context.packageManager
+                .getPackageInfo(context.packageName, PackageManager.GET_SERVICES)
+                .services.orEmpty()
+                .filter { it.name?.substringAfterLast('.') == "MainForegroundService" }
+            check(services.size == 1) {
+                "Expected exactly one MainForegroundService in the application manifest"
+            }
+            val intent = Intent().setClassName(context.packageName, services.single().name)
+            if (!enabled) {
+                context.stopService(intent)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
     }
 
     private lateinit var vpnInterface: ParcelFileDescriptor
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!isClientEnabled(this)) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         println("vpn on start command ${intent?.getExtras()} $intent")
         startVpnForegroundService()
         var args = intent?.getExtras()
@@ -64,7 +104,7 @@ class TauriVpnService : VpnService() {
     override fun onDestroy() {
         println("vpn on destroy")
         disconnect()
-        setMainForegroundServiceEnabled(true)
+        clientForegroundPolicy(this).onVpnChanged(false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         self = null
         EasyTierVpnTileService.requestStateUpdate(this)
@@ -74,7 +114,7 @@ class TauriVpnService : VpnService() {
     override fun onRevoke() {
         println("vpn on revoke")
         disconnect()
-        setMainForegroundServiceEnabled(true)
+        clientForegroundPolicy(this).onVpnChanged(false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         self = null
         EasyTierVpnTileService.requestStateUpdate(this)
@@ -110,7 +150,7 @@ class TauriVpnService : VpnService() {
             )
         }
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_menu_manage)
+            .setSmallIcon(R.drawable.vpn_tile_icon)
             .setContentTitle("EasyTier VPN is running")
             .setContentText("VPN connection is active")
             .setOngoing(true)
@@ -132,31 +172,7 @@ class TauriVpnService : VpnService() {
 
         // A TUN-backed network is now protected by this foreground service, so the
         // no-TUN keepalive service is redundant and would show a second notification.
-        setMainForegroundServiceEnabled(false)
-    }
-
-    private fun setMainForegroundServiceEnabled(enabled: Boolean) {
-        // applicationId can have an adapted/debug suffix while the service's
-        // Kotlin namespace stays unchanged. Use the actual merged manifest
-        // component, not a class name guessed from the installed package name.
-        val foregroundServices = packageManager
-            .getPackageInfo(packageName, PackageManager.GET_SERVICES)
-            .services.orEmpty()
-            .filter { it.name?.substringAfterLast('.') == "MainForegroundService" }
-        check(foregroundServices.size == 1) {
-            "Expected exactly one MainForegroundService in the application manifest"
-        }
-        val intent = Intent().setClassName(packageName, foregroundServices.single().name)
-        if (!enabled) {
-            stopService(intent)
-            return
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
+        clientForegroundPolicy(this).onVpnChanged(true)
     }
 
     private fun createNotificationChannel() {

@@ -36,7 +36,9 @@ export function installMockTauri({ platform = 'windows' } = {}) {
       if (command === 'parse_network_config') return `network_name = "${args.cfg.network_name}"\n[flags]\nprefer_ipv6 = ${!!args.cfg.prefer_ipv6}\n`;
       if (command === 'generate_network_config') return { ...configs[localId], network_name: 'Imported lab' };
       if (command === 'get_vpn_portal_info') return { vpn_type: 'wireguard', listener: '0.0.0.0:22022', clients: [{ name: 'mock-phone', virtual_ip: '10.100.0.20/24', groups: [], client_config: '[Interface]\nPrivateKey = mock-client\nAddress = 10.100.0.20/24\n[Peer]\nPublicKey = mock-server\nEndpoint = 0.0.0.0:22022\n' }] };
-      if (command === 'is_client_running') return true;
+      if (command === 'stop_local_client') { window.__MOCK_LOCAL_CLIENT_PAUSED__ = true; return; }
+      if (command === 'resume_local_client') { window.__MOCK_LOCAL_CLIENT_PAUSED__ = false; return; }
+      if (command === 'is_client_running') return !window.__MOCK_LOCAL_CLIENT_PAUSED__;
       if (command === 'is_web_client_connected') return true;
       if (command === 'get_service_status') return window.__MOCK_SERVICE_STATUS__ || 'NotInstalled';
       if (command === 'set_service_status') { window.__MOCK_SERVICE_STATUS__ = args.enable ? 'Running' : 'Stopped'; return; }

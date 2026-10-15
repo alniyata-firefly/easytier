@@ -3,6 +3,7 @@ const COMMANDS: &[&str] = &[
     "prepare_vpn",
     "start_vpn",
     "stop_vpn",
+    "set_client_enabled",
     "get_vpn_status",
     "consume_vpn_tile_action",
     "registerListener",

@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => {
     listNetworkInstanceIds: vi.fn<() => Promise<{ running_inst_ids: unknown[] }>>(async () => ({ running_inst_ids: [] })),
     prepareVpn: vi.fn(async () => ({ granted: true })),
     setTunFd: vi.fn(async () => undefined),
+    setClientEnabled: vi.fn(async (_enabled: boolean) => ({} as { errorMsg?: string })),
     startVpn: vi.fn(async () => {
       await listeners.get('vpn_service_start')?.({ fd: 1 })
       return {}
@@ -48,6 +49,7 @@ vi.mock('../../../tauri-plugin-vpnservice/guest-js/index', () => ({
   prepare_vpn: mocks.prepareVpn,
   start_vpn: mocks.startVpn,
   stop_vpn: mocks.stopVpn,
+  set_client_enabled: mocks.setClientEnabled,
 }))
 
 vi.mock('./backend', () => ({
@@ -105,8 +107,14 @@ beforeEach(() => {
   mocks.setTunFd.mockReset()
   mocks.setTunFd.mockResolvedValue(undefined)
   mocks.setTunFd.mockClear()
+  mocks.setClientEnabled.mockReset().mockResolvedValue({})
   mocks.startVpn.mockClear()
-  mocks.stopVpn.mockClear()
+  mocks.stopVpn.mockReset()
+  mocks.stopVpn.mockImplementation(async () => {
+    mocks.getVpnStatus.mockResolvedValue({ running: false })
+    await mocks.listeners.get('vpn_service_stop')?.({})
+    return {}
+  })
 })
 
 describe('mobile VPN reconciliation ownership', () => {
@@ -258,6 +266,77 @@ describe('mobile VPN tile action delivery', () => {
 })
 
 describe('Android VPN native boundaries', () => {
+  it('suspends the VPN and ignores delayed instance updates until explicit resume', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    mocks.listNetworkInstanceIds.mockResolvedValue({ running_inst_ids: ['A'] })
+    await vpn.suspendMobileVpnService()
+    expect(mocks.setClientEnabled).toHaveBeenCalledWith(false)
+    await vpn.onNetworkInstanceChange('A')
+    await vpn.onNetworkInstanceUpdate('A')
+    await vpn.syncMobileVpnService()
+    expect(mocks.startVpn).toHaveBeenCalledOnce()
+    expect(mocks.stopVpn).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+    await vpn.resumeMobileVpnService()
+    expect(mocks.setClientEnabled).toHaveBeenLastCalledWith(true)
+    await vpn.onNetworkInstanceChange('A')
+    expect(mocks.startVpn).toHaveBeenCalledTimes(2)
+  })
+
+  it('verifies a stopped native VPN even when its stop event was lost', async () => {
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A')
+    mocks.stopVpn.mockImplementationOnce(async () => {
+      mocks.getVpnStatus.mockResolvedValue({ running: false })
+      return {}
+    })
+    await vpn.suspendMobileVpnService()
+    expect(mocks.getVpnStatus).toHaveBeenCalled()
+    await vpn.resumeMobileVpnService()
+    await vpn.onNetworkInstanceChange('A')
+    expect(mocks.startVpn).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not claim a successful stop while the native service remains active', async () => {
+    const vpn = await loadVpnModule()
+    mocks.stopVpn.mockImplementationOnce(async () => ({}))
+    mocks.getVpnStatus.mockResolvedValue({ running: true })
+    const stopped = expect(vpn.suspendMobileVpnService()).rejects.toThrow('vpn_stop_timeout')
+    await vi.advanceTimersByTimeAsync(3100)
+    await stopped
+    expect(mocks.startVpn).not.toHaveBeenCalled()
+  })
+
+  it('propagates an explicit native stop failure while preventing automatic restart', async () => {
+    const vpn = await loadVpnModule()
+    mocks.stopVpn.mockResolvedValueOnce({ errorMsg: 'fixture service failure' })
+    await expect(vpn.suspendMobileVpnService()).rejects.toThrow('vpn_stop_failed')
+    setConfig('A')
+    setReady('A', '10.0.0.1')
+    await vpn.onNetworkInstanceChange('A')
+    expect(mocks.startVpn).not.toHaveBeenCalled()
+  })
+
+  it('still closes the VPN and reports a failure when the keepalive service cannot stop', async () => {
+    const vpn = await loadVpnModule()
+    mocks.setClientEnabled.mockResolvedValueOnce({ errorMsg: 'fixture foreground failure' })
+    await expect(vpn.suspendMobileVpnService()).rejects.toThrow('client_foreground_stop_failed')
+    expect(mocks.stopVpn).toHaveBeenCalledOnce()
+  })
+
+  it('closes a late native start without attaching its descriptor after suspension', async () => {
+    const vpn = await loadVpnModule()
+    await vpn.suspendMobileVpnService()
+    await mocks.listeners.get('vpn_service_start')?.({ fd: 8 })
+    expect(mocks.setTunFd).not.toHaveBeenCalled()
+    expect(mocks.stopVpn).toHaveBeenCalledTimes(2)
+  })
+
   it('passes file descriptor zero into Core', async () => {
     setConfig('A')
     setReady('A', '10.0.0.1')

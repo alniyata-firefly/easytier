@@ -7,6 +7,14 @@
   },
   "bundle": {
     "active": true,
+    "android": {
+      "versionCode": 2007002
+    },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    },
     "targets": "all",
     "icon": [
       "icons/icon.png",

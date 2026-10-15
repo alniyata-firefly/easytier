@@ -141,5 +141,11 @@
   "managementUnknown": "管理连接状态未知",
   "trafficHistory": "实时流量",
   "now": "现在",
-  "minutesAgo": "{{value}} 分钟前"
+  "minutesAgo": "{{value}} 分钟前",
+  "stopClient": "停止客户端",
+  "startClient": "启动客户端",
+  "clientPaused": "客户端已暂停",
+  "retryStopClient": "重试停止客户端",
+  "clientStopFailed": "客户端尚未完全停止，请重试停止。连接与配置已保留。",
+  "clientStartFailed": "客户端启动失败，请检查连接后重试。"
 }

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-set-client-enabled"
+description = "Enables the set_client_enabled command without any pre-configured scope."
+commands.allow = ["set_client_enabled"]
+
+[[permission]]
+identifier = "deny-set-client-enabled"
+description = "Denies the set_client_enabled command without any pre-configured scope."
+commands.deny = ["set_client_enabled"]

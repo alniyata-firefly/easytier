@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod elevate;
+#[cfg(target_os = "android")]
+mod local_client_lifecycle;
 
 use anyhow::Context;
 #[cfg(target_os = "android")]
@@ -77,6 +79,48 @@ static RPC_SERVER: once_cell::sync::Lazy<Mutex<Option<RpcServer>>> =
 static WEB_CLIENT: once_cell::sync::Lazy<RwLock<Option<WebClient>>> =
     once_cell::sync::Lazy::new(|| RwLock::new(None));
 
+#[cfg(target_os = "android")]
+static LOCAL_CLIENT_LIFECYCLE: local_client_lifecycle::LocalClientLifecycle =
+    local_client_lifecycle::LocalClientLifecycle::new();
+
+#[tauri::command]
+async fn stop_local_client() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        LOCAL_CLIENT_LIFECYCLE
+            .stop(std::time::Duration::from_secs(15), async {
+                // Disconnect reconciliation locally without modifying the central
+                // membership, credentials, or saved GUI configuration.
+                drop(WEB_CLIENT.write().await.take());
+                let manager = INSTANCE_MANAGER.read().await.clone();
+                if let Some(manager) = manager {
+                    let _mutation = manager.mutation_lock().lock_owned().await;
+                    manager
+                        .retain_network_instances(&[])
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    if !manager.instance_ids().is_empty() {
+                        return Err("local client still has active network instances".to_owned());
+                    }
+                }
+                Ok(())
+            })
+            .await
+    }
+    #[cfg(not(target_os = "android"))]
+    Err("local client suspension is only supported on Android".to_owned())
+}
+
+#[tauri::command]
+async fn resume_local_client() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        LOCAL_CLIENT_LIFECYCLE.resume().await
+    }
+    #[cfg(not(target_os = "android"))]
+    Err("local client suspension is only supported on Android".to_owned())
+}
+
 macro_rules! get_client_manager {
     () => {{
         let guard = CLIENT_MANAGER
@@ -144,6 +188,7 @@ async fn run_network_instance(
             &app,
             &toml_config,
             manager::PersistedConfigSource::from_runtime_source(source),
+            false,
         )
         .await?;
     client_manager
@@ -327,6 +372,7 @@ async fn update_network_config_state(
                 &app,
                 &toml_config,
                 manager::PersistedConfigSource::from_runtime_source(source),
+                false,
             )
             .await?;
     }
@@ -564,7 +610,15 @@ async fn init_rpc_connection(
                 }
             };
 
-            let rpc_server = ApiRpcServer::from_tunnel(tunnel, instance_manager.clone())
+            #[cfg(target_os = "android")]
+            let rpc_server = ApiRpcServer::from_tunnel_with_hooks(
+                tunnel,
+                instance_manager.clone(),
+                Arc::new(manager::LocalRunGate),
+            );
+            #[cfg(not(target_os = "android"))]
+            let rpc_server = ApiRpcServer::from_tunnel(tunnel, instance_manager.clone());
+            let rpc_server = rpc_server
                 .with_rx_timeout(None)
                 .serve()
                 .await
@@ -630,6 +684,10 @@ async fn init_web_client(app: AppHandle, url: Option<String>) -> Result<(), Stri
         *web_client_guard = None;
         return Ok(());
     };
+    #[cfg(target_os = "android")]
+    if LOCAL_CLIENT_LIFECYCLE.is_paused() {
+        return Err("local client is paused".to_owned());
+    }
     let instance_manager = INSTANCE_MANAGER
         .try_read()
         .map_err(|_| "Failed to acquire read lock for instance manager")?
@@ -752,6 +810,25 @@ mod manager {
         pub(super) app: AppHandle,
     }
 
+    #[cfg(target_os = "android")]
+    pub(super) struct LocalRunGate;
+
+    #[cfg(target_os = "android")]
+    #[async_trait]
+    impl WebClientHooks for LocalRunGate {
+        async fn pre_run_network_instance(
+            &self,
+            _cfg: &easytier::common::config::TomlConfigLoader,
+        ) -> Result<(), String> {
+            // ProcessManagement invokes this under the same mutation lock
+            // used by Stop, including requests already queued before a pause.
+            if super::LOCAL_CLIENT_LIFECYCLE.is_paused() {
+                return Err("local client is paused".to_owned());
+            }
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl WebClientHooks for GuiHooks {
         async fn pre_run_network_instance(
@@ -764,6 +841,7 @@ mod manager {
                     &self.app,
                     cfg,
                     PersistedConfigSource::from_runtime_source(cfg.get_network_config_source()),
+                    true,
                 )
                 .await
         }
@@ -1061,6 +1139,7 @@ mod manager {
             &self,
             app: &AppHandle,
             web_only: bool,
+            in_native_transaction: bool,
         ) -> Result<(), easytier_core::management::remote_client::RemoteClientError<anyhow::Error>>
         {
             let inst_ids: Vec<uuid::Uuid> = if web_only {
@@ -1069,8 +1148,32 @@ mod manager {
                 self.get_enabled_instances_with_tun_ids().collect()
             };
             for inst_id in inst_ids {
-                self.handle_update_network_state(app.clone(), inst_id, true)
-                    .await?;
+                if in_native_transaction {
+                    // ProcessManagement already owns this manager's mutation
+                    // lock while invoking its pre-run hook. Calling the local
+                    // delete RPC here would wait for that same lock.
+                    let manager =
+                        super::INSTANCE_MANAGER
+                            .read()
+                            .await
+                            .clone()
+                            .ok_or_else(|| {
+                                RemoteClientError::Other(
+                                    "local instance manager is unavailable".to_owned(),
+                                )
+                            })?;
+                    manager
+                        .delete_network_instances([inst_id])
+                        .await
+                        .map_err(|error| RemoteClientError::Other(error.to_string()))?;
+                    self.storage
+                        .update_network_config_state(app.clone(), inst_id, true)
+                        .await
+                        .map_err(RemoteClientError::PersistentError)?;
+                } else {
+                    self.handle_update_network_state(app.clone(), inst_id, true)
+                        .await?;
+                }
             }
             Ok(())
         }
@@ -1089,7 +1192,12 @@ mod manager {
             app: &AppHandle,
             cfg: &easytier::common::config::TomlConfigLoader,
             source: PersistedConfigSource,
+            in_native_transaction: bool,
         ) -> Result<(), String> {
+            #[cfg(target_os = "android")]
+            if super::LOCAL_CLIENT_LIFECYCLE.is_paused() {
+                return Err("local client is paused".to_owned());
+            }
             let instance_id = cfg.get_id();
             app.emit("pre_run_network_instance", instance_id.to_string())
                 .map_err(|e| e.to_string())?;
@@ -1098,12 +1206,12 @@ mod manager {
             if !cfg.get_flags().no_tun {
                 match source {
                     PersistedConfigSource::User | PersistedConfigSource::Legacy => {
-                        self.disable_instances_with_tun(app, false)
+                        self.disable_instances_with_tun(app, false, in_native_transaction)
                             .await
                             .map_err(|e| e.to_string())?;
                     }
                     PersistedConfigSource::Web => {
-                        self.disable_instances_with_tun(app, true)
+                        self.disable_instances_with_tun(app, true, in_native_transaction)
                             .await
                             .map_err(|e| e.to_string())?;
                         if self.get_enabled_instances_with_tun_ids().next().is_some() {
@@ -1251,7 +1359,7 @@ mod manager {
                         continue;
                     };
                     let toml_config = config.gen_config()?;
-                    self.pre_run_network_instance_hook(&app, &toml_config, source)
+                    self.pre_run_network_instance_hook(&app, &toml_config, source, false)
                         .await
                         .map_err(|e| anyhow::anyhow!(e))?;
                     client
@@ -1583,6 +1691,8 @@ pub fn run_gui() -> std::process::ExitCode {
             list_network_instance_ids,
             remove_network_instance,
             update_network_config_state,
+            stop_local_client,
+            resume_local_client,
             save_network_config,
             validate_config,
             get_config,

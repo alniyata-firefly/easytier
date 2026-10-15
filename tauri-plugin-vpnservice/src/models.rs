@@ -20,6 +20,12 @@ pub struct VoidRequest {}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SetClientEnabledRequest {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StartVpnRequest {
     pub ipv4_addr: Option<String>,
     pub routes: Option<Vec<String>>,

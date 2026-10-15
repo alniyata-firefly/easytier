@@ -50,6 +50,8 @@ export function saveEnabledNetworks(ids: unknown): void {
 export function loadLastNetworkInstanceId(): string | null { return localStorage.getItem('last_network_instance_id') }
 export function saveLastNetworkInstanceId(id: string): void { localStorage.setItem('last_network_instance_id', id) }
 export function saveMode(mode: Mode): void { localStorage.setItem('app_mode', JSON.stringify(mode)) }
+export function loadLocalClientPaused(): boolean { return localStorage.getItem('local_client_paused') === 'true' }
+export function saveLocalClientPaused(paused: boolean): void { localStorage.setItem('local_client_paused', String(paused)) }
 
 export function loadMode(platform = osType()): Mode {
   let mode: Mode

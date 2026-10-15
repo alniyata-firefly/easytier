@@ -40,6 +40,7 @@ export interface SessionSnapshot {
   mode: Mode
   connected: boolean
   managementConnected: boolean
+  clientPaused: boolean
   serviceStatus: ServiceStatus
   busy: boolean
   errorCode?: string

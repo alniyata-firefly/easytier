@@ -26,15 +26,30 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
     await page.getByRole('button', { name: 'Managed lab', exact: false }).click();
     assert.equal(await page.getByRole('button', { name: '编辑网络', exact: true }).isEnabled(), false);
     assert.equal(await page.getByRole('button', { name: '删除', exact: true }).isEnabled(), false);
-    await page.getByRole('button', { name: '停止', exact: true }).click();
-    await page.getByRole('button', { name: '启动', exact: true }).waitFor();
-    assert.equal(await page.locator('.traffic-chart').count(), 0);
-    await page.getByRole('button', { name: '启动', exact: true }).click();
-    await page.getByRole('button', { name: '停止', exact: true }).waitFor();
-    const sourceCalls = await page.evaluate(() => window.__MOCK_CALLS__.filter(call => call.args.instanceId === '22222222-2222-4222-8222-222222222222'));
-    assert.ok(sourceCalls.some(call => call.command === 'update_network_config_state' && call.args.disabled));
-    assert.ok(sourceCalls.some(call => call.command === 'update_network_config_state' && !call.args.disabled));
-    assert.ok(!sourceCalls.some(call => ['run_network_instance', 'save_network_config', 'remove_network_instance'].includes(call.command)));
+    if (scenario.platform === 'android') {
+      const callsBeforeStop = await page.evaluate(() => window.__MOCK_CALLS__.length);
+      await page.getByRole('button', { name: '停止客户端', exact: true }).click();
+      await page.getByRole('button', { name: '启动客户端', exact: true }).waitFor();
+      assert.equal(await page.locator('.traffic-chart').count(), 0);
+      const stopCalls = await page.evaluate(offset => window.__MOCK_CALLS__.slice(offset), callsBeforeStop);
+      assert.ok(stopCalls.some(call => call.command === 'stop_local_client'));
+      assert.ok(stopCalls.some(call => call.command === 'plugin:vpnservice|set_client_enabled' && call.args.enabled === false));
+      assert.ok(!stopCalls.some(call => ['update_network_config_state', 'remove_network_instance', 'save_network_config', 'run_network_instance', 'init_web_client'].includes(call.command)));
+      await page.getByRole('button', { name: '启动客户端', exact: true }).click();
+      await page.getByRole('button', { name: '停止客户端', exact: true }).waitFor();
+      await page.getByRole('heading', { name: 'Managed lab', exact: true }).waitFor();
+      assert.ok(await page.evaluate(() => window.__MOCK_CALLS__.some(call => call.command === 'resume_local_client')));
+    } else {
+      await page.getByRole('button', { name: '停止', exact: true }).click();
+      await page.getByRole('button', { name: '启动', exact: true }).waitFor();
+      assert.equal(await page.locator('.traffic-chart').count(), 0);
+      await page.getByRole('button', { name: '启动', exact: true }).click();
+      await page.getByRole('button', { name: '停止', exact: true }).waitFor();
+      const sourceCalls = await page.evaluate(() => window.__MOCK_CALLS__.filter(call => call.args.instanceId === '22222222-2222-4222-8222-222222222222'));
+      assert.ok(sourceCalls.some(call => call.command === 'update_network_config_state' && call.args.disabled));
+      assert.ok(sourceCalls.some(call => call.command === 'update_network_config_state' && !call.args.disabled));
+      assert.ok(!sourceCalls.some(call => ['run_network_instance', 'save_network_config', 'remove_network_instance'].includes(call.command)));
+    }
     await page.getByRole('button', { name: 'Local lab', exact: false }).click();
     await page.getByRole('button', { name: '编辑网络', exact: true }).click();
     const editor = page.getByRole('dialog', { name: '编辑网络' }); await editor.waitFor();

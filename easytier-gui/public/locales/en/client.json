@@ -141,5 +141,11 @@
   "managementUnknown": "Management connection status unknown",
   "trafficHistory": "Live traffic",
   "now": "Now",
-  "minutesAgo": "{{value}} min ago"
+  "minutesAgo": "{{value}} min ago",
+  "stopClient": "Stop client",
+  "startClient": "Start client",
+  "clientPaused": "Client paused",
+  "retryStopClient": "Retry stopping client",
+  "clientStopFailed": "The client has not completely stopped. Retry stopping; your connection and configuration are saved.",
+  "clientStartFailed": "The client could not start. Check the connection and retry."
 }

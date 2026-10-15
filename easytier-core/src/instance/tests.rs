@@ -1515,6 +1515,195 @@ virtual_ip = "10.82.0.2/24"
 
     #[cfg(feature = "management")]
     #[tokio::test]
+    async fn native_pre_run_replacement_stops_without_reentering_management_rpc() {
+        use crate::{
+            config::toml::TomlConfig,
+            instance::manager::InstanceFactory,
+            management::{
+                ConfigFileControl, InstanceManager, InstanceMutationHooks, ProcessManagement,
+                ProcessManagementRpc, UnsupportedConfigFileStorage,
+            },
+        };
+        use easytier_proto::{
+            api::manage::{DeleteNetworkInstanceRequest, WebClientService},
+            rpc_types::controller::BaseController,
+        };
+
+        struct Factory(Arc<CoreProcessRuntime>);
+        impl InstanceFactory for Factory {
+            type Instance = CoreInstance<TestHost>;
+            type CreateContext = ();
+            type Error = anyhow::Error;
+
+            fn create(&self, config: TomlConfig, (): ()) -> anyhow::Result<Arc<Self::Instance>> {
+                let (sink, _receiver) = tokio::sync::mpsc::channel(16);
+                CoreInstance::from_toml(
+                    config,
+                    adapters_with_process_runtime(None, Arc::new(sink), self.0.clone()),
+                )
+            }
+        }
+
+        struct ReplaceHook {
+            manager: Arc<InstanceManager<Factory>>,
+            old_id: uuid::Uuid,
+            nested_rpc: bool,
+            paused: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl InstanceMutationHooks for ReplaceHook {
+            async fn pre_run_network_instance(&self, _config: &TomlConfig) -> Result<(), String> {
+                // This is the real ProcessManagement transaction, shared by
+                // the config-server manager and the local management RPC.
+                assert!(self.manager.mutation_lock().try_lock().is_err());
+                if self.paused.load(Ordering::Acquire) {
+                    return Err("local client is paused".to_owned());
+                }
+                if self.nested_rpc {
+                    let rpc = ProcessManagementRpc::new(
+                        self.manager.clone(),
+                        Arc::new(()),
+                        Arc::new(UnsupportedConfigFileStorage),
+                    );
+                    let deletion = rpc.delete_network_instance(
+                        BaseController::default(),
+                        DeleteNetworkInstanceRequest {
+                            inst_ids: vec![self.old_id.into()],
+                        },
+                    );
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(40), deletion)
+                            .await
+                            .is_err()
+                    );
+                    return Err(
+                        "nested local delete cannot acquire the transaction lock".to_owned()
+                    );
+                }
+                self.manager
+                    .delete_network_instances([self.old_id])
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            }
+        }
+
+        for nested_rpc in [true, false] {
+            let manager = Arc::new(InstanceManager::new(
+                Factory(CoreProcessRuntime::new()),
+                Some(tokio::runtime::Handle::current()),
+            ));
+            let make_config = || {
+                let config = TomlConfig::default();
+                config.set_listeners(Vec::new());
+                config
+            };
+            let old_config = make_config();
+            let old_id = old_config.get_id();
+            manager
+                .run_network_instance(old_config, ConfigFileControl::new(None, Default::default()))
+                .unwrap();
+            let sibling_config = make_config();
+            let sibling_id = sibling_config.get_id();
+            manager
+                .run_network_instance(sibling_config, ConfigFileControl::STATIC_CONFIG)
+                .unwrap();
+            let paused = Arc::new(AtomicBool::new(false));
+            let hook = Arc::new(ReplaceHook {
+                manager: manager.clone(),
+                old_id,
+                nested_rpc,
+                paused: paused.clone(),
+            });
+            let management = ProcessManagement::new(
+                manager.clone(),
+                hook.clone(),
+                Arc::new(UnsupportedConfigFileStorage),
+            );
+            let new_config = make_config();
+            let new_id = new_config.get_id();
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                management.run_network_instance(new_config, None, false, None),
+            )
+            .await
+            .expect("pre-run replacement must not hang");
+            if nested_rpc {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("nested local delete")
+                );
+                // Delete RPC intentionally finishes after its caller times
+                // out. The old Android hook left exactly this queued work.
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while manager.instance(old_id).is_some() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(manager.instance(new_id).is_none());
+            } else {
+                assert_eq!(result.unwrap(), new_id);
+                assert!(manager.instance(old_id).is_none());
+                assert!(manager.instance(new_id).is_some());
+            }
+            assert!(
+                manager.instance(sibling_id).is_some(),
+                "unrelated instance survives"
+            );
+            if !nested_rpc {
+                let mutation = manager.mutation_lock().lock_owned().await;
+                let rpc = ProcessManagementRpc::new(
+                    manager.clone(),
+                    hook,
+                    Arc::new(UnsupportedConfigFileStorage),
+                );
+                let queued_start = tokio::spawn(async move {
+                    rpc.run_network_instance(
+                        BaseController::default(),
+                        easytier_proto::api::manage::RunNetworkInstanceRequest {
+                            config: Some(easytier_proto::api::manage::NetworkConfig {
+                                network_name: Some("queued-local-start".to_owned()),
+                                networking_method: Some(
+                                    easytier_proto::api::manage::NetworkingMethod::Standalone
+                                        as i32,
+                                ),
+                                ..Default::default()
+                            }),
+                            overwrite: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                });
+                tokio::task::yield_now().await;
+                paused.store(true, Ordering::Release);
+                manager.retain_network_instances(&[]).await.unwrap();
+                drop(mutation);
+                let result = tokio::time::timeout(Duration::from_secs(2), queued_start)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("local client is paused")
+                );
+                assert!(
+                    manager.instance_ids().is_empty(),
+                    "queued local RPC cannot revive a paused client"
+                );
+            }
+            manager.retain_network_instances(&[]).await.unwrap();
+        }
+    }
+
+    #[cfg(feature = "management")]
+    #[tokio::test]
     async fn cancelled_delete_finishes_stop_and_keeps_wait_blocked() {
         use std::{path::Path, path::PathBuf};
 
