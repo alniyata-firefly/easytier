@@ -62,8 +62,18 @@ test('console layout, navigation, global search and account popover use syntheti
   const base = `http://127.0.0.1:${server.address().port}`;
   const crumb = () => page.getByRole('navigation', { name: '当前位置', exact: true });
   const noOverflow = async () => assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true);
+  const cleanBreadcrumb = async firstLabel => {
+    const first = crumb().locator('li').first();
+    assert.equal((await first.innerText()).trim(), firstLabel);
+    assert.equal(await first.isVisible(), true);
+    assert.equal(await first.locator('svg').count(), 0);
+    assert.equal(await crumb().getByText('中央管理', { exact: true }).count(), 0);
+    assert.equal(await crumb().getByText('外部管理', { exact: true }).count(), 0);
+  };
+
   await page.goto(base);
   await crumb().getByText('概览', { exact: true }).waitFor();
+  await cleanBreadcrumb('概览');
   await page.locator('.summary-item strong').first().getByText('2', { exact: true }).waitFor();
   assert.equal(await page.locator('main h1').count(), 0);
   assert.equal(await page.locator('.workspace-breadcrumb').count(), 0);
@@ -98,8 +108,14 @@ test('console layout, navigation, global search and account popover use syntheti
   await listHeader.getByRole('searchbox').focus(); assert.equal(await listHeader.getByRole('searchbox').evaluate(element => getComputedStyle(element).outlineStyle), 'none');
   assert.ok(parseFloat(await listHeader.getByRole('button', { name: '创建网络', exact: true }).evaluate(element => getComputedStyle(element).borderTopLeftRadius)) >= 8);
   await page.screenshot({ path: join(output, 'networks-desktop.png'), fullPage: true });
+  await cleanBreadcrumb('网络');
   await page.locator('.network-list').getByRole('button', { name: /Office network/ }).click(); await crumb().getByRole('link', { name: 'Office network', exact: true }).waitFor();
-  await crumb().getByRole('link', { name: '网络', exact: true }).click(); await page.locator('.network-list').waitFor(); checked.push('list header alignment and network breadcrumb navigation');
+  await cleanBreadcrumb('网络');
+  assert.equal(await crumb().getByRole('link').count(), 2);
+  assert.equal(await crumb().locator('svg').count(), 1);
+  assert.equal(await crumb().getByRole('link').first().getAttribute('href'), '#/h/networks');
+  await page.screenshot({ path: join(output, 'network-detail-desktop.png'), fullPage: true });
+  await crumb().getByRole('link').first().click(); await page.locator('.network-list').waitFor(); checked.push('breadcrumb starts at the section, has no root label or leading arrow, and returns from network detail to its list');
   assert.equal(await page.locator('main h1').count(), 0);
   const search = page.getByRole('combobox', { name: '全局搜索', exact: true });
   await search.fill('Office network'); await page.getByRole('option', { name: /Office network/ }).waitFor(); await search.press('Enter');
@@ -112,6 +128,9 @@ test('console layout, navigation, global search and account popover use syntheti
   await search.focus(); await search.press('ArrowDown'); await page.getByRole('option', { name: /Office gateway/ }).waitFor(); await search.press('Enter');
   await crumb().getByRole('link', { name: 'Office gateway', exact: true }).waitFor();
   await page.getByRole('link', { name: 'Office instance', exact: true }).click(); await crumb().getByText('Office instance', { exact: true }).waitFor();
+  await cleanBreadcrumb('设备');
+  assert.equal(await crumb().getByRole('link').count(), 2);
+  assert.equal(await crumb().locator('svg').count(), 2);
   await crumb().getByRole('link', { name: '设备', exact: true }).click(); await page.locator('.list-panel .data-table').waitFor();
   assert.equal(await page.locator('.list-panel > .panel-heading').getByRole('searchbox').count(), 1);
   assert.equal(await page.locator('main h1').count(), 0);
@@ -120,19 +139,29 @@ test('console layout, navigation, global search and account popover use syntheti
   await page.locator('.list-panel .data-table').waitFor(); assert.equal(await page.locator('.list-panel tbody tr').count(), 1);
   assert.equal(await page.locator('.list-panel tbody').getByText('Office token', { exact: true }).count(), 1);
   assert.equal(await page.locator('main h1').count(), 0);
+  await cleanBreadcrumb('管理令牌');
   await page.screenshot({ path: join(output, 'tokens-desktop.png'), fullPage: true }); checked.push('global search navigation across devices and tokens, query filtering');
   await account.click(); await popover.getByRole('combobox', { name: '语言', exact: true }).selectOption('en');
   await page.getByRole('navigation', { name: 'Breadcrumb', exact: true }).waitFor();
   await page.getByRole('dialog', { name: 'Account menu', exact: true }).getByRole('combobox', { name: 'Language', exact: true }).selectOption('zh-CN');
   await page.keyboard.press('Escape'); checked.push('account language switch');
   for (const viewport of [{ width: 1024, height: 768 }, { width: 390, height: 844 }]) {
-    await page.setViewportSize(viewport); await noOverflow();
+    await page.setViewportSize(viewport); await noOverflow(); await cleanBreadcrumb('管理令牌');
     if (viewport.width < 760) { await page.getByRole('button', { name: '打开导航', exact: true }).click(); await page.getByRole('dialog', { name: '导航', exact: true }).getByRole('button', { name: '账户菜单', exact: true }).click(); await page.getByRole('dialog', { name: '账户菜单', exact: true }).waitFor(); await page.screenshot({ path: join(output, 'account-mobile.png'), fullPage: true }); await page.keyboard.press('Escape'); await page.getByRole('dialog', { name: '账户菜单', exact: true }).waitFor({ state: 'hidden' }); assert.equal(await page.getByRole('dialog', { name: '导航', exact: true }).isVisible(), true); await page.keyboard.press('Escape'); await page.getByRole('dialog', { name: '导航', exact: true }).waitFor({ state: 'hidden' }); }
     await page.screenshot({ path: join(output, `tokens-${viewport.width}.png`), fullPage: true });
   }
+  await page.goto(`${base}/#/h/networks/${instanceId}`);
+  await crumb().getByRole('link', { name: 'Office network', exact: true }).waitFor();
+  await cleanBreadcrumb('网络'); await noOverflow();
+  await page.screenshot({ path: join(output, 'network-detail-mobile.png'), fullPage: true });
+  await crumb().getByRole('link').first().click(); await page.locator('.network-list').waitFor();
+  checked.push('mobile breadcrumb keeps the first section visible and clickable');
   const fills = await page.locator('button:visible').evaluateAll(elements => elements.map(element => getComputedStyle(element).backgroundColor));
   assert.ok(fills.every(fill => fill === 'rgba(0, 0, 0, 0)')); checked.push('responsive layouts and unfilled buttons');
   await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole('navigation', { name: '主导航', exact: true }).getByRole('link', { name: '概览', exact: true }).click();
+  await crumb().getByText('概览', { exact: true }).waitFor(); await cleanBreadcrumb('概览');
+  checked.push('overview navigation uses its sidebar entry');
   await page.goto(`${base}/#/h/networks/%E0%A4%A`); await page.getByText('链接格式不正确，请从导航进入页面。', { exact: true }).waitFor();
   await page.getByRole('navigation', { name: '当前位置', exact: true }).getByRole('link', { name: '网络', exact: true }).click(); await page.locator('.network-list').waitFor();
   checked.push('malformed route stays recoverable');

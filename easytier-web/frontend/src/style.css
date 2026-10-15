@@ -312,7 +312,7 @@ progress::-moz-progress-bar { background: #73a8eb; border-radius: 2px; }
 .list-header-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: nowrap; gap: 8px; width: 100%; }
 .list-header-actions .search-field,.list-header-actions .search-input { width: clamp(170px,23vw,300px); max-width: 100%; }
 .list-header-actions .button { flex-shrink: 0; }
-@media (max-width: 1100px) { .topbar-breadcrumb li:first-child,.topbar-breadcrumb li:nth-child(2) > svg { display: none; } .summary-item { padding: 18px; } }
+@media (max-width: 1100px) { .summary-item { padding: 18px; } }
 @media (max-width: 760px) {
   .global-topbar { flex-wrap: wrap; height: auto; min-height: 92px; padding: 10px 12px; gap: 6px 10px; }
   .topbar-breadcrumb { order: 4; flex-basis: 100%; padding: 2px 4px; overflow: hidden; }

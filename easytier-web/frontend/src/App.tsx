@@ -74,8 +74,7 @@ function Console() {
       <button ref={navToggle} className="button ghost mobile-nav-toggle icon-only" type="button" aria-label={t(navOpen?'nav.close':'nav.open')} aria-expanded={navOpen} aria-controls="console-navigation" onClick={()=>setNavOpen(value=>!value)}><Icon name="menu"/></button>
       <div className="topbar-brand"><span className="brand-mark"><Icon name="network" size={21}/></span><span>EasyTier</span></div>
       <nav className="topbar-breadcrumb" aria-label={t('nav.breadcrumb')}><ol>
-        <li><a href="#/h">{t(info.webhook_auth?'scope.external':'scope.central')}</a></li>
-        <li><Icon name="arrow" size={12}/>{active==='overview'?<span aria-current="page">{title}</span>:<a href={`#${entries.find(entry=>entry.id===active)?.path}`} aria-current={!detailPath?'page':undefined}>{title}</a>}</li>
+        <li>{active==='overview'?<span aria-current="page">{title}</span>:<a href={`#${entries.find(entry=>entry.id===active)?.path}`} aria-current={!detailPath?'page':undefined}>{title}</a>}</li>
         {detailPath&&<li><Icon name="arrow" size={12}/><a href={`#${detailPath}`} aria-current={!parts[4]?'page':undefined}>{detail?.label||t(active==='networks'?'nav.networkDetail':'nav.deviceDetail')}</a></li>}
         {active==='devices'&&parts[4]&&<li><Icon name="arrow" size={12}/><span aria-current="page">{detail?.instance||decodedPart(parts[4])}</span></li>}
       </ol></nav>
