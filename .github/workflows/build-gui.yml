@@ -1,0 +1,197 @@
+name: Build adapted desktop GUI
+
+on:
+  workflow_call:
+    inputs:
+      artifact-prefix:
+        description: Prefix for the three platform artifact names
+        type: string
+        default: gui
+      macos-sign:
+        description: Use Developer ID signing and Apple notarization instead of ad-hoc builds
+        type: boolean
+        default: false
+    secrets:
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+  workflow_dispatch:
+    inputs:
+      artifact-prefix:
+        type: string
+        default: gui
+      macos-sign:
+        description: Sign and notarize macOS packages using the optional Apple secrets
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: ${{ matrix.platform }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+            bundles: nsis,msi
+            jobs: 2
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos-x86_64
+            bundles: app,dmg
+            jobs: 1
+          - os: macos-15
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            bundles: app,dmg
+            jobs: 1
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_BUILD_JOBS: ${{ matrix.jobs }}
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '8'
+      GUI_TARGET: ${{ matrix.target }}
+      MACOS_SIGN: ${{ inputs.macos-sign }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up locked frontend dependencies
+        uses: ./.github/actions/setup-frontend
+
+      - name: Set up protobuf compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '35.1'
+          repo-token: ${{ github.token }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.95'
+          target: ${{ matrix.target }}
+          cache: false
+          rustflags: ''
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: adapted-gui-v1
+          shared-key: ${{ matrix.target }}-rust1.95-release-thin-cgu8
+          cache-targets: true
+          cache-on-failure: true
+
+      - name: Enable MSI build prerequisites
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (!(Test-Path "$env:WINDIR\System32\vbscript.dll")) {
+            $feature = Get-WindowsCapability -Online | Where-Object { $_.Name -like 'VBSCRIPT*' } | Select-Object -First 1
+            if ($null -eq $feature) { throw 'VBScript is required by the Tauri WiX MSI toolchain' }
+            Add-WindowsCapability -Online -Name $feature.Name | Out-Null
+          }
+
+      - name: Build React assets and freeze desktop inputs
+        run: |
+          set -euo pipefail
+          test "$(protoc --version | tr -d '\r')" = 'libprotoc 35.1'
+          python ci/gui/test_helpers.py
+          pnpm --dir easytier-gui build
+          work="$RUNNER_TEMP/easytier-gui-$GUI_TARGET"
+          prepare_args=(--target "$GUI_TARGET" --work "$work")
+          if [[ "$RUNNER_OS" == macOS && "$MACOS_SIGN" == true ]]; then
+            prepare_args+=(--macos-sign)
+          fi
+          python ci/gui/prepare.py "${prepare_args[@]}"
+          echo "GUI_WORK=$work" >> "$GITHUB_ENV"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            echo 'RUSTFLAGS=-Ctarget-feature=+crt-static' >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Windows or unsigned macOS packages
+        if: runner.os == 'Windows' || !inputs.macos-sign
+        working-directory: easytier-gui
+        run: |
+          set -euo pipefail
+          pnpm exec tauri build --ci --target "$GUI_TARGET" --bundles '${{ matrix.bundles }}' \
+            --features custom-protocol --config "$GUI_WORK/tauri-ci.json" -- --locked
+
+      - name: Validate optional Apple signing configuration
+        if: runner.os == 'macOS' && inputs.macos-sign
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          names = ['APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_SIGNING_IDENTITY', 'APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID']
+          missing = [name for name in names if not os.environ.get(name)]
+          if missing:
+              raise SystemExit('Missing signing secret names: ' + ', '.join(missing))
+          PY
+
+      - name: Build Developer ID signed macOS packages
+        if: runner.os == 'macOS' && inputs.macos-sign
+        uses: tauri-apps/tauri-action@v0
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: easytier-gui
+          args: --ci --target ${{ matrix.target }} --bundles app,dmg --features custom-protocol --config "${{ env.GUI_WORK }}/tauri-ci.json" -- --locked
+
+      - name: Notarize and staple signed DMG
+        if: runner.os == 'macOS' && inputs.macos-sign
+        timeout-minutes: 45
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: python ci/gui/notarize.py --bundle-dir "$CARGO_TARGET_DIR/$GUI_TARGET/release/bundle/dmg"
+
+      - name: Verify real native payloads and collect release files
+        run: |
+          python ci/gui/verify.py --target "$GUI_TARGET" --target-dir "$CARGO_TARGET_DIR" \
+            --work "$GUI_WORK" --output artifacts/gui
+
+      - uses: actions/upload-artifact@v5
+        with:
+          overwrite: true
+          name: ${{ inputs.artifact-prefix }}-${{ matrix.platform }}
+          path: artifacts/gui/
+          if-no-files-found: error
+          retention-days: 14

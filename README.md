@@ -2,16 +2,15 @@
 
 <p align="center"><img src="assets/brand/easytier.svg" width="80" height="80" alt="EasyTier"/></p>
 
-Upstream project status:
+Downstream project status:
 
-[![Github release](https://img.shields.io/github/v/tag/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/releases)
-[![GitHub](https://img.shields.io/github/license/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
-[![GitHub last commit](https://img.shields.io/github/last-commit/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/commits/main)
-[![GitHub issues](https://img.shields.io/github/issues/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/issues)
-[![GitHub Core Actions](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml)
-[![GitHub GUI Actions](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml)
-[![GitHub Test Actions](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/EasyTier/EasyTier)
+[![Github release](https://img.shields.io/github/v/tag/alniyata-firefly/easytier)](https://github.com/alniyata-firefly/easytier/releases)
+[![GitHub](https://img.shields.io/github/license/alniyata-firefly/easytier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
+[![GitHub last commit](https://img.shields.io/github/last-commit/alniyata-firefly/easytier)](https://github.com/alniyata-firefly/easytier/commits/main)
+[![GitHub issues](https://img.shields.io/github/issues/alniyata-firefly/easytier)](https://github.com/alniyata-firefly/easytier/issues)
+[![GitHub Core Actions](https://github.com/alniyata-firefly/easytier/actions/workflows/build-linux.yml/badge.svg)](https://github.com/alniyata-firefly/easytier/actions/workflows/build-linux.yml)
+[![GitHub GUI Actions](https://github.com/alniyata-firefly/easytier/actions/workflows/build-gui.yml/badge.svg)](https://github.com/alniyata-firefly/easytier/actions/workflows/build-gui.yml)
+[![GitHub Test Actions](https://github.com/alniyata-firefly/easytier/actions/workflows/checks.yml/badge.svg)](https://github.com/alniyata-firefly/easytier/actions/workflows/checks.yml)
 
 [简体中文](/README_CN.md) | [English](/README.md)
 
@@ -33,16 +32,23 @@ The flat interface takes visual inspiration from the official [UniFi Network 10.
 
 The project retains the upstream **GNU LGPL version 3** [LICENSE](LICENSE) and existing contributor notices. Bundled HarmonyOS Sans SC and Inter keep their own licenses: the [HarmonyOS Sans Fonts License Agreement](easytier-web/frontend/public/fonts/LICENSE-HarmonyOS-Sans.txt) and [SIL Open Font License 1.1](easytier-web/frontend/public/fonts/LICENSE-Inter-GoogleFonts.txt). Font origins and original, unmodified web subsets are recorded in [font provenance](easytier-web/frontend/public/fonts/provenance.json) and the [font notices](easytier-web/frontend/public/fonts/font-notices.html).
 
-The badges, screenshots, documentation, installation commands, release links, sponsorship information, and contributor acknowledgments below are retained from upstream. They refer to the original EasyTier project; use this repository's Releases for downstream binaries and the matching source revision.
+The detailed feature descriptions, documentation links, installation script examples, sponsorship information, and contributor acknowledgments below are retained from upstream. The installation scripts refer to the original EasyTier distribution. Use [this repository’s Releases](https://github.com/alniyata-firefly/easytier/releases) for downstream binaries and the matching source revision; see [GitHub Actions builds](docs/github-actions.md) for the build and packaging workflow.
 
 > ✨ A simple, secure, decentralized virtual private network solution powered by Rust and Tokio
 
-<p align="center">
-<img src="assets/config-page.png" width="300" alt="config page">
-<img src="assets/running-page.png" width="300" alt="running page">
-</p>
+## Interface previews
 
-📚 **[Full Documentation](https://easytier.cn/en/)** | 🖥️ **[Web Console](https://easytier.cn/web)** | 📝 **[Download Releases](https://github.com/EasyTier/EasyTier/releases)** | 🧩 **[Third Party Tools](https://easytier.cn/en/guide/installation_gui.html#third-party-graphical-interfaces)** | ❤️ **[Sponsor](#sponsor)**
+These screenshots render this adaptation’s actual React interfaces with anonymous example data. Names, addresses, device identifiers, and metrics are illustrative. The desktop image previews the GUI in a browser with a simulated Core; it is not a native-device connectivity test.
+
+| Console overview | Managed network members |
+| --- | --- |
+| ![Console overview with example resources](docs/images/console/overview.png) | ![Managed network members with example devices](docs/images/console/network-members.png) |
+| Network transport settings | Desktop client preview |
+| ![Compression, KCP, QUIC and encryption settings](docs/images/console/network-settings.png) | ![React desktop client with anonymous example network](docs/images/console/desktop-client.png) |
+
+[Downloads](https://github.com/alniyata-firefly/easytier/releases) · [Build and packaging documentation](docs/github-actions.md)
+
+📚 **[Full Documentation](https://easytier.cn/en/)** | 🖥️ **[Web Console](https://easytier.cn/web)** | 📝 **[Download Releases](https://github.com/alniyata-firefly/easytier/releases)** | 🧩 **[Third Party Tools](https://easytier.cn/en/guide/installation_gui.html#third-party-graphical-interfaces)** | ❤️ **[Sponsor](#sponsor)**
 
 ## Features
 
@@ -93,7 +99,7 @@ Install via cargo (Latest development version):
 cargo install --git https://github.com/EasyTier/EasyTier.git easytier
 ```
 
-[Install pre-built binary](https://github.com/EasyTier/EasyTier/releases) (Recommended, All platforms supported)
+[Install pre-built binary](https://github.com/alniyata-firefly/easytier/releases) (Recommended, All platforms supported)
 
 [Install via Docker](https://easytier.cn/en/guide/installation.html#installation-methods)
 
@@ -242,7 +248,7 @@ Subnet proxy information will automatically sync to each node in the virtual net
 easytier-cli route
 ```
 
-![Routing Information](/assets/image-3.png)
+![Node routes in the downstream console, using anonymous example data](docs/images/console/node-routes.png)
 
 2. Test if you can access nodes in the proxied subnet:
 

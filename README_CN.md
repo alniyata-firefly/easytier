@@ -2,16 +2,15 @@
 
 <p align="center"><img src="assets/brand/easytier.svg" width="80" height="80" alt="EasyTier"/></p>
 
-上游项目状态：
+下游项目状态：
 
-[![Github release](https://img.shields.io/github/v/tag/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/releases)
-[![GitHub](https://img.shields.io/github/license/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
-[![GitHub last commit](https://img.shields.io/github/last-commit/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/commits/main)
-[![GitHub issues](https://img.shields.io/github/issues/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/issues)
-[![GitHub Core Actions](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml)
-[![GitHub GUI Actions](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml)
-[![GitHub Test Actions](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/EasyTier/EasyTier)
+[![Github release](https://img.shields.io/github/v/tag/alniyata-firefly/easytier)](https://github.com/alniyata-firefly/easytier/releases)
+[![GitHub](https://img.shields.io/github/license/alniyata-firefly/easytier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
+[![GitHub last commit](https://img.shields.io/github/last-commit/alniyata-firefly/easytier)](https://github.com/alniyata-firefly/easytier/commits/main)
+[![GitHub issues](https://img.shields.io/github/issues/alniyata-firefly/easytier)](https://github.com/alniyata-firefly/easytier/issues)
+[![GitHub Core Actions](https://github.com/alniyata-firefly/easytier/actions/workflows/build-linux.yml/badge.svg)](https://github.com/alniyata-firefly/easytier/actions/workflows/build-linux.yml)
+[![GitHub GUI Actions](https://github.com/alniyata-firefly/easytier/actions/workflows/build-gui.yml/badge.svg)](https://github.com/alniyata-firefly/easytier/actions/workflows/build-gui.yml)
+[![GitHub Test Actions](https://github.com/alniyata-firefly/easytier/actions/workflows/checks.yml/badge.svg)](https://github.com/alniyata-firefly/easytier/actions/workflows/checks.yml)
 
 [简体中文](/README_CN.md) | [English](/README.md)
 
@@ -33,16 +32,23 @@
 
 项目保留上游的 **GNU LGPL 第 3 版**[许可证](LICENSE)及原有贡献者说明。内置 HarmonyOS Sans SC 和 Inter 分别遵循各自的[鸿蒙字体许可协议](easytier-web/frontend/public/fonts/LICENSE-HarmonyOS-Sans.txt)与 [SIL Open Font License 1.1](easytier-web/frontend/public/fonts/LICENSE-Inter-GoogleFonts.txt)；字体来源、未经修改的官方网页切片及许可记录见[字体来源清单](easytier-web/frontend/public/fonts/provenance.json)和[字体许可页面](easytier-web/frontend/public/fonts/font-notices.html)。
 
-下文保留的徽章、截图、文档、安装命令、发布链接、赞助和贡献者信息来自上游，相关链接指向原始 EasyTier 项目。本下游版本的安装包及对应源码请使用本仓库的 Releases。
+下文的详细功能说明、文档链接、安装脚本示例、赞助和贡献者信息保留自上游；其中安装脚本安装的是原始 EasyTier 发行版。本下游版本的安装包及对应源码请使用[本仓库 Releases](https://github.com/alniyata-firefly/easytier/releases)，构建与打包方式见 [GitHub Actions 构建说明](docs/github-actions.md)。
 
 > ✨ 一个由 Rust 和 Tokio 驱动的简单、安全、去中心化的异地组网方案
 
-<p align="center">
-<img src="assets/config-page.png" width="300" alt="配置页面">
-<img src="assets/running-page.png" width="300" alt="运行页面">
-</p>
+## 界面预览
 
-📚 **[完整文档](https://easytier.cn)** | 🖥️ **[Web 控制台](https://easytier.cn/web)** | 📝 **[下载发布版本](https://github.com/EasyTier/EasyTier/releases)** | 🧩 **[第三方工具](https://easytier.cn/guide/installation_gui.html#%E7%AC%AC%E4%B8%89%E6%96%B9%E5%9B%BE%E5%BD%A2%E7%95%8C%E9%9D%A2)** | ❤️ **[赞助](#赞助)**
+以下截图使用本下游版本的真实 React 界面和匿名示例数据。名称、地址、设备标识及指标均为演示内容；桌面客户端图片由浏览器预览界面并模拟 Core 数据，不代表真机联网测试。
+
+| 控制台概览 | 网络成员管理 |
+| --- | --- |
+| ![控制台概览与示例资源指标](docs/images/console/overview.png) | ![使用匿名设备的网络成员管理](docs/images/console/network-members.png) |
+| 网络传输设置 | 桌面客户端预览 |
+| ![数据压缩、KCP、QUIC 与加密设置](docs/images/console/network-settings.png) | ![使用匿名示例网络的 React 桌面客户端](docs/images/console/desktop-client.png) |
+
+[下载安装包](https://github.com/alniyata-firefly/easytier/releases) · [构建与打包说明](docs/github-actions.md)
+
+📚 **[完整文档](https://easytier.cn)** | 🖥️ **[Web 控制台](https://easytier.cn/web)** | 📝 **[下载发布版本](https://github.com/alniyata-firefly/easytier/releases)** | 🧩 **[第三方工具](https://easytier.cn/guide/installation_gui.html#%E7%AC%AC%E4%B8%89%E6%96%B9%E5%9B%BE%E5%BD%A2%E7%95%8C%E9%9D%A2)** | ❤️ **[赞助](#赞助)**
 
 ## 特性
 
@@ -93,7 +99,7 @@ irm "https://github.com/EasyTier/EasyTier/blob/main/script/install.ps1?raw=true"
 cargo install --git https://github.com/EasyTier/EasyTier.git easytier
 ```
 
-[下载预编译文件](https://github.com/EasyTier/EasyTier/releases)（推荐，支持所有平台）
+[下载预编译文件](https://github.com/alniyata-firefly/easytier/releases)（推荐，支持所有平台）
 
 [通过 Docker 安装](https://easytier.cn/guide/installation.html#%E5%AE%89%E8%A3%85%E6%96%B9%E5%BC%8F)
 
@@ -240,7 +246,7 @@ sudo easytier-core -i 10.144.144.2 -n 10.1.1.0/24
 easytier-cli route
 ```
 
-![路由信息](/assets/image-3.png)
+![下游控制台节点路由表，使用匿名示例数据](docs/images/console/node-routes.png)
 
 2. 测试是否可以访问代理子网中的节点：
 

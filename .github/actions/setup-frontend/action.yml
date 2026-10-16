@@ -1,0 +1,25 @@
+name: Setup adapted frontend
+description: Install the locked workspace dependencies without building unrelated applications
+runs:
+  using: composite
+  steps:
+    - uses: pnpm/action-setup@v5
+      with:
+        version: 10.12.4
+        run_install: false
+    - uses: actions/setup-node@v5
+      with:
+        node-version: '22'
+        cache: pnpm
+        cache-dependency-path: pnpm-lock.yaml
+    - name: Use one pnpm version throughout the workspace
+      shell: bash
+      run: |
+        echo 'npm_config_manage_package_manager_versions=false' >> "$GITHUB_ENV"
+        echo 'npm_config_package_manager_strict=false' >> "$GITHUB_ENV"
+    - name: Install locked dependencies
+      shell: bash
+      env:
+        npm_config_manage_package_manager_versions: 'false'
+        npm_config_package_manager_strict: 'false'
+      run: pnpm install --frozen-lockfile

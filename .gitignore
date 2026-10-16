@@ -50,3 +50,23 @@ easytier-gui/src-tauri/*.sys
 # contrib
 go.sum
 .test-env/
+
+# Local deployment data and signing material. Existing upstream test fixtures stay tracked.
+/private/
+/runtime/
+/artifacts/
+**/__pycache__/
+*.pyc
+*.keystore
+*.jks
+*.p12
+*.pfx
+*.key
+*.pem
+**/keystore.properties
+**/android-release.properties
+.env.local
+.env.*.local
+*.sqlite
+*.sqlite3
+*.db

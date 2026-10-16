@@ -1,0 +1,107 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
+    outputs:
+      artifact-id:
+        description: Verified signed APK artifact ID
+        value: ${{ jobs.android.outputs.artifact-id }}
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A missing secret fails here, before downloading toolchains or compiling.
+      - name: Check Android signing secrets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: python3 ci/android/signing.py --check-env
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential clang libclang-dev mold pkg-config
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0 ndk;26.0.10792818'
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.95'
+          target: aarch64-linux-android
+          cache: false
+          rustflags: ''
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '35.1'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: ./.github/actions/setup-frontend
+
+      # Cache crate downloads only: generated JNI/Kotlin output is checkout-bound.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: android-arm64-16k
+          cache-targets: false
+
+      - name: Build and verify signed arm64 APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: python3 ci/android/build.py --source . --output "$RUNNER_TEMP/easytier-android-build" --jobs 2
+
+      - name: Upload verified APK and manifest
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: android-arm64
+          path: ${{ runner.temp }}/easytier-android-build/artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove temporary signing files
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, shutil
+          for path in pathlib.Path(os.environ['RUNNER_TEMP']).glob('easytier-android-signing-*'):
+              if path.is_dir() and not path.is_symlink():
+                  shutil.rmtree(path)
+          PY

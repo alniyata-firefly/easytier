@@ -1,0 +1,39 @@
+// Reproducible Android build compatibility overlay, outside the frozen Git tree.
+// The root Kotlin plugin already compiles with 2.1.21. AGP 8.3's old lint
+// parser cannot read that metadata, even though its assemble task exits zero.
+// AGP 8.10.1 supplies an API-36/Kotlin-2.1-capable lint and R8 toolchain.
+def androidRootPath = System.getenv('ET_ANDROID_OVERLAY_ROOT')
+def appliesTo = { project ->
+    if (!androidRootPath) return false
+    def root = new File(androidRootPath).canonicalFile.toPath()
+    project.rootProject.projectDir.canonicalFile.toPath().startsWith(root)
+}
+
+gradle.beforeProject { project ->
+    if (!appliesTo(project)) return
+    def alignBuildPlugin = { details ->
+        if (details.requested.group == 'com.android.tools.build' && details.requested.name == 'gradle') {
+            details.useVersion('8.10.1')
+            details.because('API 36 and Kotlin 2.1 metadata require a matching Android lint/R8 toolchain')
+        }
+        if (details.requested.group == 'org.jetbrains.kotlin' && details.requested.name == 'kotlin-gradle-plugin') {
+            details.useVersion('2.1.21')
+        }
+    }
+    project.buildscript.configurations.configureEach {
+        resolutionStrategy.eachDependency(alignBuildPlugin)
+    }
+    // buildSrc also declares AGP as its Rust plugin implementation dependency.
+    project.configurations.configureEach {
+        resolutionStrategy.eachDependency(alignBuildPlugin)
+    }
+    ['com.android.application', 'com.android.library'].each { pluginId ->
+        project.plugins.withId(pluginId) {
+            project.extensions.getByName('androidComponents').finalizeDsl { dsl ->
+                dsl.compileSdk = 36
+                dsl.buildToolsVersion = '35.0.0'
+                // Keep the application's existing minSdk=24 and targetSdk=34.
+            }
+        }
+    }
+}

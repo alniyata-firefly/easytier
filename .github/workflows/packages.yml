@@ -1,0 +1,133 @@
+name: Build packages
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/images/**'
+      - '.github/upstream-workflows/**'
+  workflow_dispatch:
+    inputs:
+      linux:
+        description: Build Linux x86_64 and ARM64 Core, CLI and Web
+        type: boolean
+        default: true
+      gui:
+        description: Build Windows x64 and macOS Intel/Apple Silicon GUI
+        type: boolean
+        default: true
+      android:
+        description: Build signed Android ARM64 APK (requires four signing secrets)
+        type: boolean
+        default: true
+      macos-sign:
+        description: Use configured Apple signing and notarization credentials
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      linux: ${{ steps.plan.outputs.linux }}
+      gui: ${{ steps.plan.outputs.gui }}
+      android: ${{ steps.plan.outputs.android }}
+      platforms: ${{ steps.plan.outputs.platforms }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Validate requested packages and signing configuration
+        id: plan
+        env:
+          WANT_LINUX: ${{ github.event_name != 'workflow_dispatch' || inputs.linux }}
+          WANT_GUI: ${{ github.event_name != 'workflow_dispatch' || inputs.gui }}
+          WANT_ANDROID: ${{ github.event_name != 'workflow_dispatch' || inputs.android }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: python3 ci/plan_packages.py
+
+  web:
+    needs: [plan, checks]
+    uses: ./.github/workflows/build-web.yml
+
+  checks:
+    needs: plan
+    uses: ./.github/workflows/checks.yml
+
+  linux:
+    needs: [plan, web]
+    if: needs.plan.outputs.linux == 'true'
+    uses: ./.github/workflows/build-linux.yml
+
+  gui:
+    needs: [plan, checks]
+    if: needs.plan.outputs.gui == 'true'
+    uses: ./.github/workflows/build-gui.yml
+    with:
+      macos-sign: ${{ github.event_name == 'workflow_dispatch' && inputs.macos-sign }}
+    secrets: inherit
+
+  android:
+    needs: [plan, checks]
+    if: needs.plan.outputs.android == 'true'
+    uses: ./.github/workflows/build-android.yml
+    secrets: inherit
+
+  collect:
+    if: >-
+      always() && !cancelled() &&
+      needs.plan.result == 'success' && needs.checks.result == 'success' && needs.web.result == 'success' &&
+      !contains(needs.*.result, 'failure')
+    needs: [plan, checks, web, linux, gui, android]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded-packages
+          pattern: '{web-static,linux-*,gui-*,android-arm64}'
+      - name: Verify all package hashes and the common source commit
+        env:
+          EXPECTED_PLATFORMS: ${{ needs.plan.outputs.platforms }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          command = ['python3', 'ci/artifacts.py', 'collect', '--input', 'downloaded-packages', '--output', 'release-assets']
+          for platform in json.loads(os.environ['EXPECTED_PLATFORMS']):
+              command.extend(['--platform', platform])
+          subprocess.run(command, check=True)
+          PY
+      - uses: actions/upload-artifact@v5
+        with:
+          overwrite: true
+          name: release-packages
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Create a draft release for a version tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release-assets/*

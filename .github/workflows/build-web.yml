@@ -1,0 +1,49 @@
+name: Build adapted Web
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-frontend
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.95'
+          target: wasm32-unknown-unknown
+          cache: false
+          rustflags: ''
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '35.1'
+          repo-token: ${{ github.token }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web-wasm-rust195
+          cache-targets: true
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+      - name: Build Web and config generator
+        run: |
+          pnpm --dir easytier-web/frontend-lib codegen:proto
+          pnpm --dir easytier-web/frontend build
+          pnpm --dir easytier-web/config-generator build
+          mkdir -p easytier-web/frontend/dist/config-generator
+          cp -R easytier-web/config-generator/dist/. easytier-web/frontend/dist/config-generator/
+          python3 ci/artifacts.py web
+      - uses: actions/upload-artifact@v5
+        with:
+          overwrite: true
+          name: web-static
+          path: artifacts/web/
+          if-no-files-found: error
+          retention-days: 14

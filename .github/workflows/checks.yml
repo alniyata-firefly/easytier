@@ -1,0 +1,62 @@
+name: Source checks
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-frontend
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '35.1'
+          repo-token: ${{ github.token }}
+      - name: Generate protocol types and check both React applications
+        run: |
+          pnpm --dir easytier-web/frontend-lib codegen:proto
+          pnpm --dir easytier-web/frontend typecheck
+          pnpm --dir easytier-web/frontend test
+          pnpm --dir easytier-gui typecheck
+          pnpm --dir easytier-gui test:react
+          pnpm --dir easytier-gui test:native
+      - name: Install Chromium for the focused browser regressions
+        run: pnpm --dir easytier-web/frontend exec playwright install --with-deps chromium
+      - name: Verify member status and network settings in Chromium
+        working-directory: easytier-web/frontend
+        run: node --test --test-concurrency=1 tests/network-member-runtime-browser.test.mjs tests/network-transport-browser.test.mjs tests/network-settings-restore-browser.test.mjs tests/advanced-node-browser.test.mjs
+  workflow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache: false
+      - name: Check active workflow syntax
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint" -color
+      - name: Check package helpers
+        run: |
+          python3 -m compileall -q ci
+          python3 ci/test_artifacts.py
+          python3 -m unittest discover -s ci/android -p 'test_*.py'
+          python3 -m unittest discover -s ci/gui -p 'test_*.py'

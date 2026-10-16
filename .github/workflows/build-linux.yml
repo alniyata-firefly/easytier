@@ -1,0 +1,92 @@
+name: Build adapted Linux packages
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+  CARGO_PROFILE_RELEASE_LTO: thin
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '8'
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install native musl build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential musl-tools pkg-config cmake clang iproute2
+          command -v musl-gcc
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '35.1'
+          repo-token: ${{ github.token }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.95'
+          target: ${{ matrix.target }}
+          cache: false
+          rustflags: ''
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-static
+          path: downloaded-web
+      - name: Restore and verify the frontend built from this commit
+        run: |
+          python3 ci/artifacts.py restore-web --input downloaded-web
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-${{ matrix.target }}-rust195-thin8
+          cache-targets: true
+      - name: Build Core, CLI and embedded Web
+        env:
+          TARGET: ${{ matrix.target }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --locked --release --target "$TARGET" -p easytier -p easytier-web --features easytier-web/embed --bin easytier-core --bin easytier-cli --bin easytier-web
+      - name: Verify and package native executables
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: python3 ci/artifacts.py linux --target "$TARGET" --arch "$ARCH"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Test the built Web and Core over isolated loopback UDP
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sudo env EASYTIER_WEB_BIN="$PWD/target/$TARGET/release/easytier-web" \
+            EASYTIER_CORE_BIN="$PWD/target/$TARGET/release/easytier-core" \
+            ET_TEST_NETWORK_ISOLATED=1 ET_NATIVE_E2E_OUTPUT="$RUNNER_TEMP/native-e2e" \
+            unshare --net sh -c 'ip link set lo up; exec "$@"' sh \
+            "$(command -v node)" --test easytier-web/frontend/tests/member-offline-native-e2e.test.mjs
+      - uses: actions/upload-artifact@v5
+        with:
+          overwrite: true
+          name: linux-${{ matrix.arch }}
+          path: artifacts/linux-${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 14
