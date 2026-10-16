@@ -185,7 +185,16 @@ class Dex:
                                         "code_present": bool(code_offset),
                                         "annotations": method_annotations.get(index, {}),
                                         **self.code_evidence(code_offset)})
-            result[descriptor] = {"methods": methods, "fields": fields, "annotations": class_annotations}
+            interfaces_offset = self.u32(entry + 12)
+            interfaces = ([self.types[struct.unpack_from("<H", self.data, interfaces_offset + 4 + j * 2)[0]]
+                           for j in range(self.u32(interfaces_offset))] if interfaces_offset else [])
+            superclass_index = self.u32(entry + 8)
+            result[descriptor] = {
+                "methods": methods, "fields": fields, "annotations": class_annotations,
+                "access": self.u32(entry + 4),
+                "interfaces": interfaces,
+                "superclass": None if superclass_index == 0xffffffff else self.types[superclass_index],
+            }
         return result
 
 
@@ -200,21 +209,44 @@ def verify_lifecycle(definitions, mapping_text=""):
     app_types = {descriptor for descriptor in definitions
                  if descriptor.replace("/", ".")[1:-1].startswith(prefixes)}
     closure_types = {descriptor for descriptor in app_types if "$" in descriptor and not descriptor.endswith("$Companion;")}
-    for original, actual in re.findall(r"^([^ #\s][^ ]*) -> ([^:]+):$", mapping_text, re.M):
+    class_mapping = dict(re.findall(r"^([^ #\s][^ ]*) -> ([^:]+):$", mapping_text, re.M))
+    for original, actual in class_mapping.items():
         if original.startswith(prefixes):
             descriptor = "L" + actual.replace(".", "/") + ";"
             app_types.add(descriptor)
             if "$" in original and not original.endswith("$Companion"):
                 closure_types.add(descriptor)
+    # Desugared/merged lambdas can be assigned another original class's name
+    # and have no app-prefixed class mapping. Use the actual DEX hierarchy to
+    # identify their functional role. Only types referenced by reachable code
+    # are followed below; an unrelated callback elsewhere is never evidence.
+    functional_types = {"Ljava/lang/Runnable;"}
+    functional_types.update("Lkotlin/jvm/functions/Function" + str(arity) + ";" for arity in range(23))
+    for original in tuple(functional_types):
+        mapped = class_mapping.get(original[1:-1].replace("/", "."))
+        if mapped:
+            functional_types.add("L" + mapped.replace(".", "/") + ";")
+    changed = True
+    while changed:
+        changed = False
+        for descriptor, definition in definitions.items():
+            bases = [*definition.get("interfaces", []), definition.get("superclass")]
+            if descriptor not in functional_types and any(base in functional_types for base in bases):
+                functional_types.add(descriptor)
+                changed = True
+    closure_types.update(descriptor for descriptor in functional_types & definitions.keys()
+                         if not definitions[descriptor].get("access", 0) & (0x200 | 0x400))
+    helper_types = app_types | closure_types
     method_map = {(owner, method["name"], method["signature"]): method
                   for owner, definition in definitions.items() for method in definition["methods"]}
+    trace = {}
 
     def evidence(owner, name, signature):
         root = (owner, name, signature)
         if root not in method_map or not method_map[root]["code_present"]:
             raise ValueError("R8 removed a required Android lifecycle entry: " + name)
         pending, seen = [root], set()
-        calls, strings, literals = set(), set(), set()
+        calls, strings, literals, referenced = set(), set(), set(), set()
         conditional = False
         while pending:
             key = pending.pop()
@@ -225,10 +257,11 @@ def verify_lifecycle(definitions, mapping_text=""):
             calls.update(tuple(item) for item in method.get("calls", []))
             strings.update(method.get("strings", []))
             literals.update(method.get("literal_constants", []))
+            referenced.update(method.get("types", []))
             conditional |= method.get("has_conditional", False)
             for call in method.get("calls", []):
                 call = tuple(call)
-                if call[0] in app_types and call in method_map:
+                if call[0] in helper_types and call in method_map:
                     pending.append(call)
             # Runnable/Function closures may be passed to framework methods,
             # invoked later. Follow their actual post-R8 app class references.
@@ -236,11 +269,20 @@ def verify_lifecycle(definitions, mapping_text=""):
                 if descriptor in closure_types and descriptor in definitions:
                     pending.extend((descriptor, item["name"], item["signature"])
                                    for item in definitions[descriptor]["methods"])
+        # Only symbols and counts enter failure diagnostics. Never emit DEX
+        # string constants, payload bytes or source/signing file contents.
+        trace.clear()
+        trace.update(root=root, visited_count=len(seen), visited=sorted(seen)[:48],
+                     call_count=len(calls), calls=sorted(calls)[:48],
+                     referenced_type_count=len(referenced), referenced_types=sorted(referenced)[:48])
         return calls, strings, literals, conditional
+
+    def fail_gate(message):
+        raise ValueError(message + "; reachable DEX symbols: " + json.dumps(trace, separators=(",", ":")))
 
     def require_api(calls, name, signature, label):
         if not any(item[1] == name and item[2] == signature for item in calls):
-            raise ValueError("R8 lifecycle gate missing " + label + ": " + name)
+            fail_gate("R8 lifecycle gate missing " + label + ": " + name)
 
     plugin = "Lcom/plugin/vpnservice/VpnServicePlugin;"
     setter, setter_strings, _, _ = evidence(plugin, "setClientEnabled", "(Lapp/tauri/plugin/Invoke;)V")
@@ -248,7 +290,7 @@ def verify_lifecycle(definitions, mapping_text=""):
     require_api(setter, "apply", "()V", "persisted pause")
     require_api(setter, "stopService", "(Landroid/content/Intent;)Z", "paused foreground service")
     if not {"easytier_client_lifecycle", "enabled"} <= setter_strings:
-        raise ValueError("R8 lifecycle gate missing persisted pause preference keys")
+        fail_gate("R8 lifecycle gate missing persisted pause preference keys")
     stopping, _, _, _ = evidence(plugin, "stopVpn", "(Lapp/tauri/plugin/Invoke;)V")
     require_api(stopping, "stopService", "(Landroid/content/Intent;)Z", "explicit VPN stop")
     require_api(stopping, "close", "()V", "requested VPN tunnel close")
@@ -267,7 +309,7 @@ def verify_lifecycle(definitions, mapping_text=""):
         require_api(calls, "getBoolean", "(Ljava/lang/String;Z)Z", "saved pause guard")
         require_api(calls, "stopSelf", "()V", "paused service stop")
         if not {"easytier_client_lifecycle", "enabled"} <= strings or not conditional or not {1, 2} <= literals:
-            raise ValueError("R8 lifecycle gate missing conditional START_STICKY/START_NOT_STICKY pause guard")
+            fail_gate("R8 lifecycle gate missing conditional START_STICKY/START_NOT_STICKY pause guard")
         if "MainForegroundService" in descriptor:
             require_api(calls, "stopForeground", "(I)V", "paused foreground removal")
     return {"set_client_enabled_persists_pause": True, "explicit_stop_service_apis_preserved": True,

@@ -67,6 +67,10 @@ alignment, and APK ZIP alignment. A 4 KiB or incorrectly signed APK is rejected.
 The R8 gate includes `setClientEnabled`, its reflected boolean argument, saved
 pause preferences, explicit service-stop APIs and both services' pause guards;
 it follows renamed application helpers and closures through the actual mapping.
+Merged callbacks are identified from their actual DEX superclass/interfaces,
+including renamed Kotlin function interfaces. Only callbacks referenced from
+the required lifecycle entry points contribute evidence. Failure diagnostics
+report reachable symbols, not DEX string constants or signing data.
 These checks do not replace installation and VPN tests on an Android device.
 
 ## Local use

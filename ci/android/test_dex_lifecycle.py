@@ -85,6 +85,75 @@ class DexLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "persisted pause"):
             verify_lifecycle(definitions)
 
+    def test_reachable_merged_runnable_without_app_mapping_passes(self):
+        definitions = fixture()
+        definitions['La/b;']['interfaces'] = ['Ljava/lang/Runnable;']
+        self.assertTrue(verify_lifecycle(definitions)['set_client_enabled_persists_pause'])
+
+    def test_reachable_function_with_renamed_interface_and_superclass_passes(self):
+        definitions = fixture()
+        definitions['La/b;']['superclass'] = 'La/base;'
+        definitions['La/b;']['methods'][0]['name'] = 'invoke'
+        definitions['La/b;']['methods'][0]['signature'] = '(Ljava/lang/Object;)Ljava/lang/Object;'
+        definitions['La/base;'] = {'methods': [], 'interfaces': ['La/function;'], 'access': 0x401}
+        definitions['La/function;'] = {'methods': [], 'access': 0x601}
+        mapping = 'kotlin.jvm.functions.Function1 -> a.function:\n'
+        self.assertTrue(verify_lifecycle(definitions, mapping)['set_client_enabled_persists_pause'])
+
+    def test_unreferenced_functional_class_cannot_supply_missing_pause_evidence(self):
+        definitions = fixture()
+        definitions['La/b;']['interfaces'] = ['Ljava/lang/Runnable;']
+        setter = next(item for item in definitions[PLUGIN]['methods'] if item['name'] == 'setClientEnabled')
+        setter['types'] = []
+        with self.assertRaisesRegex(ValueError, 'persisted pause'):
+            verify_lifecycle(definitions)
+
+    def test_interface_reference_does_not_follow_all_implementations(self):
+        definitions = fixture()
+        definitions['La/b;']['interfaces'] = ['La/function;']
+        definitions['La/function;'] = {'methods': [], 'access': 0x601}
+        setter = next(item for item in definitions[PLUGIN]['methods'] if item['name'] == 'setClientEnabled')
+        setter['types'] = ['La/function;']
+        mapping = 'kotlin.jvm.functions.Function1 -> a.function:\n'
+        with self.assertRaisesRegex(ValueError, 'persisted pause'):
+            verify_lifecycle(definitions, mapping)
+
+    def test_plain_helper_type_reference_does_not_supply_pause_evidence(self):
+        definitions = fixture()
+        descriptor = 'Lcom/plugin/vpnservice/UnrelatedPolicy;'
+        definitions[descriptor] = definitions.pop('La/b;')
+        setter = next(item for item in definitions[PLUGIN]['methods'] if item['name'] == 'setClientEnabled')
+        setter['types'] = [descriptor]
+        with self.assertRaisesRegex(ValueError, 'persisted pause'):
+            verify_lifecycle(definitions)
+
+    def test_merged_function_still_requires_persisted_write(self):
+        for removed in ['putBoolean', 'apply']:
+            with self.subTest(removed=removed):
+                definitions = fixture()
+                definitions['La/b;']['interfaces'] = ['Ljava/lang/Runnable;']
+                definitions['La/b;']['methods'][0]['calls'] = [call for call in definitions['La/b;']['methods'][0]['calls']
+                                                             if call[1] != removed]
+                with self.assertRaisesRegex(ValueError, 'persisted pause'):
+                    verify_lifecycle(definitions)
+
+    def test_merged_function_still_requires_pause_preference_keys(self):
+        definitions = fixture()
+        definitions['La/b;']['interfaces'] = ['Ljava/lang/Runnable;']
+        definitions['La/b;']['methods'][0]['strings'] = ['unrelated']
+        with self.assertRaisesRegex(ValueError, 'preference keys'):
+            verify_lifecycle(definitions)
+
+    def test_failed_gate_reports_symbols_without_dex_string_contents(self):
+        definitions = fixture()
+        setter = next(item for item in definitions[PLUGIN]['methods'] if item['name'] == 'setClientEnabled')
+        setter['strings'] = ['fixture-private-string']
+        with self.assertRaises(ValueError) as failure:
+            verify_lifecycle(definitions)
+        self.assertIn('reachable DEX symbols', str(failure.exception))
+        self.assertIn('setClientEnabled', str(failure.exception))
+        self.assertNotIn('fixture-private-string', str(failure.exception))
+
     def test_complete_new_bridge_passes_with_actual_mapping_input(self):
         with tempfile.TemporaryDirectory() as temporary:
             mapping = Path(temporary) / 'mapping.txt'
