@@ -10,9 +10,12 @@ use std::{
 use base64::Engine as _;
 use easytier::{
     common::config::{ConfigLoader as _, NetworkConfig, TomlConfigLoader},
-    proto::api::manage::CollectNetworkInfoResponse,
+    proto::{
+        api::manage::{CollectNetworkInfoRequest, CollectNetworkInfoResponse, WebClientService as _},
+        rpc_types::{controller::BaseController, error::Error as RpcError},
+    },
 };
-use easytier_core::management::remote_client::{RemoteClientError, RemoteClientManager as _};
+use easytier_core::management::remote_client::RemoteClientManager as _;
 use futures::{StreamExt as _, TryStreamExt as _};
 use rand::{RngCore as _, rngs::OsRng};
 use sea_orm::{ColumnTrait as _, EntityTrait as _, QueryFilter as _, QueryOrder as _};
@@ -24,7 +27,7 @@ use super::model::{
 };
 pub use super::temporary_peers::TemporaryPeerInfo;
 use crate::{
-    client_manager::ClientManager,
+    client_manager::{ClientManager, session::Session},
     db::{CentralIntentError, Db, UserIdInDb},
 };
 
@@ -197,6 +200,13 @@ pub struct NetworkDeploymentStatus {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberRuntimeQueryError {
+    Timeout,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct MemberInfo {
     pub member_id: String,
     pub device_id: String,
@@ -210,6 +220,8 @@ pub struct MemberInfo {
     pub runtime_virtual_ipv4: Option<String>,
     pub version: Option<String>,
     pub error_msg: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_query_error: Option<MemberRuntimeQueryError>,
     pub has_override: bool,
     pub proxy_cidrs: Vec<String>,
     pub temporary: bool,
@@ -1090,23 +1102,38 @@ impl CentralNetworkService {
         let network_id = intent.id;
         let device_id = Uuid::parse_str(&member.device_id)
             .map_err(|_| CentralNetworkServiceError::Database("invalid stored device id".into()))?;
-        let online = match self
-            .client_manager
-            .get_session_by_machine_id(user_id, &device_id)
-        {
-            Some(session) => session.management_access_valid().await,
-            None => false,
+        let queried_session = self.authorized_member_session(user_id, &device_id).await;
+        let response = if let Some(session) = &queried_session {
+            Some(
+                session
+                    .scoped_rpc_client()
+                    .collect_network_info(
+                        BaseController::default(),
+                        CollectNetworkInfoRequest {
+                            inst_ids: vec![network_id.into()],
+                        },
+                    )
+                    .await,
+            )
+        } else {
+            None
         };
+        // A status RPC can outlive the connection it queried. Recheck the
+        // authenticated session after awaiting it, including replacement by a
+        // reconnect from the same device. Never attach an old result to it.
+        let current_session = self.authorized_member_session(user_id, &device_id).await;
+        let online = current_session.is_some();
+        let observation_current = queried_session
+            .as_ref()
+            .zip(current_session.as_ref())
+            .is_some_and(|(queried, current)| Arc::ptr_eq(queried, current));
         let mut running = None;
         let mut runtime_virtual_ipv4 = None;
         let mut error_msg = None;
-        if online {
-            match self
-                .client_manager
-                .handle_collect_network_info((user_id, device_id), Some(vec![network_id]))
-                .await
-            {
-                Ok(response) => {
+        let mut runtime_query_error = None;
+        if observation_current {
+            match response {
+                Some(Ok(response)) => {
                     if let Some((is_running, virtual_ipv4, runtime_error)) =
                         member_runtime_fields(&response, network_id)
                     {
@@ -1115,8 +1142,16 @@ impl CentralNetworkService {
                         error_msg = runtime_error;
                     }
                 }
-                Err(RemoteClientError::ClientNotFound) => {}
-                Err(error) => error_msg = Some(error.to_string()),
+                // An observation transport failure says nothing about whether
+                // Core started its instance successfully. Keep that distinct
+                // from the instance's own error_msg and deployment failures.
+                Some(Err(RpcError::Timeout(_))) => {
+                    runtime_query_error = Some(MemberRuntimeQueryError::Timeout);
+                }
+                Some(Err(_)) => {
+                    runtime_query_error = Some(MemberRuntimeQueryError::Unavailable);
+                }
+                None => {}
             }
         }
         let credential_expiry_unix = member.credential_id.as_deref().and_then(|credential_id| {
@@ -1144,6 +1179,7 @@ impl CentralNetworkService {
             runtime_virtual_ipv4,
             version: device.map(|device| device.easytier_version.clone()),
             error_msg,
+            runtime_query_error,
             has_override: member.config_override.is_some(),
             proxy_cidrs: member
                 .config_override
@@ -1157,6 +1193,28 @@ impl CentralNetworkService {
                 .device_deployment_status(intent, member, expected_config)
                 .await?,
         })
+    }
+
+    async fn authorized_member_session(
+        &self,
+        user_id: UserIdInDb,
+        device_id: &Uuid,
+    ) -> Option<Arc<Session>> {
+        for _ in 0..2 {
+            let session = self
+                .client_manager
+                .get_session_by_machine_id(user_id, device_id)?;
+            let valid = session.management_access_valid().await && session.is_running();
+            let current = self
+                .client_manager
+                .get_session_by_machine_id(user_id, device_id)?;
+            if Arc::ptr_eq(&session, &current) {
+                return valid.then_some(session);
+            }
+            // Authorization checks await storage. If a reconnect replaced the
+            // session during that await, validate its successor once instead.
+        }
+        None
     }
 
     async fn device_deployment_status(

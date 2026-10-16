@@ -149,6 +149,7 @@ export interface CentralNetworkMember {
     runtime_virtual_ipv4: string | null;
     version: string | null;
     error_msg: string | null;
+    runtime_query_error?: 'timeout' | 'unavailable' | null;
     has_override?: boolean;
     proxy_cidrs?: string[];
     temporary?: boolean;

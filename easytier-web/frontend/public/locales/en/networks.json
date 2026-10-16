@@ -135,6 +135,8 @@
     "running": "Network running",
     "stopped": "Network stopped",
     "runningUnknown": "Runtime status unknown",
+    "runtimeQueryTimeout": "Runtime status query timed out",
+    "runtimeQueryUnavailable": "Runtime status temporarily unavailable",
     "credentialMember": "Credential member",
     "revisions": "Applied {{applied}}; desired {{desired}}",
     "configure": "Configure",

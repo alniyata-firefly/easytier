@@ -135,6 +135,8 @@
     "running": "网络运行中",
     "stopped": "网络已停止",
     "runningUnknown": "运行状态未知",
+    "runtimeQueryTimeout": "运行状态读取超时",
+    "runtimeQueryUnavailable": "运行状态暂不可用",
     "credentialMember": "凭据成员",
     "revisions": "已应用 {{applied}}；目标 {{desired}}",
     "configure": "配置",
