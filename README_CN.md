@@ -12,7 +12,7 @@
 [![GitHub GUI Actions](https://github.com/alniyata-firefly/easytier/actions/workflows/build-gui.yml/badge.svg)](https://github.com/alniyata-firefly/easytier/actions/workflows/build-gui.yml)
 [![GitHub Test Actions](https://github.com/alniyata-firefly/easytier/actions/workflows/checks.yml/badge.svg)](https://github.com/alniyata-firefly/easytier/actions/workflows/checks.yml)
 
-[简体中文](/README_CN.md) | [English](/README.md)
+[简体中文](README.md) | [English](README_EN.md)
 
 ## 项目来源与下游改造
 
