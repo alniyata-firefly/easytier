@@ -251,12 +251,16 @@ def verify_lifecycle(definitions, mapping_text=""):
         raise ValueError("R8 lifecycle gate missing persisted pause preference keys")
     stopping, _, _, _ = evidence(plugin, "stopVpn", "(Lapp/tauri/plugin/Invoke;)V")
     require_api(stopping, "stopService", "(Landroid/content/Intent;)Z", "explicit VPN stop")
-    # A final app class may have its direct onRevoke call inlined by R8.
-    # Accept its actual cleanup APIs in that case, rather than prescribing
-    # whether the optimizer must retain the original call instruction.
-    if not any(item[1:] == ("onRevoke", "()V") for item in stopping):
-        require_api(stopping, "stopForeground", "(I)V", "inlined VPN revoke")
-        require_api(stopping, "close", "()V", "inlined VPN revoke")
+    require_api(stopping, "close", "()V", "requested VPN tunnel close")
+    # Stop only requests shutdown. Android acknowledges real service exit via
+    # onDestroy; do not require an early/manual onRevoke or foreground removal
+    # inside the plugin command as proof of a completed stop.
+    destroyed, _, _, _ = evidence("Lcom/plugin/vpnservice/TauriVpnService;", "onDestroy", "()V")
+    require_api(destroyed, "close", "()V", "framework VPN destroy cleanup")
+    require_api(destroyed, "stopForeground", "(I)V", "framework VPN destroy cleanup")
+    revoked, _, _, _ = evidence("Lcom/plugin/vpnservice/TauriVpnService;", "onRevoke", "()V")
+    require_api(revoked, "close", "()V", "framework VPN revoke cleanup")
+    require_api(revoked, "stopSelf", "()V", "framework VPN revoke cleanup")
     signature = "(Landroid/content/Intent;II)I"
     for descriptor in ["Lcom/kkrainbow/easytier/MainForegroundService;", "Lcom/plugin/vpnservice/TauriVpnService;"]:
         calls, strings, literals, conditional = evidence(descriptor, "onStartCommand", signature)
@@ -267,6 +271,8 @@ def verify_lifecycle(definitions, mapping_text=""):
         if "MainForegroundService" in descriptor:
             require_api(calls, "stopForeground", "(I)V", "paused foreground removal")
     return {"set_client_enabled_persists_pause": True, "explicit_stop_service_apis_preserved": True,
+            "framework_on_destroy_cleanup_preserved": True,
+            "framework_revoke_cleanup_preserved": True,
             "both_service_pause_guards_preserved": True, "r8_application_helpers_followed": True,
             "static_check_only": True}
 
@@ -337,7 +343,7 @@ def verify_bridge_definitions(definitions, mapping=None):
     if len(callback) != 1:
         raise ValueError("R8 damaged the reflected VPN permission callback")
     fields = {field["name"] for field in definitions["Lcom/plugin/vpnservice/StartVpnArgs;"]["fields"]}
-    required_fields = {"ipv4Addr", "routes", "dns", "disallowedApplications", "mtu"}
+    required_fields = {"requestId", "instanceId", "ipv4Addr", "routes", "dns", "disallowedApplications", "mtu"}
     if not required_fields <= fields:
         raise ValueError("R8 renamed or removed reflected VPN argument fields")
     client_fields = definitions["Lcom/plugin/vpnservice/SetClientEnabledArgs;"]["fields"]

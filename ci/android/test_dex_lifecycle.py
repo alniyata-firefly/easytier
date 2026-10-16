@@ -10,6 +10,7 @@ PLUGIN = "Lcom/plugin/vpnservice/VpnServicePlugin;"
 SERVICE = "Lcom/plugin/vpnservice/TauriVpnService;"
 MAIN = "Lcom/kkrainbow/easytier/MainForegroundService;"
 ARGS = "Lcom/plugin/vpnservice/SetClientEnabledArgs;"
+COMPANION = "Lcom/plugin/vpnservice/TauriVpnService$Companion;"
 
 
 def method(name, signature, *, calls=(), types=(), strings=(), literals=(), conditional=False, annotation=None):
@@ -25,7 +26,7 @@ def fixture():
     definitions = {name: {"methods": [], "fields": [], "annotations": {}} for name in [
         PLUGIN, SERVICE, MAIN, ARGS, "Lcom/plugin/vpnservice/StartVpnArgs;",
         "Lcom/kkrainbow/easytier/MainActivity;", "Lcom/kkrainbow/easytier/TauriActivity;",
-        "Landroidx/activity/result/ActivityResult;", "La/b;"]}
+        "Landroidx/activity/result/ActivityResult;", "La/b;", COMPANION]}
     definitions[PLUGIN]["annotations"] = {"Lapp/tauri/annotation/TauriPlugin;": 1}
     definitions[PLUGIN]["methods"] = [method(name, invoke, annotation=command) for name in [
         "ping", "prepareVpn", "startVpn", "stopVpn", "getVpnStatus", "consumeVpnTileAction", "setClientEnabled"]]
@@ -40,15 +41,21 @@ def fixture():
         ("Landroid/content/SharedPreferences$Editor;", "apply", "()V"), stop],
         strings=["easytier_client_lifecycle", "enabled"])]
     stopper = next(item for item in definitions[PLUGIN]["methods"] if item["name"] == "stopVpn")
-    stopper["calls"] = [stop, (SERVICE, "onRevoke", "()V")]
+    stopper["calls"] = [(COMPANION, "requestStop", "(Landroid/content/Context;)V")]
+    definitions[COMPANION]["methods"] = [method("requestStop", "(Landroid/content/Context;)V", calls=[
+        stop, ("Landroid/os/ParcelFileDescriptor;", "close", "()V")])]
     for owner in [SERVICE, MAIN]:
         definitions[owner]["methods"] = [method("onStartCommand", "(Landroid/content/Intent;II)I", calls=[
             ("Landroid/content/SharedPreferences;", "getBoolean", "(Ljava/lang/String;Z)Z"),
             ("Landroid/app/Service;", "stopSelf", "()V"), ("Landroid/app/Service;", "stopForeground", "(I)V")],
             strings=["easytier_client_lifecycle", "enabled"], literals=[1, 2], conditional=True)]
+    definitions[SERVICE]["methods"].append(method("onDestroy", "()V", calls=[
+        ("Landroid/os/ParcelFileDescriptor;", "close", "()V"), ("Landroid/app/Service;", "stopForeground", "(I)V")]))
+    definitions[SERVICE]["methods"].append(method("onRevoke", "()V", calls=[
+        ("Landroid/os/ParcelFileDescriptor;", "close", "()V"), ("Landroid/app/Service;", "stopSelf", "()V")]))
     definitions[ARGS]["fields"] = [{"name": "enabled", "type": "Z"}]
     definitions["Lcom/plugin/vpnservice/StartVpnArgs;"]["fields"] = [{"name": name} for name in
-        ["ipv4Addr", "routes", "dns", "disallowedApplications", "mtu"]]
+        ["requestId", "instanceId", "ipv4Addr", "routes", "dns", "disallowedApplications", "mtu"]]
     return definitions
 
 
@@ -126,13 +133,50 @@ class DexLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stopService"):
             verify_lifecycle(definitions, MAPPING)
 
-    def test_inlined_revoke_cleanup_is_accepted(self):
+    def test_requested_stop_and_framework_destroy_are_separate(self):
         definitions = fixture()
         stopper = next(item for item in definitions[PLUGIN]['methods'] if item['name'] == 'stopVpn')
-        stopper['calls'] = [call for call in stopper['calls'] if call[1] != 'onRevoke']
-        stopper['calls'] += [('Landroid/app/Service;', 'stopForeground', '(I)V'),
-                             ('Landroid/os/ParcelFileDescriptor;', 'close', '()V')]
-        self.assertTrue(verify_lifecycle(definitions, MAPPING)['explicit_stop_service_apis_preserved'])
+        self.assertFalse(any(call[1] in ['onRevoke', 'stopForeground'] for call in stopper['calls']))
+        proof = verify_lifecycle(definitions, MAPPING)
+        self.assertTrue(proof['explicit_stop_service_apis_preserved'])
+        self.assertTrue(proof['framework_on_destroy_cleanup_preserved'])
+
+    def test_stop_request_without_closing_tunnel_is_rejected(self):
+        definitions = fixture()
+        definitions[COMPANION]['methods'][0]['calls'] = [call for call in definitions[COMPANION]['methods'][0]['calls']
+                                                         if call[1] != 'close']
+        with self.assertRaisesRegex(ValueError, 'requested VPN tunnel close'):
+            verify_lifecycle(definitions, MAPPING)
+
+    def test_missing_framework_destroy_cleanup_is_rejected(self):
+        definitions = fixture()
+        destroyed = next(item for item in definitions[SERVICE]['methods'] if item['name'] == 'onDestroy')
+        destroyed['calls'] = [call for call in destroyed['calls'] if call[1] != 'stopForeground']
+        with self.assertRaisesRegex(ValueError, 'framework VPN destroy cleanup'):
+            verify_lifecycle(definitions, MAPPING)
+
+    def test_request_identity_fields_must_survive_reflection(self):
+        definitions = fixture()
+        arguments = definitions['Lcom/plugin/vpnservice/StartVpnArgs;']
+        arguments['fields'] = [field for field in arguments['fields'] if field['name'] != 'requestId']
+        with self.assertRaisesRegex(ValueError, 'reflected VPN argument fields'):
+            verify_bridge_definitions(definitions)
+
+    def test_framework_revoke_dispatch_can_follow_a_renamed_main_thread_closure(self):
+        definitions = fixture()
+        revoked = next(item for item in definitions[SERVICE]['methods'] if item['name'] == 'onRevoke')
+        cleanup = method('run', '()V', calls=revoked['calls'])
+        revoked['calls'], revoked['types'] = [], ['La/c;']
+        definitions['La/c;'] = {'methods': [cleanup], 'fields': [], 'annotations': {}}
+        mapping = MAPPING + 'com.plugin.vpnservice.TauriVpnService$onRevoke$1 -> a.c:\n'
+        self.assertTrue(verify_lifecycle(definitions, mapping)['framework_revoke_cleanup_preserved'])
+
+    def test_framework_revoke_without_real_close_is_rejected(self):
+        definitions = fixture()
+        revoked = next(item for item in definitions[SERVICE]['methods'] if item['name'] == 'onRevoke')
+        revoked['calls'] = [call for call in revoked['calls'] if call[1] != 'close']
+        with self.assertRaisesRegex(ValueError, 'framework VPN revoke cleanup'):
+            verify_lifecycle(definitions, MAPPING)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,11 @@
 jobs:
   android:
     uses: ./.github/workflows/build-android.yml
-    secrets: inherit
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 ```
 
 It uploads `android-arm64`, containing the signed APK, its SHA-256 file,
@@ -39,7 +43,7 @@ removed on exit. The checked-in historical development key is never used.
 | Version / versionCode | `2.7.2` / `2007003` |
 | ABI | `arm64-v8a` |
 | Rust / Java / Node | `1.95` / `21` / `22` |
-| pnpm / protoc | `10` / `35.1` |
+| pnpm / protoc | `10.12.4` / `35.1` |
 | NDK | `26.0.10792818` |
 | Compile / target / minimum SDK | `36` / `34` / `24` |
 | AGP / Kotlin / Gradle | `8.10.1` / `2.1.21` / checked-in `8.14.3` wrapper |
@@ -50,6 +54,10 @@ normal build use the same Android link flags plus
 `max-page-size=16384` and `common-page-size=16384`. Explicit
 `tauri/custom-protocol` keeps the built React UI embedded alongside Core. Only
 crate downloads are cached; native output is rebuilt for the checked-out commit.
+Before enabling Cargo offline mode, the driver fetches the complete locked
+dependency graph without an Android-only target filter and verifies Tauri
+metadata resolution offline. This covers host/platform metadata dependencies
+such as desktop clipboard crates without relaxing dependency locks.
 
 `verify_apk.py` checks the actual signer, package identity, SDK/AGP metadata,
 arm64 ELF architecture, Core version, native-output hash, the frozen contents of
@@ -79,8 +87,14 @@ Do not enable shell tracing while supplying secrets. For validation without comp
 
 ```bash
 python3 -m unittest discover -s ci/android -p 'test_*.py'
+cargo test --locked --manifest-path ci/android/lease-tests/Cargo.toml
 ```
 
 References: [Tauri Android signing](https://v2.tauri.app/distribute/sign/android/),
 [Android 16 KiB compatibility](https://developer.android.com/guide/practices/page-sizes),
 [GitHub reusable workflows](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows).
+
+The isolated Rust lease tests import the actual GUI ownership module. They use
+Unix socket descriptors to check cancellation, stale cleanup and resource drop,
+without Android, a TUN interface or changes to host networking. They do not
+replace APK compilation or real VPN lifecycle tests.

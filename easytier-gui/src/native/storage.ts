@@ -37,6 +37,29 @@ export function saveStoredConfigs(configs: unknown): void {
   const normalized = parseStoredConfigs(JSON.stringify(configs))
   localStorage.setItem('networkList', JSON.stringify(normalized))
 }
+function editableRawConfigs(id: string): unknown[] {
+  const raw = localStorage.getItem('networkList')
+  let entries: unknown
+  try { entries = JSON.parse(raw || '[]') } catch { throw new Error('local_config_storage_invalid') }
+  if (!Array.isArray(entries)) throw new Error('local_config_storage_invalid')
+  return entries.filter(entry => {
+    if (!entry || typeof entry !== 'object') return true
+    const config = 'config' in entry ? entry.config : entry
+    if (!config || typeof config !== 'object' || !('instance_id' in config) || config.instance_id !== id) return true
+    if ('source' in entry && normalizeConfigSource(entry.source) === 'web') throw new Error('managed_config_read_only')
+    return false
+  })
+}
+export function saveLocalStoredConfig(config: Network.NetworkConfig): void {
+  const entries = editableRawConfigs(config.instance_id)
+  const source = loadStoredConfigs().find(entry => entry.config.instance_id === config.instance_id)?.source ?? 'user'
+  const [normalized] = parseStoredConfigs(JSON.stringify([{ config, source }]))
+  if (!normalized) throw new Error('local_config_invalid')
+  localStorage.setItem('networkList', JSON.stringify([...entries, normalized]))
+}
+export function removeLocalStoredConfig(id: string): void {
+  localStorage.setItem('networkList', JSON.stringify(editableRawConfigs(id)))
+}
 export function loadEnabledNetworks(): string[] {
   try {
     const ids: unknown = JSON.parse(localStorage.getItem('enabled_networks') || '[]')

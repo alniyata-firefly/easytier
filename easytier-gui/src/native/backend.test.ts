@@ -28,6 +28,16 @@ describe('Tauri native command payload contract', () => {
     expect(mock.invoke).toHaveBeenLastCalledWith('update_network_config_state', { instanceId: 'fixture', disabled: false })
   })
 
+  it('binds a TUN descriptor to the requested instance instead of choosing another network', async () => {
+    const backend = await import('./backend')
+    const instanceId = '11111111-1111-4111-8111-111111111111'
+    const requestId = 'vpn-start-fixture'
+    await backend.setTunFd(42, instanceId, requestId)
+    expect(mock.invoke).toHaveBeenLastCalledWith('set_tun_fd', { fd: 42, instanceId, requestId })
+    await backend.clearTunFd(instanceId, requestId)
+    expect(mock.invoke).toHaveBeenLastCalledWith('clear_tun_fd', { instanceId, requestId })
+  })
+
   it('restores saved mobile configurations with automatic uplinks without changing stored data', async () => {
     const backend = await import('./backend')
     const config = { instance_id: 'mobile-fixture', bind_device: true, uplink: { mode: 'manual', interfaces: ['eth0'] }, mtu: 1280 }

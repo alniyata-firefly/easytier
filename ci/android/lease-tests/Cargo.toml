@@ -1,0 +1,11 @@
+[package]
+name="easytier-lease-unit"
+publish=false
+version="0.0.0"
+edition="2024"
+
+[dependencies]
+tokio={version="=1.53.1",features=["macros","rt-multi-thread","sync","time"]}
+uuid="=1.26.1"
+
+[workspace]

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_NETWORK_CONFIG } from '../../../easytier-web/frontend-lib/src/types/network'
-import { loadEnabledNetworks, loadMode, loadStoredConfigs, parseStoredConfigs, saveEnabledNetworks, saveStoredConfigs, loadLocalClientPaused, saveLocalClientPaused } from './storage'
+import { loadEnabledNetworks, loadMode, loadStoredConfigs, parseStoredConfigs, saveEnabledNetworks, saveStoredConfigs, loadLocalClientPaused, saveLocalClientPaused, saveLocalStoredConfig, removeLocalStoredConfig } from './storage'
 
 vi.mock('@tauri-apps/plugin-os', () => ({ type: () => 'windows' }))
 const store = new Map<string, string>()
@@ -19,6 +19,25 @@ describe('existing GUI persistence migration', () => {
     for (const [key, value] of Object.entries(retained)) expect(store.get(key)).toBe(value)
     saveLocalClientPaused(false)
     expect(loadLocalClientPaused()).toBe(false)
+  })
+  it('edits local entries without normalizing or rewriting untouched managed records', () => {
+    const managed = { config: { instance_id: fixtureId, network_name: 'Managed', future: { keep: true } }, source: 'web', extra: 'retained' }
+    const localId = '00000000-0000-4000-8000-000000000002'
+    store.set('networkList', JSON.stringify([managed]))
+    saveLocalStoredConfig({ ...DEFAULT_NETWORK_CONFIG(), instance_id: localId, network_name: 'Local' })
+    expect(JSON.parse(store.get('networkList')!)[0]).toEqual(managed)
+    removeLocalStoredConfig(localId)
+    expect(JSON.parse(store.get('networkList')!)).toEqual([managed])
+    expect(() => saveLocalStoredConfig({ ...DEFAULT_NETWORK_CONFIG(), instance_id: fixtureId })).toThrow('managed_config_read_only')
+    expect(() => removeLocalStoredConfig(fixtureId)).toThrow('managed_config_read_only')
+  })
+  it('refuses destructive offline updates when the existing local store is malformed', () => {
+    for (const raw of ['{broken', '{"unknown":"format"}']) {
+      store.set('networkList', raw)
+      expect(() => saveLocalStoredConfig({ ...DEFAULT_NETWORK_CONFIG(), instance_id: fixtureId })).toThrow('local_config_storage_invalid')
+      expect(() => removeLocalStoredConfig(fixtureId)).toThrow('local_config_storage_invalid')
+      expect(store.get('networkList')).toBe(raw)
+    }
   })
   it('loads old bare configurations as legacy without creating new instance IDs', () => {
     const config = { ...DEFAULT_NETWORK_CONFIG(), instance_id: fixtureId }

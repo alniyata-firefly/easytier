@@ -33,7 +33,18 @@ export class NativeSession {
   private generation = 0
   private reconnectAttempts = 0
   private retryAt = 0
-  readonly remoteClient = new GUIRemoteClient()
+  private configurationClient?: { mode: Mode; connected: boolean; client: GUIRemoteClient }
+  get remoteClient(): GUIRemoteClient {
+    const { mode, connected } = this.snapshot
+    if (this.configurationClient?.mode === mode && this.configurationClient.connected === connected) return this.configurationClient.client
+    const client = new GUIRemoteClient({
+      offline: () => mode.mode === 'normal' && !connected,
+      current: () => !this.disposed && this.snapshot.mode === mode && this.snapshot.connected === connected,
+      changed: () => this.patch({}),
+    })
+    this.configurationClient = { mode, connected, client }
+    return client
+  }
 
   constructor() {
     const platform = osType()
@@ -240,7 +251,7 @@ export class NativeSession {
         await backend.resumeLocalClient()
         await resumeMobileVpnService()
         await this.connect(cloneMode(this.snapshot.mode))
-        await syncMobileVpnService()
+        await syncMobileVpnService({ strict: true })
         saveLocalClientPaused(false)
         this.patch({ clientPaused: false })
       } catch {

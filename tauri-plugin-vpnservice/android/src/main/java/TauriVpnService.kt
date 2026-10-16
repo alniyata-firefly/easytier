@@ -9,6 +9,8 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.content.pm.ServiceInfo
 import android.content.pm.PackageManager
 import androidx.core.app.NotificationCompat
@@ -30,6 +32,56 @@ class TauriVpnService : VpnService() {
         const val DNS = "DNS"
         const val DISALLOWED_APPLICATIONS = "DISALLOWED_APPLICATIONS"
         const val MTU = "MTU"
+        const val REQUEST_ID = "REQUEST_ID"
+        const val INSTANCE_ID = "INSTANCE_ID"
+
+        // All transitions and snapshots run on Android's main thread. A queued
+        // start/stop receipt is not proof that the service established/exited.
+        private var state = "stopped"
+        private var requestId: String? = null
+        private var instanceId: String? = null
+        private var establishedFd: Int? = null
+        private var errorMsg: String? = null
+
+        fun beginStart(request: String, instance: String): Boolean {
+            if (state != "stopped" || self != null) return false
+            requestId = request
+            instanceId = instance
+            errorMsg = null
+            establishedFd = null
+            state = "starting"
+            return true
+        }
+
+        fun startRejected(request: String, error: String) {
+            if (requestId != request) return
+            errorMsg = error
+            if (self == null) state = "stopped"
+        }
+
+        fun requestStop(context: Context) {
+            if (state == "stopped" && self == null) return
+            state = "stopping"
+            establishedFd = null
+            self?.closeTunnel()
+            val stopping = context.stopService(Intent(context, TauriVpnService::class.java))
+            // false with no service also covers an already cancelled pending
+            // start. A real service is acknowledged only by onDestroy.
+            if (!stopping && self == null) state = "stopped"
+        }
+
+        fun statusSnapshot(): JSObject = JSObject().also {
+            it.put("state", state)
+            it.put("running", state != "stopped")
+            it.put("requestId", requestId)
+            it.put("instanceId", instanceId)
+            it.put("established", state == "established" && establishedFd != null)
+            it.put("fd", if (state == "established") establishedFd else null)
+            it.put("errorMsg", errorMsg)
+            it.put("ipv4Addr", ipv4Addr)
+            it.put("routes", routes)
+            it.put("dns", dns)
+        }
 
         private const val NOTIFICATION_CHANNEL_ID = "easytier_vpn_channel"
         private const val NOTIFICATION_ID = 1356
@@ -70,29 +122,48 @@ class TauriVpnService : VpnService() {
         }
     }
 
-    private lateinit var vpnInterface: ParcelFileDescriptor
+    private var vpnInterface: ParcelFileDescriptor? = null
+    private var ownedRequestId: String? = null
+    private var ownedInstanceId: String? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!isClientEnabled(this)) {
+        val request = intent?.getStringExtra(REQUEST_ID)
+        val instance = intent?.getStringExtra(INSTANCE_ID)
+        if (request == null || instance == null || request != requestId || instance != instanceId
+            || state != "starting" || !isClientEnabled(this)) {
+            // Reject cancelled/old intents. Do not revoke a newer established
+            // owner merely because an old queued intent was delivered late.
+            if (state == "stopped" || state == "stopping" || (request == requestId && !isClientEnabled(this))) {
+                state = "stopping"
+                stopSelf()
+            }
+            return START_NOT_STICKY
+        }
+        ownedRequestId = request
+        ownedInstanceId = instance
+        var failureStage = "vpn_foreground_start_failed"
+        try {
+            startVpnForegroundService()
+            failureStage = "vpn_tun_start_failed"
+            val args = intent?.extras
+            ipv4Addr = args?.getString(IPV4_ADDR)
+            routes = args?.getStringArray(ROUTES) ?: emptyArray()
+            dns = args?.getString(DNS)
+            val descriptor = createVpnInterface(args)
+            vpnInterface = descriptor
+            establishedFd = descriptor.fd
+            state = "established"
+            triggerCallback("vpn_service_start", statusSnapshot())
+            EasyTierVpnTileService.requestStateUpdate(this)
+            return START_STICKY
+        } catch (_: Exception) {
+            errorMsg = failureStage
+            state = "stopping"
+            closeTunnel()
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
-        println("vpn on start command ${intent?.getExtras()} $intent")
-        startVpnForegroundService()
-        var args = intent?.getExtras()
-        ipv4Addr = args?.getString(IPV4_ADDR)
-        routes = args?.getStringArray(ROUTES) ?: emptyArray()
-        dns = args?.getString(DNS)
-
-        vpnInterface = createVpnInterface(args)
-        println("vpn created ${vpnInterface.fd}")
-
-        var event_data = JSObject()
-        event_data.put("fd", vpnInterface.fd)
-        triggerCallback("vpn_service_start", event_data)
-        EasyTierVpnTileService.requestStateUpdate(this)
-
-        return START_STICKY
     }
 
     override fun onCreate() {
@@ -102,31 +173,55 @@ class TauriVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        println("vpn on destroy")
-        disconnect()
-        clientForegroundPolicy(this).onVpnChanged(false)
+        closeTunnel()
         stopForeground(STOP_FOREGROUND_REMOVE)
-        self = null
+        if (self === this) {
+            self = null
+            establishedFd = null
+            state = "stopped"
+            clearStatus()
+            try {
+                clientForegroundPolicy(this).onVpnChanged(false)
+            } catch (_: Exception) {
+                if (errorMsg == null) errorMsg = "client_foreground_start_failed"
+            }
+            triggerCallback("vpn_service_stop", statusSnapshot())
+        }
         EasyTierVpnTileService.requestStateUpdate(this)
         super.onDestroy()
     }
 
     override fun onRevoke() {
-        println("vpn on revoke")
-        disconnect()
-        clientForegroundPolicy(this).onVpnChanged(false)
+        // Android may deliver revocation on a Binder thread. Serialize it with
+        // start, stop and status snapshots before touching the shared owner.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            revokeOnMain()
+        } else {
+            Handler(Looper.getMainLooper()).post { revokeOnMain() }
+        }
+    }
+
+    private fun revokeOnMain() {
+        // Called by Android, never manually by the plugin. Keep self until
+        // onDestroy so getVpnStatus cannot acknowledge an incomplete stop.
+        if (self === this) state = "stopping"
+        closeTunnel()
         stopForeground(STOP_FOREGROUND_REMOVE)
-        self = null
-        EasyTierVpnTileService.requestStateUpdate(this)
+        stopSelf()
         super.onRevoke()
     }
 
-    private fun disconnect() {
-        if (self == this && this::vpnInterface.isInitialized) {
-            triggerCallback("vpn_service_stop", JSObject())
-            vpnInterface.close()
+    private fun closeTunnel() {
+        val descriptor = vpnInterface
+        vpnInterface = null
+        if (self === this && ownedRequestId == requestId && ownedInstanceId == instanceId) {
+            establishedFd = null
         }
-        clearStatus()
+        try {
+            descriptor?.close()
+        } catch (_: Exception) {
+            if (self === this) errorMsg = "vpn_stop_failed"
+        }
     }
 
     private fun clearStatus() {

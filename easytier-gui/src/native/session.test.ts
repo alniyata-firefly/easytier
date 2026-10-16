@@ -6,7 +6,7 @@ const fixture = vi.hoisted(() => ({
   running: true, status: 'NotInstalled',
   paused: false,
   stopLocalClient: vi.fn(), resumeLocalClient: vi.fn(), suspendMobileVpnService: vi.fn(), resumeMobileVpnService: vi.fn(),
-  consumePendingMobileVpnTileAction: vi.fn(),
+  consumePendingMobileVpnTileAction: vi.fn(), syncMobileVpnService: vi.fn(),
   tileHandler: undefined as undefined | ((action: 'start' | 'stop') => Promise<void>),
   initRpcConnection: vi.fn(), sendConfigs: vi.fn(), initWebClient: vi.fn(), saveMode: vi.fn(),
   getServiceStatus: vi.fn(), initService: vi.fn(), setServiceStatus: vi.fn(),
@@ -33,7 +33,7 @@ vi.mock('./mobile_vpn', () => ({
   initMobileVpnService: async () => fixture.mobileCleanup, disposeMobileVpnService: fixture.mobileCleanup,
   consumePendingMobileVpnTileAction: fixture.consumePendingMobileVpnTileAction,
   setMobileVpnTileActionHandler: (handler?: typeof fixture.tileHandler) => { fixture.tileHandler = handler },
-  syncMobileVpnService: async () => undefined,
+  syncMobileVpnService: fixture.syncMobileVpnService,
   suspendMobileVpnService: fixture.suspendMobileVpnService, resumeMobileVpnService: fixture.resumeMobileVpnService,
 }))
 vi.mock('./mobile_vpn_tile', () => ({ executeVpnTileAction: vi.fn() }))
@@ -54,6 +54,7 @@ beforeEach(() => {
   fixture.resumeLocalClient.mockReset().mockResolvedValue(undefined)
   fixture.suspendMobileVpnService.mockReset().mockResolvedValue(undefined)
   fixture.consumePendingMobileVpnTileAction.mockReset().mockResolvedValue(false)
+  fixture.syncMobileVpnService.mockReset().mockResolvedValue(undefined)
   fixture.listen.mockResolvedValue(fixture.cleanup)
   fixture.initRpcConnection.mockResolvedValue(undefined)
   fixture.sendConfigs.mockResolvedValue(undefined)
@@ -106,6 +107,22 @@ describe('native client lifecycle boundaries', () => {
     expect(fixture.initWebClient).not.toHaveBeenCalled()
     await session.reconnect()
     expect(fixture.initWebClient).toHaveBeenLastCalledWith('udp://updated.invalid:22020/new-fixture-token')
+    session.dispose()
+  })
+
+  it('rolls back an explicit Android start when strict VPN synchronization fails', async () => {
+    fixture.platform = 'android'
+    fixture.paused = true
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    fixture.syncMobileVpnService.mockRejectedValueOnce(new Error('vpn_start_failed'))
+    await expect(session.startLocalClient()).rejects.toThrow('client_start_failed')
+    expect(fixture.syncMobileVpnService).toHaveBeenLastCalledWith({ strict: true })
+    expect(fixture.resumeLocalClient).toHaveBeenCalledOnce()
+    expect(fixture.stopLocalClient).toHaveBeenCalledTimes(2)
+    expect(session.getSnapshot()).toMatchObject({ clientPaused: true, connected: false, managementConnected: false, errorCode: 'client_start_failed', busy: false })
+    expect(fixture.paused).toBe(true)
     session.dispose()
   })
 

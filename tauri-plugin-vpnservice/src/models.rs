@@ -27,6 +27,8 @@ pub struct SetClientEnabledRequest {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartVpnRequest {
+    pub request_id: Option<String>,
+    pub instance_id: Option<String>,
     pub ipv4_addr: Option<String>,
     pub routes: Option<Vec<String>>,
     pub dns: Option<String>,
@@ -44,6 +46,12 @@ pub struct Status {
 #[serde(rename_all = "camelCase")]
 pub struct VpnStatus {
     pub running: bool,
+    pub state: Option<String>,
+    pub request_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub established: Option<bool>,
+    pub fd: Option<i32>,
+    pub error_msg: Option<String>,
     pub ipv4_addr: Option<String>,
     pub routes: Option<Vec<String>>,
     pub dns: Option<String>,

@@ -123,6 +123,19 @@ impl NativeInstanceRuntimeHost {
         self.tun.attach_fd(fd)
     }
 
+    #[cfg(all(feature = "tun", mobile))]
+    pub(crate) async fn attach_runtime_tun_fd_confirmed(
+        &self,
+        fd: std::os::fd::OwnedFd,
+    ) -> anyhow::Result<()> {
+        self.tun.attach_fd_confirmed(fd).await
+    }
+
+    #[cfg(all(feature = "tun", mobile))]
+    pub(crate) async fn detach_runtime_tun_fd_confirmed(&self) -> anyhow::Result<()> {
+        self.tun.detach_fd_confirmed().await
+    }
+
     fn install_packet_receiver(&self, receiver: HostPacketReceiver) -> anyhow::Result<()> {
         self.tun.install_packet_receiver(receiver)
     }

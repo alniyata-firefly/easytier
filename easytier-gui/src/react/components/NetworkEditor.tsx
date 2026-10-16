@@ -9,9 +9,9 @@ import { normalizeUplinkForTarget } from '../lib/uplink-capabilities';
 import { InstanceAclEditor, validateInstanceAcl } from './InstanceAclEditor';
 import { Alert, Button, Dialog, Field, Tabs } from './ui';
 
-export function NetworkEditor({ initial, onClose, onSaved, client, allowRemoteSave, supportsUplinkSelection = true }: {
+export function NetworkEditor({ initial, onClose, onSaved, client, allowRemoteSave, canStart = true, supportsUplinkSelection = true }: {
   initial: NetworkTypes.NetworkConfig; onClose: () => void; onSaved: () => void;
-  client: GUIRemoteClient; allowRemoteSave: boolean; supportsUplinkSelection?: boolean;
+  client: GUIRemoteClient; allowRemoteSave: boolean; canStart?: boolean; supportsUplinkSelection?: boolean;
 }) {
   const { t } = useTranslation('client');
   const [config, setConfig] = useState<NetworkTypes.NetworkConfig>(() => normalizeUplinkForTarget(structuredClone(initial) as unknown as NodeConfigRecord, supportsUplinkSelection) as unknown as NetworkTypes.NetworkConfig);
@@ -23,7 +23,7 @@ export function NetworkEditor({ initial, onClose, onSaved, client, allowRemoteSa
   const valid = (config.network_name ?? '').trim().length > 0 && (!credentialMode || !!config.credential_secret?.trim())
     && validateNodeParameters(config as unknown as NodeConfigRecord).length === 0 && !validateInstanceAcl(config.acl);
   const save = async (start: boolean) => {
-    if (!valid || busy) return;
+    if (!valid || busy || start && !canStart) return;
     setBusy(true); setError('');
     try {
       const next = prepareNodeParametersForBackend(normalizeUplinkForTarget(config as unknown as NodeConfigRecord, supportsUplinkSelection)) as unknown as NetworkTypes.NetworkConfig;
@@ -40,7 +40,7 @@ export function NetworkEditor({ initial, onClose, onSaved, client, allowRemoteSa
   return <Dialog open title={t('editNetwork')} onClose={() => { if (!busy) onClose(); }} wide footer={<>
     <Button tone="ghost" disabled={busy} onClick={onClose}>{t('cancel')}</Button>
     {allowRemoteSave && <Button disabled={!valid} busy={busy} onClick={() => void save(false)}>{t('save')}</Button>}
-    <Button disabled={!valid} busy={busy} onClick={() => void save(true)}>{t('saveAndStart')}</Button>
+    <Button disabled={!valid || !canStart} busy={busy} onClick={() => void save(true)}>{t('saveAndStart')}</Button>
   </>}>
     {error && <Alert tone="error">{error}</Alert>}
     <Tabs items={['basic', 'parameters', 'acl', 'toml'].map(id => ({ id, label: t(id) }))} value={tab} onChange={next => void changeTab(next)}/>

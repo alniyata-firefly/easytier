@@ -51,6 +51,33 @@ pub fn subscribe_native_instance_event(
         .map(NativeInstanceRuntimeHost::subscribe_event)
 }
 
+/// Installs an owned mobile TUN descriptor and waits for actual NIC setup.
+///
+/// Cancelling this future cancels its installation; no request is left queued.
+/// The caller should use a bounded timeout and serialize instance mutations.
+#[cfg(all(feature = "tun", mobile))]
+pub async fn attach_native_tun_fd_confirmed(
+    instance: &NativeCoreInstance,
+    fd: std::os::fd::OwnedFd,
+) -> anyhow::Result<()> {
+    let runtime = instance
+        .runtime_host::<NativeInstanceRuntimeHost>()
+        .ok_or_else(|| anyhow::anyhow!("native instance runtime host is unavailable"))?;
+    runtime.attach_runtime_tun_fd_confirmed(fd).await
+}
+
+/// Releases the mobile NIC and its owned TUN descriptor without stopping peers.
+///
+/// The caller must serialize instance mutations and reject stale VPN owners
+/// before calling, so an old stop cannot detach a newer session's interface.
+#[cfg(all(feature = "tun", mobile))]
+pub async fn detach_native_tun_fd_confirmed(instance: &NativeCoreInstance) -> anyhow::Result<()> {
+    let runtime = instance
+        .runtime_host::<NativeInstanceRuntimeHost>()
+        .ok_or_else(|| anyhow::anyhow!("native instance runtime host is unavailable"))?;
+    runtime.detach_runtime_tun_fd_confirmed().await
+}
+
 #[cfg(feature = "management-rpc")]
 pub fn native_instance_manager_with_runtime(
     runtime_handle: tokio::runtime::Handle,

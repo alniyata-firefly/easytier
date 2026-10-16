@@ -3,6 +3,8 @@
 
 mod elevate;
 #[cfg(target_os = "android")]
+mod android_tun_lease;
+#[cfg(target_os = "android")]
 mod local_client_lifecycle;
 
 use anyhow::Context;
@@ -306,20 +308,247 @@ async fn set_logging_level(level: String) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "android")]
+static ANDROID_TUN_LEASES: android_tun_lease::AndroidTunLeases =
+    android_tun_lease::AndroidTunLeases::new();
+
+#[cfg(target_os = "android")]
+struct NativeTunStopListener {
+    ready: bool,
+    registering: Option<tokio::task::JoinHandle<Result<(), String>>>,
+}
+
+#[cfg(target_os = "android")]
+static NATIVE_TUN_STOP_LISTENER: Mutex<NativeTunStopListener> =
+    Mutex::const_new(NativeTunStopListener {
+        ready: false,
+        registering: None,
+    });
+
+#[cfg(target_os = "android")]
+async fn ensure_native_tun_stop_listener(app: &AppHandle) -> Result<(), String> {
+    use tauri_plugin_vpnservice::VpnserviceExt;
+
+    let mut listener = NATIVE_TUN_STOP_LISTENER.lock().await;
+    if listener.ready {
+        return Ok(());
+    }
+    if listener.registering.is_none() {
+        let app = app.clone();
+        listener.registering = Some(tokio::task::spawn_blocking(move || {
+            app.vpnservice()
+                .register_native_stop_listener(|status| {
+                    let Some(instance_id) =
+                        status.instance_id.and_then(|id| id.parse::<Uuid>().ok())
+                    else {
+                        return;
+                    };
+                    let Some(request_id) = status.request_id else {
+                        return;
+                    };
+                    let Some(lease) = ANDROID_TUN_LEASES.cancel_matching(instance_id, &request_id)
+                    else {
+                        return;
+                    };
+                    // Cancel synchronously, then leave Android's main thread free.
+                    // Cleanup works even when the WebView receives no JS events.
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = cleanup_android_tun(lease).await {
+                            log::warn!("Native VPN TUN cleanup failed: {}", error);
+                        }
+                    });
+                })
+                .map_err(|_| "native VPN stop listener registration failed".to_owned())
+        }));
+    }
+    let registration = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        listener
+            .registering
+            .as_mut()
+            .expect("registration is initialized"),
+    )
+    .await;
+    match registration {
+        Ok(result) => {
+            listener.registering.take();
+            result.map_err(|_| "native VPN stop listener task failed")??;
+            listener.ready = true;
+            Ok(())
+        }
+        Err(_) => Err("native VPN stop listener is still registering".to_owned()),
+    }
+}
+
+#[cfg(target_os = "android")]
+async fn detach_android_tun_locked(
+    lease: &Arc<android_tun_lease::AndroidTunLease>,
+    manager: &NativeInstanceManager,
+) -> Result<(), String> {
+    if !ANDROID_TUN_LEASES.is_current(lease) {
+        return Ok(());
+    }
+    if let Some(instance) = manager.instance(lease.instance_id) {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            easytier::instance::factory::detach_native_tun_fd_confirmed(&instance),
+        )
+        .await
+        .map_err(|_| "Core TUN cleanup timed out")?
+        .map_err(|_| "Core TUN cleanup failed")?;
+    }
+    ANDROID_TUN_LEASES.finish_if_current(lease);
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+async fn cleanup_android_tun(lease: Arc<android_tun_lease::AndroidTunLease>) -> Result<(), String> {
+    // A caller can stop waiting while a different mutation is still finishing.
+    // Keep cleanup alive: dropping a JoinHandle does not cancel its task.
+    let cleanup = tauri::async_runtime::spawn(async move {
+        let manager = INSTANCE_MANAGER.read().await.clone();
+        if let Some(manager) = manager {
+            let _mutation = manager.mutation_lock().lock_owned().await;
+            detach_android_tun_locked(&lease, &manager).await
+        } else {
+            ANDROID_TUN_LEASES.finish_if_current(&lease);
+            Ok(())
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), cleanup)
+        .await
+        .map_err(|_| "Core TUN cleanup is still pending")?
+        .map_err(|_| "Core TUN cleanup task failed")?
+}
+
 #[tauri::command]
-async fn set_tun_fd(fd: i32) -> Result<(), String> {
+async fn clear_tun_fd(instance_id: String, request_id: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let instance_id = instance_id
+            .parse::<Uuid>()
+            .map_err(|_| "invalid TUN instance id")?;
+        if let Some(lease) = ANDROID_TUN_LEASES.cancel_matching(instance_id, &request_id) {
+            cleanup_android_tun(lease).await?;
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (instance_id, request_id);
+        Err("mobile TUN cleanup is only supported on Android".to_owned())
+    }
+}
+
+#[tauri::command]
+async fn set_tun_fd(
+    app: AppHandle,
+    fd: i32,
+    instance_id: Option<String>,
+    request_id: Option<String>,
+) -> Result<(), String> {
+    if fd <= 0 {
+        return Err("invalid TUN file descriptor".to_owned());
+    }
+    #[cfg(target_os = "android")]
+    {
+        if instance_id.is_none() || request_id.as_deref().is_none_or(str::is_empty) {
+            return Err("Android TUN attachment requires instance and request ids".to_owned());
+        }
+        ensure_native_tun_stop_listener(&app).await?;
+    }
     let Some(instance_manager) = INSTANCE_MANAGER.read().await.clone() else {
         return Err("set_tun_fd is not supported in remote mode".to_string());
     };
-    if let Some(uuid) = get_client_manager!()?
-        .get_enabled_instances_with_tun_ids()
-        .next()
-    {
-        instance_manager
-            .attach_tun_fd(uuid, fd)
-            .map_err(|e| e.to_string())?;
+    let _mutation = instance_manager.mutation_lock().lock_owned().await;
+    #[cfg(target_os = "android")]
+    if LOCAL_CLIENT_LIFECYCLE.is_paused() {
+        return Err("local client is paused".to_owned());
     }
-    Ok(())
+    let target = {
+        let client_manager = get_client_manager!()?;
+        let mut enabled = client_manager.get_enabled_instances_with_tun_ids();
+        match instance_id {
+            Some(value) => {
+                let requested = value
+                    .parse::<Uuid>()
+                    .map_err(|_| "invalid TUN instance id")?;
+                enabled
+                    .find(|id| *id == requested)
+                    .ok_or("requested TUN instance is not enabled")?
+            }
+            None => enabled.next().ok_or("no enabled TUN instance")?,
+        }
+    };
+    #[cfg(target_os = "android")]
+    {
+        use std::os::fd::FromRawFd;
+        use tauri_plugin_vpnservice::VpnserviceExt;
+
+        // A replacement must release its predecessor before changing identity.
+        if let Some(previous) = ANDROID_TUN_LEASES.current() {
+            ANDROID_TUN_LEASES.cancel_matching(previous.instance_id, &previous.request_id);
+            detach_android_tun_locked(&previous, &instance_manager).await?;
+        }
+        let lease = ANDROID_TUN_LEASES.begin(target, request_id.expect("request id validated"));
+        let result: Result<(), String> = async {
+            // fcntl safely handles a descriptor closed concurrently by Android.
+            let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 1) };
+            if duplicate < 0 {
+                return Err("TUN descriptor is no longer available".to_owned());
+            }
+            // The successful duplication creates an exclusively owned fd.
+            let owned_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicate) };
+            let handle = app.clone();
+            let snapshot = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                tokio::task::spawn_blocking(move || {
+                    handle.vpnservice().get_vpn_status(tauri_plugin_vpnservice::VoidRequest {})
+                }),
+            )
+            .await
+            .map_err(|_| "VPN status query timed out")?
+            .map_err(|_| "VPN status query task failed")?
+            .map_err(|_| "VPN status is unavailable")?;
+            if !snapshot.running
+                || snapshot.established != Some(true)
+                || snapshot.state.as_deref() != Some("established")
+                || snapshot.request_id.as_deref() != Some(lease.request_id.as_str())
+                || snapshot.instance_id.as_deref().and_then(|id| id.parse::<Uuid>().ok()) != Some(target)
+                || snapshot.fd != Some(fd)
+                || lease.is_cancelled()
+                || LOCAL_CLIENT_LIFECYCLE.is_paused()
+            {
+                return Err("TUN request is no longer current".to_owned());
+            }
+            let instance = instance_manager.instance(target).ok_or("requested TUN instance is no longer available")?;
+            tokio::select! {
+                biased;
+                _ = lease.cancelled() => Err("TUN request was canceled".to_owned()),
+                result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    easytier::instance::factory::attach_native_tun_fd_confirmed(&instance, owned_fd),
+                ) => result
+                    .map_err(|_| "Core TUN installation timed out")?
+                    .map_err(|_| "Core TUN installation failed".to_owned()),
+            }
+        }.await;
+        if result.is_err() || lease.is_cancelled() || LOCAL_CLIENT_LIFECYCLE.is_paused() {
+            ANDROID_TUN_LEASES.cancel_matching(lease.instance_id, &lease.request_id);
+            detach_android_tun_locked(&lease, &instance_manager).await?;
+            return Err(result
+                .err()
+                .unwrap_or_else(|| "TUN request was canceled".to_owned()));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (&app, &request_id);
+        instance_manager
+            .attach_tun_fd(target, fd)
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[tauri::command]
@@ -1686,6 +1915,7 @@ pub fn run_gui() -> std::process::ExitCode {
             patch_vpn_portal_clients,
             set_logging_level,
             set_tun_fd,
+            clear_tun_fd,
             easytier_version,
             set_dock_visibility,
             list_network_instance_ids,

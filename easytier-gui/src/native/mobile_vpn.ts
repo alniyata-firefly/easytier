@@ -1,5 +1,6 @@
 import type * as NetworkTypes from '../../../easytier-web/frontend-lib/src/types/network'
 import { addPluginListener } from '@tauri-apps/api/core'
+import { v4 as uuidv4 } from 'uuid'
 import * as Utils from '../../../easytier-web/frontend-lib/src/modules/utils'
 import {
   consume_vpn_tile_action,
@@ -9,8 +10,9 @@ import {
   stop_vpn,
   set_client_enabled,
   type VpnTileAction,
+  type VpnStatusResponse,
 } from '../../../tauri-plugin-vpnservice/guest-js/index'
-import { collectNetworkInfo, getConfig, listNetworkInstanceIds, setTunFd } from './backend'
+import { clearTunFd, collectNetworkInfo, getConfig, listNetworkInstanceIds, setTunFd } from './backend'
 
 type Route = NetworkTypes.Route
 
@@ -31,13 +33,30 @@ let activeVpnInstanceId: string | undefined
 let vpnReconcileGeneration = 0
 let vpnReconcileAttempts = 0
 let vpnReconcileQueue: Promise<void> = Promise.resolve()
+interface QueuedVpnUpdate {
+  instanceId: string
+  generation: number
+  canceled: boolean
+  promise: Promise<void>
+}
+let queuedVpnUpdate: QueuedVpnUpdate | undefined
 let vpnPermissionRequest: Promise<boolean> | null = null
 let vpnTileActionHandler: ((action: VpnTileAction) => Promise<void>) | undefined
 let vpnTileActionQueue: Promise<void> = Promise.resolve()
 
 let listenerCleanup: Array<() => Promise<void>> = []
-let tunFdError = false
 let vpnServiceSuspended = false
+interface VpnRequest {
+  requestId: string
+  instanceId: string
+  generation: number
+  attachedFd?: number
+}
+let currentVpnRequest: VpnRequest | undefined
+// Cancellation invalidates the JS start owner before its queued Stop runs. Keep
+// the Core attachment identity until native exit and confirmed Core detach.
+let tunRequestToClear: VpnRequest | undefined
+const VPN_TRANSITION_TIMEOUT_MS = 15000
 
 const curVpnStatus: vpnStatus = {
   running: false,
@@ -114,9 +133,13 @@ function clearVpnReconcileTimer() {
 
 function beginVpnReconcile(instanceId?: string) {
   clearVpnReconcileTimer()
-  desiredVpnInstanceId = instanceId
   vpnReconcileAttempts = 0
+  // DHCP/routes notifications for the same instance are new input for its
+  // next reconciliation, not a cancellation of its in-flight native start.
+  if (instanceId && desiredVpnInstanceId === instanceId) return vpnReconcileGeneration
+  desiredVpnInstanceId = instanceId
   vpnReconcileGeneration += 1
+  currentVpnRequest = undefined
   return vpnReconcileGeneration
 }
 
@@ -164,7 +187,13 @@ function resetVpnConfigStatus() {
 }
 
 function syncVpnStatusFromNative(status: Awaited<ReturnType<typeof get_vpn_status>>) {
-  curVpnStatus.running = status?.running ?? false
+  // A re-created WebView cannot assume a live native TUN was attached to its
+  // current Core. Unknown ownership is stopped before it is started afresh.
+  const owner = currentVpnRequest
+  const attached = Boolean(owner && matchesRequest(status, owner) && status?.state === 'established'
+    && status.established && status.fd === owner.attachedFd && owner.attachedFd !== undefined)
+  curVpnStatus.running = owner ? attached : status?.running ?? false
+  if (!attached) activeVpnInstanceId = undefined
   if (!curVpnStatus.running) {
     activeVpnInstanceId = undefined
     resetVpnConfigStatus()
@@ -188,20 +217,62 @@ function syncVpnStatusFromNative(status: Awaited<ReturnType<typeof get_vpn_statu
   curVpnStatus.dns = status?.dns ?? undefined
 }
 
-async function waitVpnStatus(target_status: boolean, timeout_sec: number) {
-  const start_time = Date.now()
-  while (curVpnStatus.running !== target_status) {
-    if (target_status && tunFdError) throw new Error('vpn_tun_fd_failed')
-    if (Date.now() - start_time > timeout_sec * 1000) {
-      throw new Error('wait vpn status timeout')
+function isCurrentRequest(request: VpnRequest) {
+  return !vpnServiceSuspended && currentVpnRequest === request
+    && isCurrentVpnReconcile(request.instanceId, request.generation)
+}
+
+function matchesRequest(status: VpnStatusResponse | null, request: VpnRequest) {
+  return status?.requestId === request.requestId && status.instanceId === request.instanceId
+}
+
+function assertCurrentRequest(request: VpnRequest) {
+  if (!isCurrentRequest(request)) throw new Error('vpn_request_canceled')
+}
+
+async function waitForNativeStart(request: VpnRequest) {
+  const deadline = Date.now() + VPN_TRANSITION_TIMEOUT_MS
+  while (true) {
+    assertCurrentRequest(request)
+    const status = await get_vpn_status()
+    assertCurrentRequest(request)
+    if (matchesRequest(status, request)) {
+      if (status?.errorMsg) throw new Error(status.errorMsg)
+      if (status?.state === 'established' && status.established) {
+        if (!Number.isInteger(status.fd) || status.fd! <= 0) throw new Error('vpn_tun_fd_failed')
+        const fd = status.fd!
+        tunRequestToClear = request
+        try { await setTunFd(fd, request.instanceId, request.requestId) }
+        catch { assertCurrentRequest(request); throw new Error('vpn_tun_fd_failed') }
+        assertCurrentRequest(request)
+        const fresh = await get_vpn_status()
+        assertCurrentRequest(request)
+        if (!matchesRequest(fresh, request) || fresh?.state !== 'established' || !fresh.established || fresh.fd !== fd)
+          throw new Error('vpn_request_canceled')
+        request.attachedFd = fd
+        return
+      }
+      if (status?.state === 'stopped') throw new Error('vpn_start_failed')
     }
-    await new Promise(r => setTimeout(r, 50))
+    // Inspect native truth before the deadline: a WebView suspended by Android
+    // may resume long after the service established without delivering an event.
+    if (Date.now() >= deadline) throw new Error('vpn_start_timeout')
+    await new Promise(resolve => setTimeout(resolve, 100))
   }
 }
 
+async function clearCoreTunRequest(request: VpnRequest | undefined) {
+  if (!request) return
+  try { await clearTunFd(request.instanceId, request.requestId) }
+  catch { throw new Error('vpn_stop_failed') }
+  if (tunRequestToClear === request) tunRequestToClear = undefined
+}
+
 async function doStopVpn(force = false) {
+  const request = tunRequestToClear ?? currentVpnRequest
+  currentVpnRequest = undefined
   const wasRunning = curVpnStatus.running
-  if (!force && !wasRunning) {
+  if (!force && !wasRunning && !request) {
     activeVpnInstanceId = undefined
     return
   }
@@ -210,14 +281,18 @@ async function doStopVpn(force = false) {
   if (response?.errorMsg) throw new Error('vpn_stop_failed')
   // The event is advisory: Android may stop a service before its WebView
   // listener is attached, or a listener may have been recreated on resume.
-  const deadline = Date.now() + 3000
+  const deadline = Date.now() + VPN_TRANSITION_TIMEOUT_MS
   while (true) {
     const status = await get_vpn_status()
     if (!status || typeof status.running !== 'boolean') throw new Error('vpn_stop_status_unavailable')
-    if (!status.running) break
+    if (status.state === 'stopped' && !status.running) {
+      if (status.errorMsg === 'vpn_stop_failed') throw new Error('vpn_stop_failed')
+      break
+    }
     if (Date.now() >= deadline) throw new Error('vpn_stop_timeout')
     await new Promise(resolve => setTimeout(resolve, 50))
   }
+  await clearCoreTunRequest(request)
   curVpnStatus.running = false
   activeVpnInstanceId = undefined
   resetVpnConfigStatus()
@@ -228,8 +303,17 @@ async function doStartVpn(instanceId: string, generation: number, ipv4Addr: stri
     return
   }
 
-  console.log('start vpn service', ipv4Addr, cidr, routes, dns)
+  // A stale native service can outlive a WebView. Confirm its destruction before
+  // allocating a new request; STARTING/STOPPING is never equivalent to stopped.
+  const existing = await get_vpn_status()
+  if (!isCurrentVpnReconcile(instanceId, generation) || vpnServiceSuspended) throw new Error('vpn_request_canceled')
+  if (existing?.state !== 'stopped' || existing.running || tunRequestToClear) await doStopVpn(true)
+  if (!isCurrentVpnReconcile(instanceId, generation) || vpnServiceSuspended) throw new Error('vpn_request_canceled')
+  const owner: VpnRequest = { requestId: uuidv4(), instanceId, generation }
+  currentVpnRequest = owner
   const request = {
+    requestId: owner.requestId,
+    instanceId,
     ipv4Addr: `${ipv4Addr}/${cidr}`,
     routes,
     dns,
@@ -238,7 +322,6 @@ async function doStartVpn(instanceId: string, generation: number, ipv4Addr: stri
   }
 
   try {
-    tunFdError = false
     if (!isCurrentVpnReconcile(instanceId, generation)) throw new Error('vpn_request_canceled')
     let start_ret = await start_vpn(request)
     if (start_ret?.errorMsg === 'need_prepare') {
@@ -253,47 +336,55 @@ async function doStartVpn(instanceId: string, generation: number, ipv4Addr: stri
     if (start_ret?.errorMsg?.length) {
       throw new Error(start_ret.errorMsg)
     }
-    if (tunFdError) throw new Error('vpn_tun_fd_failed')
-    await waitVpnStatus(true, 3)
+    await waitForNativeStart(owner)
+    assertCurrentRequest(owner)
 
+    curVpnStatus.running = true
     curVpnStatus.ipv4Addr = ipv4Addr
     curVpnStatus.ipv4Cidr = cidr
     curVpnStatus.routes = routes
     curVpnStatus.dns = dns
     activeVpnInstanceId = instanceId
   } catch (error) {
-    if (!tunFdError) await stop_vpn().catch(() => undefined)
-    curVpnStatus.running = false
-    activeVpnInstanceId = undefined
-    resetVpnConfigStatus()
+    // An old request must never stop a newer native owner or overwrite its UI.
+    const status = await get_vpn_status().catch(() => null)
+    let stopFailed = false
+    try {
+      if (matchesRequest(status, owner)) await doStopVpn(true)
+      else if (tunRequestToClear === owner && status?.requestId && status.requestId !== owner.requestId)
+        await clearCoreTunRequest(owner)
+    } catch { stopFailed = true }
+    if (!currentVpnRequest || currentVpnRequest === owner) {
+      if (queuedVpnUpdate?.instanceId === instanceId && queuedVpnUpdate.generation === generation) {
+        queuedVpnUpdate.canceled = true
+        queuedVpnUpdate = undefined
+      }
+      if (stopFailed) throw new Error('vpn_stop_failed')
+      currentVpnRequest = undefined
+      curVpnStatus.running = false
+      activeVpnInstanceId = undefined
+      resetVpnConfigStatus()
+    }
     const code = error instanceof Error ? error.message : ''
-    throw new Error(['vpn_permission_denied', 'vpn_request_canceled', 'vpn_tun_fd_failed'].includes(code) ? code : 'vpn_start_failed')
+    throw new Error(['vpn_permission_denied', 'vpn_request_canceled', 'vpn_tun_fd_failed', 'vpn_foreground_start_failed',
+      'vpn_tun_start_failed', 'vpn_service_busy', 'vpn_start_timeout'].includes(code) ? code : 'vpn_start_failed')
   }
 }
 
-async function onVpnServiceStart(payload: { fd?: number }) {
-  if (vpnServiceSuspended) { await stop_vpn(); return }
-  if (!Number.isInteger(payload.fd) || payload.fd! < 0) {
-    tunFdError = true
-    curVpnStatus.running = false
-    await stop_vpn().catch(() => undefined)
-    return
-  }
-  try {
-    await setTunFd(payload.fd!)
-    tunFdError = false
-    curVpnStatus.running = true
-  } catch {
-    tunFdError = true
-    curVpnStatus.running = false
-    activeVpnInstanceId = undefined
-    resetVpnConfigStatus()
-    await stop_vpn().catch(() => undefined)
-  }
+async function onVpnServiceStart(_payload: unknown) {
+  // Advisory only. The bounded start operation reads the authoritative native
+  // snapshot and attaches exactly its request's descriptor; delayed events from
+  // an earlier start cannot perform any mutation, including after Resume.
 }
 
-async function onVpnServiceStop(_payload: unknown) {
-  console.log('vpn service stop')
+async function onVpnServiceStop(payload: { requestId?: string; instanceId?: string }) {
+  const request = currentVpnRequest
+  if (!request || !matchesRequest(payload as VpnStatusResponse, request)) return
+  const status = await get_vpn_status()
+  if (!isCurrentRequest(request) || !matchesRequest(status, request) || status?.state !== 'stopped' || status.running) return
+  await clearCoreTunRequest(request)
+  if (!isCurrentRequest(request)) return
+  currentVpnRequest = undefined
   curVpnStatus.running = false
   activeVpnInstanceId = undefined
   resetVpnConfigStatus()
@@ -359,7 +450,7 @@ async function stopVpnOwnedByOtherInstance(instanceId: string, generation: numbe
   return isCurrentVpnReconcile(instanceId, generation)
 }
 
-async function reconcileNetworkInstance(instanceId: string, generation: number) {
+async function reconcileNetworkInstance(instanceId: string, generation: number, strict = false) {
   if (!isCurrentVpnReconcile(instanceId, generation))
     return
 
@@ -414,6 +505,7 @@ async function reconcileNetworkInstance(instanceId: string, generation: number) 
     console.warn('vpn service skipped because network instance failed', instanceId)
     vpnReconcileAttempts = 0
     await doStopVpn()
+    if (strict) throw new Error('vpn_instance_failed')
     return
   }
 
@@ -468,6 +560,7 @@ async function reconcileNetworkInstance(instanceId: string, generation: number) 
       }
     }
     catch (e) {
+      if (strict) throw e
       if (e instanceof Error && e.message === 'need_prepare') {
         console.info('vpn permission is required before starting the Android VPN service')
         return
@@ -493,11 +586,24 @@ function enqueueVpnTask(task: () => Promise<void>) {
   return run
 }
 
-function enqueueVpnReconcile(instanceId: string, generation: number) {
-  return enqueueVpnTask(() => reconcileNetworkInstance(instanceId, generation))
+function enqueueVpnReconcile(instanceId: string, generation: number, strict = false) {
+  return enqueueVpnTask(() => reconcileNetworkInstance(instanceId, generation, strict))
 }
 
-export async function onNetworkInstanceChange(instanceId: string) {
+function enqueueVpnUpdate(instanceId: string, generation: number) {
+  if (queuedVpnUpdate?.instanceId === instanceId && queuedVpnUpdate.generation === generation)
+    return queuedVpnUpdate.promise
+
+  const update: QueuedVpnUpdate = { instanceId, generation, canceled: false, promise: Promise.resolve() }
+  update.promise = enqueueVpnTask(async () => {
+    if (queuedVpnUpdate === update) queuedVpnUpdate = undefined
+    if (!update.canceled) await reconcileNetworkInstance(instanceId, generation)
+  })
+  queuedVpnUpdate = update
+  return update.promise
+}
+
+export async function onNetworkInstanceChange(instanceId: string, options: { strict?: boolean } = {}) {
   if (vpnServiceSuspended) return
   const generation = beginVpnReconcile(instanceId || undefined)
 
@@ -521,7 +627,7 @@ export async function onNetworkInstanceChange(instanceId: string) {
   if (vpnReconcileGeneration !== generation)
     return
 
-  await enqueueVpnReconcile(instanceId, generation)
+  await enqueueVpnReconcile(instanceId, generation, options.strict)
 }
 
 export async function onNetworkInstanceUpdate(instanceId: string) {
@@ -530,7 +636,7 @@ export async function onNetworkInstanceUpdate(instanceId: string) {
     return
 
   const generation = beginVpnReconcile(instanceId)
-  await enqueueVpnReconcile(instanceId, generation)
+  await enqueueVpnUpdate(instanceId, generation)
 }
 
 async function isNoTunEnabled(instanceId: string | undefined) {
@@ -585,13 +691,13 @@ export async function prepareVpnService(instanceId: string, config?: NetworkType
   })
 }
 
-export async function syncMobileVpnService() {
+export async function syncMobileVpnService(options: { strict?: boolean } = {}) {
   if (vpnServiceSuspended) return
   syncVpnStatusFromNative(await get_vpn_status())
   const instanceId = await findRunningTunInstanceId()
   if (instanceId) {
     console.log('vpn service sync selected instance', instanceId)
-    await onNetworkInstanceChange(instanceId)
+    await onNetworkInstanceChange(instanceId, options)
     return
   }
 

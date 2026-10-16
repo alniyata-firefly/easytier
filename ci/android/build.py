@@ -71,6 +71,32 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def prepare_offline_dependencies(source, environment, output):
+    """Cache the complete locked graph, then prove Tauri's metadata is offline.
+
+    Fetching only the Android triple omits desktop/host branches such as
+    arboard. Tauri also inspects Cargo's workspace/dependency metadata while
+    preparing the Android build. Without a target filter, cargo fetch caches
+    all target dependencies; metadata then catches a cold-cache omission before
+    entering the native build or exposing its private signing properties path.
+    """
+    manifest = Path(source) / "easytier-gui/src-tauri/Cargo.toml"
+    fetch_environment = dict(environment)
+    for name in [*SECRETS, "ET_ANDROID_KEYSTORE_PROPERTIES", "CARGO_BUILD_TARGET"]:
+        fetch_environment.pop(name, None)
+    fetch_environment["CARGO_NET_OFFLINE"] = "false"
+    run_logged(["cargo", "fetch", "--locked", "--manifest-path", manifest],
+               cwd=source, env=fetch_environment, log=output / "cargo-fetch.log")
+    metadata_environment = dict(fetch_environment, CARGO_NET_OFFLINE="true")
+    run_logged(["cargo", "metadata", "--locked", "--offline", "--format-version", "1",
+                "--manifest-path", manifest, "--features", "tauri/custom-protocol"],
+               cwd=source, env=metadata_environment, log=output / "cargo-metadata-offline.log")
+    # Tauri selects its Android target explicitly. Do not inherit a narrower
+    # fetch/metadata target from the caller when preparing this release.
+    environment.pop("CARGO_BUILD_TARGET", None)
+    environment["CARGO_NET_OFFLINE"] = "true"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=TOOLS.parents[1])
@@ -152,8 +178,7 @@ def main():
                    cwd=gui, env=environment, log=output / "focused-tests.log")
         run_logged([sys.executable, TOOLS / "test_dex_lifecycle.py"], cwd=source, env=environment,
                    log=output / "dex-gate-tests.log")
-        run_logged(["cargo", "fetch", "--locked", "--target", "aarch64-linux-android"],
-                   cwd=source, env=environment, log=output / "cargo-fetch.log")
+        prepare_offline_dependencies(source, environment, output)
         # Tauri's CLI generates its own target rustflags. Global RUSTFLAGS has
         # Cargo precedence and retains its required Android libraries as well
         # as both flags from the proven 16 KiB build. Use the same flags for its
@@ -162,7 +187,6 @@ def main():
             "-Clink-arg=-landroid", "-Clink-arg=-llog", "-Clink-arg=-lOpenSLES",
             "-Clink-arg=-Wl,-z,max-page-size=16384", "-Clink-arg=-Wl,-z,common-page-size=16384",
         ])
-        environment["CARGO_NET_OFFLINE"] = "true"
         environment["ET_ANDROID_KEYSTORE_PROPERTIES"] = str(properties)
         overlay = output / "tauri-build.json"
         overlay.write_text(json.dumps({"build": {"beforeBuildCommand": None}}) + "\n")

@@ -14,6 +14,8 @@ export interface InvokeResponse {
 }
 
 export interface StartVpnRequest {
+  requestId?: string;
+  instanceId?: string;
   ipv4Addr?: string;
   routes?: string[];
   dns?: string;
@@ -23,6 +25,12 @@ export interface StartVpnRequest {
 
 export interface VpnStatusResponse {
   running: boolean;
+  state?: 'starting' | 'established' | 'stopping' | 'stopped';
+  requestId?: string;
+  instanceId?: string;
+  established?: boolean;
+  fd?: number;
+  errorMsg?: string;
   ipv4Addr?: string;
   routes?: string[];
   dns?: string;

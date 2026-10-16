@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { version as guiVersion } from '../../../package.json';
 import { type NativeSession, buildConfigServerUrl, splitConfigServerUrl, getServiceDefaults, nativeApi, copyText, getLogDirPath, openLogDirectory, exitApplication, type Mode, type SessionSnapshot } from '../../native/bridge';
 import { Alert, Button, Dialog, Field, Panel, Status, useNotice } from './ui';
 
@@ -52,6 +53,6 @@ export function SettingsPanel({ session, snapshot }: { session: NativeSession; s
       {managementError && <Alert tone="error">{t(managementError)}</Alert>}<Field label={t('managementAddress')}><input autoComplete="off" spellCheck={false} value={address} disabled={snapshot.busy || modePreparing} onChange={event => setAddress(event.target.value)}/></Field><Field label={t('managementToken')}><input type="password" autoComplete="off" spellCheck={false} value={token} disabled={snapshot.busy || modePreparing} onChange={event => setToken(event.target.value)}/></Field>{snapshot.mode.config_server_url && <Button tone="danger" disabled={snapshot.busy || modePreparing} onClick={() => void operation(() => session.applyMode({ ...snapshot.mode, config_server_url: undefined }), closeManagement)}>{t('disconnectManagement')}</Button>}
     </Dialog>
     <Dialog open={!!pending} title={t('confirm')} onClose={() => { if (!snapshot.busy && !modePreparing) setPending(undefined); }} footer={<><Button tone="ghost" disabled={snapshot.busy || modePreparing} onClick={() => setPending(undefined)}>{t('cancel')}</Button><Button busy={snapshot.busy || modePreparing} tone="danger" onClick={() => { const action = pending; setPending(undefined); if (action === 'management') void saveManagement(); else void operation(() => action === 'stop' ? session.stopService() : session.uninstallService(), () => setModeOpen(false)); }}>{t('confirm')}</Button></>}><p>{t(pending === 'stop' ? 'confirmStopService' : pending === 'uninstall' ? 'confirmUninstall' : 'confirmManagement')}</p></Dialog>
-    <Dialog open={aboutOpen} title={t('about')} onClose={() => setAboutOpen(false)}><dl className="detail-list"><dt>EasyTier GUI</dt><dd>2.7.0</dd><dt>Core</dt><dd>{snapshot.version || '—'}</dd><dt>{t('device')}</dt><dd>{snapshot.platform}</dd></dl></Dialog>
+    <Dialog open={aboutOpen} title={t('about')} onClose={() => setAboutOpen(false)}><dl className="detail-list"><dt>EasyTier GUI</dt><dd>{guiVersion}</dd><dt>Core</dt><dd>{snapshot.version || '—'}</dd><dt>{t('device')}</dt><dd>{snapshot.platform}</dd></dl></Dialog>
   </div>;
 }

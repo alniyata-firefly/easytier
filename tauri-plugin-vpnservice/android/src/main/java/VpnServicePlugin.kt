@@ -20,6 +20,8 @@ class PingArgs {
 
 @InvokeArg
 class StartVpnArgs {
+    var requestId: String? = null
+    var instanceId: String? = null
     var ipv4Addr: String? = null
     var routes: Array<String> = emptyArray()
     var dns: String? = null
@@ -106,26 +108,38 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
                 invoke.resolve(ret)
                 return@runOnUiThread
             }
-            println("start vpn in plugin, args: $args")
-
-            TauriVpnService.self?.onRevoke()
-
             val it = VpnService.prepare(activity)
             val ret = JSObject()
             if (it != null) {
                 ret.put("errorMsg", "need_prepare")
             } else {
+                // Old callers may omit these fields. New clients always supply
+                // both and match the authoritative snapshot before using a fd.
+                val requestId = args.requestId ?: java.util.UUID.randomUUID().toString()
+                val instanceId = args.instanceId ?: "legacy"
+                if (!TauriVpnService.beginStart(requestId, instanceId)) {
+                    ret.put("errorMsg", "vpn_service_busy")
+                    invoke.resolve(ret)
+                    return@runOnUiThread
+                }
                 val intent = Intent(activity, TauriVpnService::class.java)
+                intent.putExtra(TauriVpnService.REQUEST_ID, requestId)
+                intent.putExtra(TauriVpnService.INSTANCE_ID, instanceId)
                 intent.putExtra(TauriVpnService.IPV4_ADDR, args.ipv4Addr)
                 intent.putExtra(TauriVpnService.ROUTES, args.routes)
                 intent.putExtra(TauriVpnService.DNS, args.dns)
                 intent.putExtra(TauriVpnService.DISALLOWED_APPLICATIONS, args.disallowedApplications)
                 intent.putExtra(TauriVpnService.MTU, args.mtu)
 
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                    activity.startForegroundService(intent)
-                } else {
-                    activity.startService(intent)
+                try {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                        activity.startForegroundService(intent)
+                    } else {
+                        activity.startService(intent)
+                    }
+                } catch (_: Exception) {
+                    TauriVpnService.startRejected(requestId, "vpn_foreground_start_failed")
+                    ret.put("errorMsg", "vpn_foreground_start_failed")
                 }
             }
             invoke.resolve(ret)
@@ -140,7 +154,9 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
                 TauriVpnService.clientForegroundPolicy(activity).setEnabled(args.enabled)
                 invoke.resolve(JSObject())
             } catch (_: Exception) {
-                invoke.reject("Failed to update the client background service")
+                val ret = JSObject()
+                ret.put("errorMsg", if (args.enabled) "client_foreground_start_failed" else "client_foreground_stop_failed")
+                invoke.resolve(ret)
             }
         }
     }
@@ -148,31 +164,20 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun stopVpn(invoke: Invoke) {
         activity.runOnUiThread {
-            println("stop vpn in plugin")
-            var failed = false
             try {
-                TauriVpnService.self?.onRevoke()
+                TauriVpnService.requestStop(activity)
+                invoke.resolve(JSObject())
             } catch (_: Exception) {
-                failed = true
+                val ret = JSObject()
+                ret.put("errorMsg", "vpn_stop_failed")
+                invoke.resolve(ret)
             }
-            try {
-                activity.stopService(Intent(activity, TauriVpnService::class.java))
-            } catch (_: Exception) {
-                failed = true
-            }
-            if (failed) invoke.reject("Failed to stop the Android VPN service")
-            else invoke.resolve(JSObject())
         }
     }
 
     @Command
     fun getVpnStatus(invoke: Invoke) {
-        val ret = JSObject()
-        ret.put("running", TauriVpnService.self != null)
-        ret.put("ipv4Addr", TauriVpnService.ipv4Addr)
-        ret.put("routes", TauriVpnService.routes)
-        ret.put("dns", TauriVpnService.dns)
-        invoke.resolve(ret)
+        activity.runOnUiThread { invoke.resolve(TauriVpnService.statusSnapshot()) }
     }
 
     @Command

@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    os::fd::{AsRawFd, OwnedFd},
+    sync::{Arc, OnceLock},
+};
 
 use anyhow::Context as _;
 use cidr::Ipv4Inet;
@@ -24,6 +27,8 @@ pub(super) struct NativeTunRuntime {
     tun_fd: mpsc::Sender<i32>,
     tun_fd_receiver: Mutex<Option<mpsc::Receiver<i32>>>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    packet_plane: OnceLock<Arc<CorePacketPlane>>,
+    installation: Arc<Mutex<()>>,
 }
 
 impl NativeTunRuntime {
@@ -36,6 +41,8 @@ impl NativeTunRuntime {
             tun_fd,
             tun_fd_receiver: Mutex::new(Some(tun_fd_receiver)),
             task: Mutex::new(None),
+            packet_plane: OnceLock::new(),
+            installation: Arc::new(Mutex::new(())),
         }
     }
 
@@ -51,6 +58,8 @@ impl NativeTunRuntime {
         global_ctx: ArcGlobalCtx,
         packet_plane: Arc<CorePacketPlane>,
         fd: i32,
+        owner: Option<OwnedFd>,
+        cancel: CancellationToken,
     ) -> anyhow::Result<()> {
         nic_state.drain().await;
         if fd <= 0 {
@@ -63,37 +72,54 @@ impl NativeTunRuntime {
             nic_state.receiver(),
             closed,
         );
-        nic.run_for_mobile(fd).await.context("add ip failed")?;
+        match owner {
+            Some(owner) => nic.run_for_mobile_owned(owner).await,
+            None => nic.run_for_mobile(fd).await,
+        }
+        .context("failed to initialize mobile TUN")?;
         let magic_dns = global_ctx
             .get_ipv4()
             .map(|ip| MagicDnsRuntime::start(global_ctx, packet_plane, None, ip))
             .unwrap_or_default();
-        nic_state.install(nic, magic_dns).await;
+        nic_state.install_mobile(nic, magic_dns, cancel).await?;
         Ok(())
     }
 
     pub(super) async fn prepare(&self, packet_plane: Arc<CorePacketPlane>) -> anyhow::Result<()> {
         self.nic.drain().await;
+        let _ = self.packet_plane.set(packet_plane.clone());
         let Some(mut tun_fds) = self.tun_fd_receiver.lock().await.take() else {
             return Ok(());
         };
         let nic_state = self.nic.clone();
         let global_ctx = self.global_ctx.clone();
         let cancel = self.cancel.clone();
+        let installation = self.installation.clone();
         self.task.lock().await.replace(tokio::spawn(async move {
             loop {
                 let fd = tokio::select! {
+                    biased;
                     _ = cancel.cancelled() => return,
                     fd = tun_fds.recv() => match fd { Some(fd) => fd, None => return },
                 };
-                if let Err(error) = Self::install_mobile_tun(
-                    nic_state.clone(),
-                    global_ctx.clone(),
-                    packet_plane.clone(),
-                    fd,
-                )
-                .await
-                {
+                let _installation = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return,
+                    guard = installation.lock() => guard,
+                };
+                let result = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return,
+                    result = Self::install_mobile_tun(
+                        nic_state.clone(),
+                        global_ctx.clone(),
+                        packet_plane.clone(),
+                        fd,
+                        None,
+                        cancel.clone(),
+                    ) => result,
+                };
+                if let Err(error) = result {
                     tracing::error!(?error, "failed to attach mobile TUN fd");
                 }
             }
@@ -105,6 +131,7 @@ impl NativeTunRuntime {
         if let Some(task) = self.task.lock().await.take() {
             let _ = task.await;
         }
+        let _installation = self.installation.lock().await;
         self.nic.stop().await;
     }
 
@@ -112,6 +139,51 @@ impl NativeTunRuntime {
         self.tun_fd
             .try_send(fd)
             .map_err(|error| anyhow::anyhow!("failed to send TUN fd: {error}"))
+    }
+
+    pub(super) async fn attach_fd_confirmed(&self, fd: OwnedFd) -> anyhow::Result<()> {
+        let raw_fd = fd.as_raw_fd();
+        if raw_fd <= 0 {
+            anyhow::bail!("invalid mobile TUN file descriptor");
+        }
+        let packet_plane = self
+            .packet_plane
+            .get()
+            .context("mobile TUN runtime is not prepared")?
+            .clone();
+        let _installation = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => anyhow::bail!("instance is closing; TUN attachment cancelled"),
+            guard = self.installation.lock() => guard,
+        };
+        // Directly owned by this caller's future: dropping a timed-out caller
+        // drops the pending NIC/descriptor instead of leaving an install queued.
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(anyhow::anyhow!("instance is closing; TUN attachment cancelled")),
+            result = Self::install_mobile_tun(
+                self.nic.clone(),
+                self.global_ctx.clone(),
+                packet_plane,
+                raw_fd,
+                Some(fd),
+                self.cancel.clone(),
+            ) => result,
+        }
+    }
+
+    pub(super) async fn detach_fd_confirmed(&self) -> anyhow::Result<()> {
+        // Share the install lock to avoid concurrent NIC replacement. The
+        // caller separately enforces session ownership and mutation ordering.
+        let _installation = self.installation.lock().await;
+        if self.cancel.is_cancelled() || self.packet_plane.get().is_none() {
+            // Shutdown needs no replacement drain, and a runtime that has not
+            // been prepared may not have a packet receiver installed yet.
+            self.nic.stop().await;
+        } else {
+            self.nic.drain().await;
+        }
+        Ok(())
     }
 
     pub(super) fn dhcp_host(
@@ -124,6 +196,7 @@ impl NativeTunRuntime {
             operation,
             cancel: self.cancel.clone(),
             nic: self.nic.clone(),
+            installation: self.installation.clone(),
             closed: Arc::new(Notify::new()),
         })
     }
@@ -134,6 +207,7 @@ struct NativeDhcpIpv4Host {
     operation: Arc<Mutex<()>>,
     cancel: CancellationToken,
     nic: TunNicState,
+    installation: Arc<Mutex<()>>,
     closed: Arc<Notify>,
 }
 
@@ -146,6 +220,12 @@ impl NativeDhcpIpv4Host {
     }
 
     async fn apply(&self, next: Option<Ipv4Inet>) -> anyhow::Result<Option<Ipv4Inet>> {
+        self.ensure_open()?;
+        let _installation = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => anyhow::bail!("instance is closing; DHCP update cancelled"),
+            guard = self.installation.lock() => guard,
+        };
         self.ensure_open()?;
         tokio::select! {
             _ = self.cancel.cancelled() => anyhow::bail!("instance is closing; DHCP update cancelled"),

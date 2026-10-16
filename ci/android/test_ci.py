@@ -17,6 +17,47 @@ from verify_page_size import inspect_native_libraries
 
 
 class AndroidCiTests(unittest.TestCase):
+    def test_prefetch_covers_all_platforms_before_locked_offline_metadata(self):
+        environment = {name: "fixture-signing-value" for name in SECRETS}
+        environment.update({"ET_ANDROID_KEYSTORE_PROPERTIES": "/fixture/private/release.properties",
+                            "CARGO_BUILD_TARGET": "aarch64-linux-android", "CARGO_NET_OFFLINE": "true"})
+        with patch.object(build, "run_logged") as run:
+            build.prepare_offline_dependencies(Path("/fixture/source"), environment, Path("/fixture/output"))
+        self.assertEqual(run.call_count, 2)
+        fetch, metadata = run.call_args_list
+        self.assertEqual(fetch.args[0], ["cargo", "fetch", "--locked", "--manifest-path",
+                                        Path("/fixture/source/easytier-gui/src-tauri/Cargo.toml")])
+        self.assertEqual(fetch.kwargs["env"]["CARGO_NET_OFFLINE"], "false")
+        self.assertNotIn("--target", fetch.args[0])
+        self.assertEqual(metadata.args[0], ["cargo", "metadata", "--locked", "--offline", "--format-version", "1",
+                                           "--manifest-path", Path("/fixture/source/easytier-gui/src-tauri/Cargo.toml"),
+                                           "--features", "tauri/custom-protocol"])
+        self.assertEqual(metadata.kwargs["env"]["CARGO_NET_OFFLINE"], "true")
+        self.assertNotIn("--no-deps", metadata.args[0])
+        self.assertNotIn("--filter-platform", metadata.args[0])
+        for call in [fetch, metadata]:
+            self.assertNotIn("CARGO_BUILD_TARGET", call.kwargs["env"])
+            self.assertNotIn("ET_ANDROID_KEYSTORE_PROPERTIES", call.kwargs["env"])
+            self.assertTrue(all(name not in call.kwargs["env"] for name in SECRETS))
+        self.assertEqual(environment["CARGO_NET_OFFLINE"], "true")
+        self.assertNotIn("CARGO_BUILD_TARGET", environment)
+
+    def test_failed_fetch_stops_before_offline_metadata_or_build(self):
+        environment = {"CARGO_NET_OFFLINE": "false"}
+        with patch.object(build, "run_logged", side_effect=RuntimeError("fixture fetch failure")) as run:
+            with self.assertRaisesRegex(RuntimeError, "fetch failure"):
+                build.prepare_offline_dependencies(Path("/fixture/source"), environment, Path("/fixture/output"))
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(environment["CARGO_NET_OFFLINE"], "false")
+
+    def test_missing_offline_dependency_stops_before_native_build(self):
+        environment = {"CARGO_NET_OFFLINE": "false"}
+        with patch.object(build, "run_logged", side_effect=[None, RuntimeError("fixture missing arboard")]) as run:
+            with self.assertRaisesRegex(RuntimeError, "missing arboard"):
+                build.prepare_offline_dependencies(Path("/fixture/source"), environment, Path("/fixture/output"))
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(environment["CARGO_NET_OFFLINE"], "false")
+
     def test_missing_signing_values_fail_before_output_or_toolchain_work(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "not-created"

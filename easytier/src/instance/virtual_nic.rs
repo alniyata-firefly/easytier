@@ -1,3 +1,5 @@
+#[cfg(mobile)]
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::{
     collections::BTreeSet,
     io,
@@ -42,6 +44,21 @@ use zerocopy::{NativeEndian, NetworkEndian};
 
 #[cfg(target_os = "windows")]
 use crate::common::ifcfg::RegistryManager;
+
+#[cfg(mobile)]
+struct MobileTunIo<T> {
+    // Rust drops fields in declaration order. The raw-fd adapter must be gone
+    // before its final owner closes the descriptor, even if never polled.
+    io: T,
+    _fd_owner: Option<Arc<OwnedFd>>,
+}
+
+#[cfg(mobile)]
+impl<T> MobileTunIo<T> {
+    fn io_mut(&mut self) -> &mut T {
+        &mut self.io
+    }
+}
 
 pin_project! {
     pub struct TunStream {
@@ -799,6 +816,9 @@ pub struct NicCtx {
     nic: Arc<Mutex<VirtualNic>>,
     tasks: JoinSet<()>,
 
+    #[cfg(mobile)]
+    mobile_tun_fd: Option<Arc<OwnedFd>>,
+
     #[cfg(target_os = "windows")]
     windows_udp_broadcast_relay: Option<AbortOnDropHandle<()>>,
 }
@@ -819,6 +839,9 @@ impl NicCtx {
 
             nic: Arc::new(Mutex::new(VirtualNic::new(global_ctx))),
             tasks: JoinSet::new(),
+
+            #[cfg(mobile)]
+            mobile_tun_fd: None,
 
             #[cfg(target_os = "windows")]
             windows_udp_broadcast_relay: None,
@@ -882,12 +905,23 @@ impl NicCtx {
 
     fn do_forward_nic_to_peers_task(
         &mut self,
-        mut stream: Pin<Box<dyn ZCPacketStream>>,
+        stream: Pin<Box<dyn ZCPacketStream>>,
     ) -> Result<(), Error> {
         // read from nic and write to corresponding tunnel
         let packet_plane = self.packet_plane.clone();
         let close_notifier = self.close_notifier.clone();
+        #[cfg(not(mobile))]
+        let mut stream = stream;
+        #[cfg(mobile)]
+        let mut stream = MobileTunIo {
+            io: stream,
+            _fd_owner: self.mobile_tun_fd.clone(),
+        };
         self.tasks.spawn(async move {
+            // JoinSet drop aborts asynchronously. Keep the owned descriptor
+            // alive until the task has actually dropped its raw-fd adapter.
+            #[cfg(mobile)]
+            let stream = stream.io_mut();
             while let Some(ret) = stream.next().await {
                 if ret.is_err() {
                     tracing::error!("read from nic failed: {:?}", ret);
@@ -902,10 +936,19 @@ impl NicCtx {
         Ok(())
     }
 
-    fn do_forward_peers_to_nic(&mut self, mut sink: Pin<Box<dyn ZCPacketSink>>) {
+    fn do_forward_peers_to_nic(&mut self, sink: Pin<Box<dyn ZCPacketSink>>) {
         let channel = self.peer_packet_receiver.clone();
         let close_notifier = self.close_notifier.clone();
+        #[cfg(not(mobile))]
+        let mut sink = sink;
+        #[cfg(mobile)]
+        let mut sink = MobileTunIo {
+            io: sink,
+            _fd_owner: self.mobile_tun_fd.clone(),
+        };
         self.tasks.spawn(async move {
+            #[cfg(mobile)]
+            let sink = sink.io_mut();
             // unlock until coroutine finished
             let mut channel = channel.lock().await;
             while let Some(packet) = channel.recv().await {
@@ -1299,6 +1342,28 @@ impl NicCtx {
 
     #[cfg(mobile)]
     pub async fn run_for_mobile(&mut self, tun_fd: std::os::fd::RawFd) -> Result<(), Error> {
+        self.run_mobile(tun_fd, None).await
+    }
+
+    #[cfg(mobile)]
+    pub(crate) async fn run_for_mobile_owned(&mut self, tun_fd: OwnedFd) -> Result<(), Error> {
+        self.run_mobile(tun_fd.as_raw_fd(), Some(Arc::new(tun_fd)))
+            .await
+    }
+
+    #[cfg(mobile)]
+    pub(crate) async fn stop_mobile(&mut self) {
+        self.tasks.shutdown().await;
+        self.mobile_tun_fd.take();
+    }
+
+    #[cfg(mobile)]
+    async fn run_mobile(
+        &mut self,
+        tun_fd: std::os::fd::RawFd,
+        owner: Option<Arc<OwnedFd>>,
+    ) -> Result<(), Error> {
+        self.mobile_tun_fd = owner;
         let tunnel = {
             let mut nic = self.nic.lock().await;
             match nic.create_dev_for_mobile(tun_fd).await {

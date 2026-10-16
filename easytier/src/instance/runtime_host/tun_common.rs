@@ -61,6 +61,16 @@ impl TunNicState {
         let mut old = self.nic_ctx.lock().await.take();
         if let Some(nic) = old.as_mut() {
             nic.magic_dns.stop().await;
+            #[cfg(mobile)]
+            if let Some(nic_ctx) = nic
+                ._nic_ctx
+                .as_mut()
+                .and_then(|context| context.downcast_mut::<NicCtx>())
+            {
+                // Await real adapter task destruction before releasing its
+                // descriptor. Cancellation remains safe via each task's owner.
+                nic_ctx.stop_mobile().await;
+            }
         }
         drop(old);
     }
@@ -87,5 +97,26 @@ impl TunNicState {
             .lock()
             .await
             .replace(NicCtxContainer::new(nic, magic_dns));
+    }
+
+    #[cfg(mobile)]
+    pub(super) fn install_mobile(
+        &self,
+        nic: NicCtx,
+        magic_dns: MagicDnsRuntime,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + '_ {
+        let next = NicCtxContainer::new(nic, magic_dns);
+        async move {
+            self.stop().await;
+            let mut current = self.nic_ctx.lock().await;
+            if cancel.is_cancelled() {
+                anyhow::bail!("instance is closing; TUN attachment cancelled");
+            }
+            current.replace(next);
+            // No suspension after commit: completion means the owned NIC is
+            // installed, rather than a request left for a background worker.
+            Ok(())
+        }
     }
 }
