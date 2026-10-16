@@ -1,6 +1,6 @@
 # React native bridge
 
-`bridge.ts` is the public interface used by the React Windows and Android UI.
+`bridge.ts` is the public interface used by the React desktop and Android UI.
 It calls the existing Tauri commands and VPN plugin protocol; it contains no
 Vue state or components. Configuration DTOs and generated protocol helpers are
 imported from individual shared TypeScript modules, not the frontend library
@@ -42,8 +42,8 @@ Only local user/legacy enabled configurations are restored by the GUI; a central
 server reconciles its own networks and a remote/service Core owns its lifecycle.
 
 Android retains the foreground VPN service, permission request, TUN descriptor,
-quick settings tile and route/IP/DNS update reconciliation. The descriptor may be
-zero. Installing a descriptor must succeed before reporting the VPN as running.
+quick settings tile and route/IP/DNS update reconciliation. A valid descriptor must be positive; zero is a Core sentinel and is rejected.
+Installing a descriptor must succeed before reporting the VPN as running.
 Failed or timed-out native starts clean partial VPN state, late network results
 cannot restart a stopped network, and pending permission requests can be canceled
 by a stop. A denied permission request keeps a previous VPN running. Tile starts
@@ -59,3 +59,24 @@ Windows VPN. Device/platform integration must be tested separately.
 `ET_GUI_QA_URL=http://127.0.0.1:19420 pnpm --dir easytier-gui exec node --test tests/runtime-routes.browser.test.mjs`
 checks actual omitted-field protobuf JSON fixtures through the GUI API and the
 Routes, Connections, Events and Overview tabs, with synthetic Tauri IPC only.
+
+Local configurations remain editable while a normal-mode client is stopped.
+`GUIRemoteClient` then validates TOML through the pure native parser and writes
+only user-managed storage entries; it does not run a network or initialize Core.
+Managed entries remain read-only. Service and remote modes never substitute local
+storage for an unavailable remote Core. Configuration clients are scoped to their
+mode and connection so a stale editor cannot save into a different destination.
+
+Android TUN ownership uses a unique start request ID and instance ID. Events only
+wake reconciliation; bounded native status queries confirm establishment and real
+service destruction. Both JavaScript and the Rust attachment boundary reject stale
+owners. These transition checks do not introduce background polling.
+
+The Android attachment command waits for real Core NIC installation, not merely
+an fd queue receipt. Core holds an owned duplicate through its actual read/write
+tasks. Stop clears that binding by instance/request identity and waits for task
+shutdown; a native Rust channel also handles service destruction without JS.
+A canceled wait does not abandon cleanup or permit a late request to replace a
+new owner. Pure ownership tests are available with:
+
+`cargo test --locked --manifest-path ci/android/lease-tests/Cargo.toml`

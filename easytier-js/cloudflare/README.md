@@ -119,4 +119,4 @@ pnpm --filter @easytier/web-example dev:cloudflare
 ```
 
 See the complete Browser-to-Cloudflare walkthrough in
-[`easytier-js/examples/web`](https://github.com/EasyTier/EasyTier/tree/main/easytier-js/examples/web).
+[`easytier-js/examples/web`](https://github.com/alniyata-firefly/easytier/tree/main/easytier-js/examples/web).

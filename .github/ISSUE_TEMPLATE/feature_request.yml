@@ -1,179 +1,50 @@
 # Copyright 2024-present Easytier Programme within The Commons Conservancy
 # SPDX-License-Identifier: Apache-2.0
 
-name: 💡 新功能请求 / Feature Request
+name: 功能请求 / Feature request
 title: '[feat] '
-description: 提出一个想法 / Suggest an idea
-labels: ['type: feature request']
-
+description: 建议本分支改进 / Suggest an improvement to this fork
 body:
   - type: markdown
     attributes:
       value: |
-        ## 提交功能请求前请注意 / Before Submitting
-        1. 请先搜索 [现有的功能请求](https://github.com/EasyTier/EasyTier/issues?q=is%3Aissue+label%3A%22type%3A+feature+request%22) 确保您的想法尚未被提出。
-        1. Please search [existing feature requests](https://github.com/EasyTier/EasyTier/issues?q=is%3Aissue+label%3A%22type%3A+feature+request%22) to ensure your idea hasn't been suggested already.
-        2. 请确保这个功能确实适合 EasyTier 项目的目标和范围。
-        2. Please ensure this feature fits within EasyTier's goals and scope.
-        3. 考虑这个功能是否能让更多用户受益，而不只是解决个人需求。
-        3. Consider whether this feature would benefit many users, not just personal needs.
-
+        请先搜索[本分支已有问题](https://github.com/alniyata-firefly/easytier/issues)，并说明你使用的版本。请勿附带凭据或私有部署数据。
+        Search [this fork's issues](https://github.com/alniyata-firefly/easytier/issues) first and identify your version. Do not include credentials or private deployment data.
   - type: dropdown
-    id: feature-category
+    id: component
     attributes:
-      label: 功能类别 / Feature Category
-      description: 请选择这个功能请求属于哪个类别 / Please select which category this feature request belongs to
+      label: 范围 / Scope
       options:
-        - 网络连接 / Network Connectivity
-        - 安全和加密 / Security & Encryption  
-        - 性能优化 / Performance Optimization
-        - 用户界面 / User Interface
-        - 配置管理 / Configuration Management
-        - 监控和日志 / Monitoring & Logging
-        - 平台支持 / Platform Support
-        - API 和集成 / API & Integration
+        - React Web 控制台 / React Web console
+        - 桌面或 Android GUI / Desktop or Android GUI
+        - Core 网络连接 / Core networking
+        - 配置和 API / Configuration and APIs
+        - 指标或日志 / Metrics or logs
+        - 构建或平台支持 / Build or platform support
         - 其他 / Other
     validations:
       required: true
-
   - type: textarea
     id: use-case
     attributes:
-      label: 使用场景 / Use Case
-      description: 描述您希望这个功能解决的具体使用场景或问题 / Describe the specific use case or problem you want this feature to solve
-      placeholder: |
-        例如：
-        - 作为企业用户，我需要在多个分支机构之间建立安全的网络连接
-        - 作为开发者，我希望能够通过 API 监控网络状态
-        - 作为系统管理员，我需要更详细的连接日志来排查问题
-        
-        Example:
-        - As an enterprise user, I need to establish secure network connections between multiple branch offices
-        - As a developer, I want to monitor network status through APIs
-        - As a system administrator, I need more detailed connection logs for troubleshooting
+      label: 使用场景 / Use case
+      description: 你想完成什么，当前版本的具体行为是什么？ / What are you trying to accomplish, and how does the current version behave?
     validations:
       required: true
-
-  - type: textarea
-    id: current-limitations
-    attributes:
-      label: 当前限制 / Current Limitations
-      description: 描述当前 EasyTier 的哪些限制阻止了您实现这个使用场景 / Describe what current limitations in EasyTier prevent you from achieving this use case
-      placeholder: |
-        例如：
-        - 目前不支持基于用户角色的访问控制
-        - 缺少对 IPv6 的完整支持
-        - 没有提供 REST API 来获取网络状态
-        
-        Example:
-        - Currently lacks role-based access control
-        - Missing complete IPv6 support
-        - No REST API available for network status
-    validations:
-      required: true
-
   - type: textarea
     id: proposed-solution
     attributes:
-      label: 建议的解决方案 / Proposed Solution
-      description: 详细描述您希望添加的功能以及它应该如何工作 / Describe in detail the feature you'd like to add and how it should work
-      placeholder: |
-        请描述：
-        - 功能的具体实现方式
-        - 用户界面或 API 设计
-        - 配置选项和参数
-        - 与现有功能的集成方式
-        
-        Please describe:
-        - Specific implementation approach
-        - User interface or API design
-        - Configuration options and parameters  
-        - Integration with existing features
+      label: 建议行为 / Proposed behavior
+      description: 说明用户操作、配置或 API 的变化，以及预期结果。 / Describe changes to user actions, configuration, or APIs and the expected result.
     validations:
       required: true
-
   - type: textarea
-    id: benefits
+    id: compatibility
     attributes:
-      label: 预期收益 / Expected Benefits
-      description: 说明这个功能会带来什么好处，会影响哪些用户群体 / Explain what benefits this feature would bring and which user groups it would affect
-      placeholder: |
-        例如：
-        - 提高网络连接的稳定性和性能
-        - 简化大规模部署的管理复杂度
-        - 增强企业用户的安全性需求
-        - 降低新用户的学习成本
-        
-        Example:
-        - Improve network connection stability and performance
-        - Simplify management complexity for large-scale deployments
-        - Enhance security requirements for enterprise users
-        - Reduce learning curve for new users
-
-  - type: textarea
-    id: technical-considerations
-    attributes:
-      label: 技术考虑 / Technical Considerations
-      description: 如果您了解技术细节，请分享相关的技术考虑或约束 / If you have technical knowledge, please share relevant technical considerations or constraints
-      placeholder: |
-        例如：
-        - 可能需要修改网络协议栈
-        - 需要考虑跨平台兼容性
-        - 可能影响现有性能
-        - 依赖第三方库或协议
-        
-        Example:
-        - May require modifications to network protocol stack
-        - Cross-platform compatibility needs consideration
-        - Potential impact on existing performance
-        - Dependencies on third-party libraries or protocols
-
+      label: 兼容性和限制 / Compatibility and constraints
+      description: 如已知，请说明受影响平台、旧配置迁移、网络内版本兼容、启动停止或断网恢复。 / If known, describe platforms, configuration migration, mixed-version compatibility, start/stop, or reconnection behavior.
   - type: textarea
     id: alternatives
     attributes:
-      label: 备选方案 / Alternative Solutions
-      description: 您是否考虑过其他解决方案？是否有现有的替代方案？ / Have you considered other solutions? Are there existing alternatives?
-      placeholder: |
-        例如：
-        - 使用第三方工具 X 可以部分解决，但缺少 Y 功能
-        - 通过脚本workaround可以实现，但不够优雅
-        - 其他类似项目 Z 有这个功能，可以参考其实现
-        
-        Example:
-        - Third-party tool X can partially solve this, but lacks Y functionality
-        - Can be achieved through script workarounds, but not elegant
-        - Similar project Z has this feature, could reference its implementation
-
-  - type: textarea
-    id: implementation-priority
-    attributes:
-      label: 实现优先级 / Implementation Priority
-      description: 这个功能对您有多重要？是否有时间要求？ / How important is this feature to you? Any time requirements?
-      placeholder: |
-        例如：
-        - 高优先级：阻碍了我们的生产部署
-        - 中优先级：会显著改善用户体验
-        - 低优先级：锦上添花的功能
-        
-        Example:
-        - High priority: Blocking our production deployment
-        - Medium priority: Would significantly improve user experience
-        - Low priority: Nice-to-have feature
-
-  - type: textarea
-    id: additional-context
-    attributes:
-      label: 补充信息 / Additional Context
-      description: 添加任何其他相关信息，如截图、链接、参考资料等 / Add any other relevant information such as screenshots, links, or references
-      placeholder: |
-        例如：
-        - 相关的 RFC 或技术规范
-        - 其他项目的实现示例
-        - 用户调研或反馈数据
-        - 设计草图或流程图
-        
-        Example:
-        - Relevant RFCs or technical specifications
-        - Implementation examples from other projects
-        - User research or feedback data
-        - Design sketches or flowcharts
+      label: 其他方案 / Alternatives
+      description: 已经尝试的配置、临时措施或参考资料。 / Configuration already tried, workarounds, or references.

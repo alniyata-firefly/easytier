@@ -1,28 +1,24 @@
-# Security Policy
+# Security policy
 
 [简体中文](SECURITY.zh-CN.md) | English
 
-## Supported Versions
+This policy applies to [alniyata-firefly/easytier](https://github.com/alniyata-firefly/easytier), a downstream adaptation of [EasyTier/EasyTier](https://github.com/EasyTier/EasyTier) under the repository's [LGPL-3.0 license](../LICENSE). Upstream reporting channels and support commitments do not automatically apply to this fork.
 
-Security updates are provided for the latest EasyTier release. Before reporting a vulnerability, please verify it against the latest release or the current `main` branch when practical.
+## Affected versions
 
-| Version | Supported |
-| --- | --- |
-| Latest release | Yes |
-| Older releases | No |
+Include the downstream release and full commit ID in a report, together with Core and GUI versions when they differ. Where practical, confirm whether current `main` is affected. This fork has no published long-term-support or older-version backport schedule; do not assume an upstream fix is already included in a downstream package.
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
-Please report suspected vulnerabilities through GitHub's [private vulnerability reporting form](https://github.com/EasyTier/EasyTier/security/advisories/new).
+Check [this repository's Security page](https://github.com/alniyata-firefly/easytier/security). If it offers **Report a vulnerability**, use that private form. This policy does not imply that GitHub private vulnerability reporting is enabled.
 
-Do not disclose the vulnerability in a public issue, discussion, or pull request. A useful report should include:
+If a private form is unavailable, open a minimal [issue in this fork](https://github.com/alniyata-firefly/easytier/issues/new) asking how to arrange confidential reporting. Do not include the vulnerability, exploit, affected private endpoints, or credentials in that public request. Agree on a confidential channel with the maintainers before sending details. Do not send a downstream-only report to an upstream contact by default.
 
-- the affected EasyTier version or commit;
-- the affected platform and relevant configuration, with secrets removed;
-- a description of the vulnerability and its potential impact;
-- reproducible steps or a minimal proof of concept; and
-- any known mitigations or workarounds.
+A useful confidential report contains:
 
-The maintainers will assess the report and coordinate remediation and disclosure through the private advisory. Please allow reasonable time for a fix before publishing details.
+- the affected release or commit and component;
+- the platform and minimal configuration with secrets removed;
+- the impact, prerequisites, and reproducible steps or minimal proof of concept;
+- any known workaround and whether upstream is also affected.
 
-When investigating, avoid accessing or modifying other users' data, disrupting services, or violating applicable laws.
+Agree on disclosure before publishing exploit details. This repository does not promise a particular response deadline. Test only systems you are authorized to assess, avoid service disruption and access to other users' data, and never attach live tokens, private keys, signing files, or an unredacted runtime database.

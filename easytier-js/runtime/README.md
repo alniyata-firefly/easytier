@@ -1,7 +1,7 @@
 # `@easytier/runtime`
 
-Shared WebAssembly runtime used by the official EasyTier Browser and
-Cloudflare Adapters. Application code should normally install
+Shared WebAssembly runtime used by the EasyTier Browser and
+Cloudflare Adapters in this repository. Application code should normally install
 `@easytier/browser` or `@easytier/cloudflare` instead.
 
 The package root contains only cross-platform EasyTier types. The

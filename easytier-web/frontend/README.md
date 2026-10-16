@@ -1,12 +1,12 @@
 # EasyTier React 管理控制台
 
-面向 VPN 管理员的 React 19、TypeScript、Vite 前端。沿用 EasyTier Web 的会话、权限和 API，复用现有协议类型与数据格式化模块；不需要 PrimeVue、额外路由库或新的图表依赖。旧 Vue 前端快照仅保留在交付目录外层 `reference/legacy-vue-frontend`，共享协议模块仍在 `frontend-lib`。
+面向 VPN 管理员的 React 19、TypeScript、Vite 前端。沿用 EasyTier Web 的会话、权限和 API，复用现有协议类型与数据格式化模块；不需要 PrimeVue 或额外图表依赖。共享协议模块位于 `frontend-lib`；仓库内的旧 Vue 配置生成器与可选贡献工具不进入当前默认发行包。
 
 ## 项目来源
 
 本目录是 [EasyTier 下游适配仓库](../../README_CN.md#项目来源与下游改造)的 React Web 控制台，上游为 [EasyTier/EasyTier](https://github.com/EasyTier/EasyTier)。现有 VPN Core、协议和管理后端继承上游；中央网络管理、令牌接入、配置确认、资源观测及本 React 界面由下游扩展。上游基线为 `8b7f1f0196edb5b580829ed5f135050fb5853478`，本仓库保留其 [LGPL-3.0 许可证](../../LICENSE)和贡献者说明。
 
-Web、Windows 与 Android 使用同一套自行绘制的[蓝色三节点 SVG 标识](../../assets/brand/easytier.svg)。UniFi 官方站点仅作为平面布局与交互的视觉参考；本项目不是 Ubiquiti 官方项目，未获官方背书，也未以授权图标的名义使用其资源。标识、字体及设计来源见 [DESIGN.md](DESIGN.md#设计与标识来源)，字体沿用各自原始许可。
+Web、桌面与 Android 使用同一套自行绘制的[三节点 SVG 标识](../../assets/brand/easytier.svg)。布局、字体与交互约定见 [DESIGN.md](DESIGN.md)，字体沿用各自原始许可。
 
 ## 构建与运行
 
@@ -56,7 +56,7 @@ Vite 监听 `0.0.0.0:5188`，端口冲突时直接报错。开发和预览均将
 
 ## 设计依据
 
-用户已明确取消旧四份拟物简报的视觉要求。当前采用参考UniFi官方站点的平面设计：白色与浅灰、细边界、紧凑布局、小圆角。后端权限及业务语义保留。
+界面采用平面设计：白色与浅灰、细边界、紧凑布局、圆角按钮与弹窗编辑。后端权限及业务语义保留。
 
 按钮全部描边或文字，不使用实心填充；输入focus不增加阴影、边框粗细或字体粗细；只保留一级导航，编辑使用弹窗。无拟物凸起、内阴影、多级菜单或抽屉。遵循键盘焦点、文字对比度、移动布局和reduced-motion。详见 [DESIGN.md](DESIGN.md)。
 
@@ -64,7 +64,6 @@ Vite 监听 `0.0.0.0:5188`，端口冲突时直接报错。开发和预览均将
 
 网络拓扑图已按用户要求移除。概览保留设备、网络和服务器资源；网络详情的节点观测只采集当前选中的在线节点，提供连接、路由与指标列表。节点参数采用共享表单，与原项目选项核对一致，接收速率上限的单位为B/s；表单保存提交最新字段，TOML切换保留配置。IPv6端口转发仅在提交副本中适配后端所需的地址格式。
 
-已应用 [Anthropic 官方 frontend-design](https://github.com/anthropics/skills/blob/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/frontend-design/SKILL.md)，固定快照及 SHA-256 记录位于本次交付外层 `reference/frontend-design-SKILL.md`、`reference/frontend-design-provenance.json`。用户最新样式与字体要求优先于旧简报和通用技能建议。
 
 ## 字体与国际化
 
@@ -74,7 +73,7 @@ Inter处理英文和数字，HarmonyOS Sans SC处理中文；代码编辑器使�
 
 ## 验证与预览边界
 
-`pnpm test` 执行5个资源/计数场景及9个节点参数场景，覆盖精确uint64、未知/零值/过期/历史断点、IPv6继承、未编辑字段与嵌套值保留、IPv6转发序列化及实际字段校验。测试不读取私有数据、不访问网络，使用 Vite 已有的 esbuild 临时加载 TS 模块并清理输出。
+`pnpm test` 执行当前 `package.json` 中列出的回归测试，覆盖精确uint64、未知/零值/过期/历史断点、IPv6继承、未编辑字段与嵌套值保留、IPv6转发序列化及实际字段校验。测试不读取私有数据、不访问网络，使用 Vite 已有的 esbuild 临时加载 TS 模块并清理输出。
 
 本机预览可以使用独立数据库和本地 no-TUN Core 进程验证真实 API、资源和连接流程，但不等同于 Windows 或 Android 实机的 VPN 连通性验证。历史存储只有在后端启用并产生真实采样时才展示数据；未启用状态应如实显示。
 

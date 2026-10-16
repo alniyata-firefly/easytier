@@ -1,236 +1,88 @@
-# Contributing to EasyTier
+# Contributing to this EasyTier fork
 
-[中文版](CONTRIBUTING_zh.md)
+[简体中文](CONTRIBUTING_zh.md) | English
 
-Thank you for your interest in contributing to EasyTier! This document provides guidelines and instructions for contributing to the project.
+This guide applies to [alniyata-firefly/easytier](https://github.com/alniyata-firefly/easytier), a downstream adaptation of [EasyTier/EasyTier](https://github.com/EasyTier/EasyTier) with React Web, desktop, and mobile interfaces. Preserve upstream attribution, copyright notices, and the [GNU LGPL version 3 license](LICENSE). A contribution here is not automatically a contribution to upstream.
 
-## Table of Contents
+## Development environment
 
-- [Development Environment Setup](#development-environment-setup)
-  - [Prerequisites](#prerequisites)
-  - [Installation Steps](#installation-steps)
-- [Project Structure](#project-structure)
-- [Build Guide](#build-guide)
-  - [Building Core](#building-core)
-  - [Building GUI](#building-gui)
-  - [Building Mobile](#building-mobile)
-- [Development Workflow](#development-workflow)
-- [Testing Guidelines](#testing-guidelines)
-- [Pull Request Guidelines](#pull-request-guidelines)
-- [Additional Resources](#additional-resources)
+Use the versions used by the active workflows:
 
-## Development Environment Setup
+| Tool | Version |
+| --- | --- |
+| Node.js | 22 |
+| pnpm | 10.12.4 |
+| Rust | 1.95 |
+| Protocol Buffers compiler (`protoc`) | 35.1 |
+| Python | 3.12 in CI |
 
-### Prerequisites
-
-#### Required Tools
-- Node.js v21 or higher
-- pnpm v9 or higher
-- Rust toolchain (version 1.95)
-- LLVM and Clang
-- Protoc (Protocol Buffers compiler)
-
-#### Platform-Specific Dependencies
-
-**Linux (Ubuntu/Debian)**
-```bash
-# Core build dependencies
-sudo apt-get update && sudo apt-get install -y \
-    musl-tools \
-    llvm \
-    clang \
-    protobuf-compiler
-
-# GUI build dependencies
-sudo apt install -y \
-    libwebkit2gtk-4.1-dev \
-    build-essential \
-    curl \
-    wget \
-    file \
-    libgtk-3-dev \
-    librsvg2-dev \
-    libxdo-dev \
-    libssl-dev \
-    libappindicator3-dev \
-    patchelf
-
-# Testing dependencies
-sudo apt install -y bridge-utils
-```
-
-**For Cross-Compilation**
-- musl-cross toolchain (for MIPS and other architectures)
-- Additional setup may be required (see `.github/workflows/` for details)
-
-**For Android Development**
-- Java 20
-- Android SDK (Build Tools 34.0.0)
-- Android NDK (26.0.10792818)
-
-### Installation Steps
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/EasyTier/EasyTier.git
-   cd EasyTier
-   ```
-
-2. Install dependencies:
-   ```bash
-   # Install Rust toolchain
-   rustup install 1.95
-   rustup default 1.95
-
-   # Install project dependencies
-   pnpm -r install
-   ```
-
-## Project Structure
-
-```
-easytier/          # Core functionality and libraries
-easytier-web/      # Web dashboard and frontend
-easytier-gui/      # Desktop GUI application
-.github/workflows/ # CI/CD configuration files
-```
-
-## Build Guide
-
-### Building Core
+Native builds also need the compiler and platform libraries required by Tauri and Rust. Android packaging uses Java 21, Android SDK 36, Build Tools 35.0.0, and NDK 26.0.10792818; the current release workflow builds ARM64. See the [build guide](docs/github-actions.md) and active [workflows](.github/workflows) for setup and signing requirements.
 
 ```bash
-# Standard build
-cargo build --release
+git clone https://github.com/alniyata-firefly/easytier.git
+cd easytier
+git switch -c fix/describe-the-change main
 
-# Platform-specific builds
-cargo build --release --target x86_64-unknown-linux-musl     # Linux x86_64
-cargo build --release --target aarch64-unknown-linux-musl    # Linux ARM64
-cargo build --release --target x86_64-apple-darwin           # macOS x86_64
-cargo build --release --target aarch64-apple-darwin          # macOS M1/M2
-cargo build --release --target x86_64-pc-windows-msvc        # Windows x86_64
+# Use the same pnpm version throughout the workspace as CI.
+export npm_config_manage_package_manager_versions=false
+export npm_config_package_manager_strict=false
+pnpm install --frozen-lockfile
+pnpm --dir easytier-web/frontend-lib codegen:proto
 ```
 
-Build artifacts: `target/[target-triple]/release/`
+Install the listed tools before running these commands. The root and GUI manifests pin pnpm 10.12.4. The environment variables above match CI and prevent external settings from switching package-manager versions.
 
-### Building the WASI core
+## Source layout
+
+| Path | Purpose |
+| --- | --- |
+| `easytier/` | Rust networking core |
+| `easytier-web/src/` | Web API and management backend |
+| `easytier-web/frontend/` | React management console |
+| `easytier-gui/src/react/` | React desktop and mobile interface |
+| `easytier-gui/src/native/` | Client session, storage, and native bridge |
+| `tauri-plugin-vpnservice/` | Android VPN service and bridge |
+| `easytier-web/frontend-lib/src/` | Shared TypeScript and generated protocol types |
+| `ci/`, `.github/workflows/` | Current package verification and automation |
+
+Default Web and GUI builds use React. Retained upstream Vue tools are optional source, not part of the default interface. Do not use a recursive workspace build to prepare a React-only change. Archived files in `.github/upstream-workflows/` are not active CI.
+
+## Focused validation
+
+Run checks relevant to the change from the repository root:
 
 ```bash
-script/build-wasi-core.sh
+pnpm --dir easytier-web/frontend typecheck
+pnpm --dir easytier-web/frontend test
+pnpm --dir easytier-gui typecheck
+pnpm --dir easytier-gui test:react
+pnpm --dir easytier-gui test:native
+python3 ci/test_artifacts.py
+python3 ci/test_public_source.py
+python3 ci/public_source.py
 ```
 
-This builds the `easytier-core` Go-host profile for `wasm32-wasip1`, then
-optimizes it with the pinned official Binaryen release. Binaryen is downloaded
-once into `target/binaryen/` and verified by SHA-256; set `WASM_OPT` to use an
-existing matching binary.
-
-### Building GUI
+For the isolated local-configuration browser regression:
 
 ```bash
-# 1. Build frontend
-pnpm -r build
-
-# 2. Build GUI application
-cd easytier-gui
-
-# Linux
-pnpm tauri build --target x86_64-unknown-linux-gnu
-
-# macOS
-pnpm tauri build --target x86_64-apple-darwin      # Intel
-pnpm tauri build --target aarch64-apple-darwin     # Apple Silicon
-
-# Windows
-pnpm tauri build --target x86_64-pc-windows-msvc   # x64
+pnpm --dir easytier-gui exec playwright install --with-deps chromium
+pnpm --dir easytier-gui exec node --test --test-concurrency=1 tests/local-config-offline-browser.test.mjs
 ```
 
-Build artifacts: `easytier-gui/src-tauri/target/release/bundle/`
+This runs React with a mocked Tauri bridge on loopback and does not start a VPN. It cannot establish that native installers, Android lifecycle, or real tunnels work. Follow fixture or preview-server requirements and the source-check workflow for other browser tests.
 
-### Building Mobile
+For Rust changes, run formatting and relevant package tests rather than treating a complete release build as a unit test. Tests that alter routes, interfaces, firewall rules, or TUN devices belong in a disposable VM or isolated network namespace. Do not apply host-wide network changes for UI tests or use production credentials and networks as fixtures.
 
-```bash
-# 1. Install Android targets
-rustup target add aarch64-linux-android
-rustup target add armv7-linux-androideabi
-rustup target add i686-linux-android
-rustup target add x86_64-linux-android
+Release packaging, artifact verification, and optional signing are documented in [GitHub Actions builds](docs/github-actions.md). Signing files and passwords must remain outside Git; CI receives them through the documented Secrets. Ordinary pull requests must not require private signing credentials.
 
-# 2. Build Android application
-cd easytier-gui
-pnpm tauri android build
-```
+## Pull requests
 
-Build artifacts: `easytier-gui/src-tauri/gen/android/app/build/outputs/apk/universal/release/`
+Open issues in [this fork](https://github.com/alniyata-firefly/easytier/issues). Base changes on `main` and target `main`.
 
-### Build Notes
+- Describe the concrete problem and resulting behavior; keep the change focused.
+- Include relevant check results and distinguish mocked browser checks from native or live-network tests.
+- For session, configuration, or protocol changes, describe compatibility, migration, and stop/start or reconnect behavior on affected platforms.
+- Update documentation when commands or behavior change. Preserve existing options unless removing them is part of the agreed change.
+- Remove credentials, token-bearing URLs, private keys, device identifiers, and private deployment details from logs, screenshots, fixtures, and commit history. The public-source check does not replace review.
 
-1. Cross-compilation for ARM/MIPS requires additional setup
-2. Windows builds need correct DLL files
-3. Check `.github/workflows/` for detailed build configurations
-
-## Development Workflow
-
-1. Create a feature branch from `develop`:
-   ```bash
-   git checkout develop
-   git checkout -b feature/your-feature-name
-   ```
-
-2. Make your changes following our coding standards
-
-3. Write or update tests as needed
-
-4. Use conventional commit messages:
-   ```
-   feat: add new feature
-   fix: resolve bug
-   docs: update documentation
-   test: add tests
-   chore: update dependencies
-   ```
-
-5. Submit a pull request to `develop`
-
-## Testing Guidelines
-
-### Running Tests
-
-```bash
-# Configure system (Linux)
-sudo modprobe br_netfilter
-sudo sysctl net.bridge.bridge-nf-call-iptables=0
-sudo sysctl net.bridge.bridge-nf-call-ip6tables=0
-
-# Run tests
-cargo test --no-default-features --features=full --verbose
-```
-
-### Test Requirements
-
-- Write tests for new features
-- Maintain existing test coverage
-- Tests should be isolated and repeatable
-- Include both unit and integration tests
-
-## Pull Request Guidelines
-
-1. Target the `develop` branch
-2. Ensure all tests pass
-3. Include clear description and purpose
-4. Reference related issues
-5. Keep changes focused and atomic
-6. Update documentation as needed
-
-## Additional Resources
-
-- [Issue Tracker](https://github.com/EasyTier/EasyTier/issues)
-- [Project Documentation](https://github.com/EasyTier/EasyTier/wiki)
-
-## Questions or Need Help?
-
-Feel free to:
-- Open an issue for questions
-- Join our community discussions
-- Reach out to maintainers
-
-Thank you for contributing to EasyTier! 
+For suspected vulnerabilities, follow the [security policy](.github/SECURITY.md) instead of publishing exploit details in an issue.

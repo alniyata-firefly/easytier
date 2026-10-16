@@ -1,234 +1,101 @@
 <#
 .SYNOPSIS
-    EasyTier Windows Installer
-
+Download and verify this fork's published Windows x64 GUI installer.
 .DESCRIPTION
-    Download EasyTier from GitHub Release and install it.
-    Copies binaries to the install directory and updates the system PATH.
-
-.PARAMETER Version
-    Target version: "latest", "stable", or a specific tag like "v2.6.2".
-    Default: "latest"
-
-.PARAMETER InstallDir
-    Directory to install EasyTier binaries.
-    Default: "$env:ProgramFiles\EasyTier"
-
+Default is download-only. -RunInstaller explicitly starts the verified installer.
+Project origin: https://github.com/EasyTier/EasyTier. GNU LGPL v3; see ../LICENSE.
 .EXAMPLE
-    .\install.ps1
-    .\install.ps1 -Version v2.6.2
-    .\install.ps1 -InstallDir "C:\EasyTier"
-
-.NOTES
-    Administrator privileges are required.
-    After installation, run: easytier-cli service install
-    to register EasyTier as a system service.
+.\install.ps1 -Version v2.7.2 -Directory C:\Downloads\EasyTier -Format nsis
 #>
+[CmdletBinding()]
 param(
-    [Parameter(Position = 0)]
-    [ValidatePattern('^(stable|latest|v?\d+\.\d+\.\d+(-[^\s]+)?)$')]
     [string]$Version = 'latest',
-
-    [Parameter(Position = 1)]
-    [string]$InstallDir = "$env:ProgramFiles\EasyTier"
+    [string]$Directory = (Join-Path (Get-Location) 'easytier-downloads'),
+    [ValidateSet('nsis', 'msi')][string]$Format = 'nsis',
+    [switch]$RunInstaller
 )
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
+$script:Repository = 'alniyata-firefly/easytier'
 
-# Force TLS 1.2+ for GitHub API and download requests
-[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-$GITHUB_REPO        = 'EasyTier/EasyTier'
-$GITHUB_API         = "https://api.github.com/repos/$GITHUB_REPO"
-$GITHUB_RELEASE_URL = "https://github.com/$GITHUB_REPO/releases"
-
-# ---------------------------------------------------------------------------
-# Administrator check
-# ---------------------------------------------------------------------------
-$currentPrincipal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Error 'Please run this script as Administrator.'
-    exit 1
+function Get-ReleaseApiUrl([string]$RequestedVersion) {
+    $base = "https://api.github.com/repos/$script:Repository/releases"
+    if ($RequestedVersion -eq 'latest') { return "$base/latest" }
+    if ($RequestedVersion -notmatch '^v?\d+\.\d+\.\d+$') { throw 'Version must be latest or a release version such as v2.7.2' }
+    $tag = if ($RequestedVersion.StartsWith('v')) { $RequestedVersion } else { 'v' + $RequestedVersion }
+    return "$base/tags/$([Uri]::EscapeDataString($tag))"
 }
 
-# ---------------------------------------------------------------------------
-# Architecture detection
-# ---------------------------------------------------------------------------
-# Check PROCESSOR_ARCHITEW6432 first to correctly identify 64-bit OS when
-# running under 32-bit PowerShell (WoW64), where PROCESSOR_ARCHITECTURE
-# reports 'x86' even on a 64-bit machine.
-$cpuArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
-switch ($cpuArch) {
-    'AMD64' { $arch = 'x86_64' }
-    'ARM64' { $arch = 'arm64'  }
-    'x86'   { $arch = 'i686'   }
-    default {
-        Write-Error "Unsupported processor architecture: $cpuArch"
-        exit 1
+function Assert-ReleaseAssetUrl($Asset, [string]$Tag) {
+    $url = [Uri]$Asset.browser_download_url
+    $expected = "/$script:Repository/releases/download/$Tag/$($Asset.name)"
+    if ($url.Scheme -cne 'https' -or $url.Host -cne 'github.com' -or $url.UserInfo -or $url.Port -ne 443 `
+        -or [Uri]::UnescapeDataString($url.AbsolutePath) -cne $expected -or $url.Query -or $url.Fragment) {
+        throw 'Release asset does not belong to this fork'
     }
 }
-$assetBaseName = "easytier-windows-$arch"
 
-Write-Host ''
-Write-Host '  ===============================================' -ForegroundColor Cyan
-Write-Host '        EasyTier Windows Installer              ' -ForegroundColor Cyan
-Write-Host '  ===============================================' -ForegroundColor Cyan
-Write-Host ''
-Write-Host "  Architecture : $arch" -ForegroundColor White
-Write-Host ''
+function Select-ReleaseAssets($Release, [string]$InstallerFormat) {
+    if ($Release.draft -ne $false -or $Release.prerelease -ne $false) { throw 'A published stable release is required' }
+    $tag = [string]$Release.tag_name
+    if ($tag -cnotmatch '^v\d+\.\d+\.\d+$') { throw 'Unexpected release version tag' }
+    $number = [Regex]::Escape($tag.Substring(1))
+    $pattern = if ($InstallerFormat -eq 'msi') { '^easytier-gui_' + $number + '_x64_[A-Za-z0-9-]+\.msi$' } `
+               else { '^easytier-gui_' + $number + '_x64-setup\.exe$' }
+    $packages = @($Release.assets | Where-Object { $_.name -cmatch $pattern })
+    $checksums = @($Release.assets | Where-Object { $_.name -ceq 'SHA256SUMS' })
+    if ($packages.Count -ne 1 -or $checksums.Count -ne 1) { throw 'Release must contain exactly one requested x64 GUI installer and SHA256SUMS' }
+    Assert-ReleaseAssetUrl $packages[0] $tag
+    Assert-ReleaseAssetUrl $checksums[0] $tag
+    return @{ Package = $packages[0]; Checksums = $checksums[0] }
+}
 
-# ---------------------------------------------------------------------------
-# Step 1 - Resolve release version
-# ---------------------------------------------------------------------------
-Write-Host '[1/5] Querying GitHub Release info...' -ForegroundColor Yellow
-
-try {
-    if ($Version -eq 'latest' -or $Version -eq 'stable') {
-        $releaseInfo = Invoke-RestMethod `
-            -Uri "$GITHUB_API/releases/latest" `
-            -Headers @{ 'User-Agent' = 'EasyTier-Installer/1.0' } `
-            -ErrorAction Stop
+function Get-ExpectedChecksum([string]$Text, [string]$Name) {
+    $hashes = @()
+    foreach ($line in ($Text -split '\r?\n')) {
+        if ($line -cmatch '^([0-9A-Fa-f]{64}) [ *](.+)$' -and $Matches[2] -ceq $Name) {
+            $hashes += $Matches[1].ToLowerInvariant()
+        }
     }
-    else {
-        $tag = if ($Version -notmatch '^v') { "v$Version" } else { $Version }
-        $releaseInfo = Invoke-RestMethod `
-            -Uri "$GITHUB_API/releases/tags/$tag" `
-            -Headers @{ 'User-Agent' = 'EasyTier-Installer/1.0' } `
-            -ErrorAction Stop
-    }
-}
-catch {
-    Write-Error "Failed to fetch release info from GitHub: $_`nPlease check your network or visit $GITHUB_RELEASE_URL to download manually."
-    exit 1
+    if ($hashes.Count -ne 1) { throw 'SHA256SUMS must contain exactly one entry for the selected installer' }
+    return $hashes[0]
 }
 
-$releaseVersion = $releaseInfo.tag_name
-$assetZipName   = "$assetBaseName-$releaseVersion.zip"
-
-Write-Host "  Version : $releaseVersion" -ForegroundColor Green
-
-# ---------------------------------------------------------------------------
-# Step 2 - Find download URL
-# ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '[2/5] Resolving download URL...' -ForegroundColor Yellow
-$asset = $releaseInfo.assets |
-    Where-Object { $_.name -eq $assetZipName } |
-    Select-Object -First 1
-
-if (-not $asset) {
-    $availableAssets = ($releaseInfo.assets | Select-Object -ExpandProperty name) -join ', '
-    Write-Error "Asset '$assetZipName' not found in release $releaseVersion.`nAvailable: $availableAssets`nVisit $GITHUB_RELEASE_URL to download manually."
-    exit 1
+function Invoke-EasyTierDownload {
+    $architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    if ($architecture -ne 'AMD64') { throw 'Only the Windows x64 GUI installer is currently published by this fork' }
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $api = Get-ReleaseApiUrl $Version
+    $headers = @{ 'User-Agent' = 'EasyTier-Fork-Installer'; Accept = 'application/vnd.github+json' }
+    try { $release = Invoke-RestMethod -Uri $api -Headers $headers }
+    catch { throw "No published release could be read from this fork/version. See https://github.com/$script:Repository/releases. There is no upstream fallback." }
+    $choice = Select-ReleaseAssets $release $Format
+    $destinationDirectory = [IO.Path]::GetFullPath($Directory)
+    [IO.Directory]::CreateDirectory($destinationDirectory) | Out-Null
+    $destination = Join-Path $destinationDirectory $choice.Package.name
+    if (Test-Path -LiteralPath $destination) { throw 'The destination installer already exists; choose another directory. Existing files are never replaced.' }
+    $temporary = Join-Path $destinationDirectory ('.easytier-download-' + [Guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($temporary) | Out-Null
+    try {
+        $sums = Join-Path $temporary 'SHA256SUMS'
+        Invoke-WebRequest -UseBasicParsing -Uri $choice.Checksums.browser_download_url -Headers $headers -OutFile $sums
+        $expected = Get-ExpectedChecksum ([IO.File]::ReadAllText($sums)) $choice.Package.name
+        $download = Join-Path $temporary $choice.Package.name
+        Invoke-WebRequest -UseBasicParsing -Uri $choice.Package.browser_download_url -Headers $headers -OutFile $download
+        if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expected) { throw 'SHA256 verification failed; the installer was not started' }
+        [IO.File]::Move($download, $destination)
+    } finally { Remove-Item -LiteralPath $temporary -Recurse -Force }
+    Write-Host "Verified installer: $destination"
+    if ($RunInstaller) {
+        $process = if ($Format -eq 'msi') {
+            Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', ('"' + $destination + '"')) -Wait -PassThru
+        } else { Start-Process -FilePath $destination -Wait -PassThru }
+        if ($process.ExitCode -notin @(0, 3010)) { throw "Installer exited with code $($process.ExitCode)" }
+    } elseif ($Format -eq 'msi') { Write-Host ('To install: msiexec.exe /i "' + $destination + '"') }
+    else { Write-Host ("To install in PowerShell: & '" + $destination.Replace("'", "''") + "'") }
 }
 
-$downloadUrl = $asset.browser_download_url
-Write-Host "  URL     : $downloadUrl" -ForegroundColor DarkGray
-
-# ---------------------------------------------------------------------------
-# Step 3 - Download ZIP
-# ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host "[3/5] Downloading $assetZipName ..." -ForegroundColor Yellow
-
-$tempDir = Join-Path $env:TEMP "easytier-install-$(Get-Random)"
-$zipPath = Join-Path $tempDir $assetZipName
-
-New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
-
-try {
-    Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -ErrorAction Stop
-    $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
-    Write-Host "  Download complete ($sizeMB MB)" -ForegroundColor Green
+if ($MyInvocation.InvocationName -ne '.') {
+    try { Invoke-EasyTierDownload }
+    catch { Write-Error $_.Exception.Message; exit 1 }
 }
-catch {
-    Write-Error "Download failed: $_"
-    Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
-    exit 1
-}
-
-# ---------------------------------------------------------------------------
-# Step 4 - Extract & copy to install directory
-# ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '[4/5] Extracting and copying files...' -ForegroundColor Yellow
-
-$extractDir = Join-Path $tempDir 'extracted'
-New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-
-try {
-    Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force -ErrorAction Stop
-}
-catch {
-    Write-Error "Extraction failed: $_"
-    Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
-    exit 1
-}
-
-# ZIP may contain a sub-directory; find exe files recursively and flatten
-$exeFiles = Get-ChildItem -Path $extractDir -Filter '*.exe' -Recurse
-if (-not $exeFiles) {
-    Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
-    Write-Error 'No .exe files found after extraction. The ZIP may be malformed.'
-    exit 1
-}
-
-$binSourceDir = $exeFiles[0].DirectoryName
-
-try {
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    Get-ChildItem -Path $binSourceDir | Copy-Item -Destination $InstallDir -Force
-}
-catch {
-    Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
-    Write-Error "Failed to copy files to install directory: $_"
-    exit 1
-}
-
-Write-Host "  Installed to: $InstallDir" -ForegroundColor Green
-
-# ---------------------------------------------------------------------------
-# Step 5 - Update system PATH
-# ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host '[5/5] Updating system PATH...' -ForegroundColor Yellow
-
-$systemPath = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
-# Split on ';' and normalize (trim trailing backslash, case-insensitive) for an exact match
-$pathEntries = $systemPath -split ';' | ForEach-Object { $_.TrimEnd('\') }
-$normalizedInstallDir = $InstallDir.TrimEnd('\')
-if ($pathEntries -inotcontains $normalizedInstallDir) {
-    [Environment]::SetEnvironmentVariable('PATH', "$systemPath;$InstallDir", 'Machine')
-    $env:PATH = "$env:PATH;$InstallDir"
-    Write-Host "  Added $InstallDir to system PATH" -ForegroundColor Green
-}
-else {
-    Write-Host "  $InstallDir is already in PATH, skipping" -ForegroundColor DarkGray
-}
-
-# ---------------------------------------------------------------------------
-# Cleanup
-# ---------------------------------------------------------------------------
-try {
-    Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
-}
-catch {
-    Write-Warning "Could not remove temp dir $tempDir : $_"
-}
-
-# ---------------------------------------------------------------------------
-# Done
-# ---------------------------------------------------------------------------
-Write-Host ''
-Write-Host "  [OK] EasyTier $releaseVersion installation complete!" -ForegroundColor Green
-Write-Host ''
-Write-Host "  Install dir : $InstallDir" -ForegroundColor White
-Write-Host '  User guide  : https://easytier.cn/en/guide/network/decentralized-networking.html' -ForegroundColor DarkGray
-Write-Host ''
-Write-Host '  NOTE: If PATH was just updated, please restart your terminal.' -ForegroundColor DarkYellow
-Write-Host ''

@@ -1,7 +1,10 @@
 [package]
+license-file = "../LICENSE"
+homepage = "https://github.com/alniyata-firefly/easytier"
+repository = "https://github.com/alniyata-firefly/easytier"
 name = "tauri-plugin-vpnservice"
 version = "0.0.0"
-authors = ["You"]
+authors = ["alniyata-firefly"]
 description = ""
 edition.workspace = true
 rust-version.workspace = true

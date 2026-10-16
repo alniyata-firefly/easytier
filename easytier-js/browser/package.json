@@ -6,11 +6,11 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/EasyTier/EasyTier.git",
+    "url": "git+https://github.com/alniyata-firefly/easytier.git",
     "directory": "easytier-js/browser"
   },
-  "homepage": "https://github.com/EasyTier/EasyTier",
-  "bugs": "https://github.com/EasyTier/EasyTier/issues",
+  "homepage": "https://github.com/alniyata-firefly/easytier",
+  "bugs": "https://github.com/alniyata-firefly/easytier/issues",
   "sideEffects": false,
   "exports": {
     ".": {

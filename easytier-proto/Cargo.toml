@@ -1,8 +1,8 @@
 [package]
 name = "easytier-proto"
 description = "EasyTier protobuf and generated RPC types."
-homepage = "https://github.com/EasyTier/EasyTier"
-repository = "https://github.com/EasyTier/EasyTier"
+homepage = "https://github.com/alniyata-firefly/easytier"
+repository = "https://github.com/alniyata-firefly/easytier"
 version = "2.7.2"
 edition.workspace = true
 rust-version.workspace = true

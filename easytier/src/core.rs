@@ -1578,7 +1578,7 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
         .inspect(|_| {
             log::info!("Web client started successfully...");
 
-            log::info!("Official config website: https://easytier.cn/web");
+            log::info!("Project documentation: https://github.com/alniyata-firefly/easytier#readme");
         })?;
 
         Some(wc)

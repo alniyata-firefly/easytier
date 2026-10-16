@@ -1,4 +1,7 @@
 [package]
+license-file = "../LICENSE"
+homepage = "https://github.com/alniyata-firefly/easytier"
+repository = "https://github.com/alniyata-firefly/easytier"
 name = "easytier-web"
 version = "2.7.2"
 edition.workspace = true

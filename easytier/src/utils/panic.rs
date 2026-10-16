@@ -68,7 +68,7 @@ pub fn setup_panic_handler() {
         };
 
         let msg = formatdoc! {"
-            panic occurred, if this is a bug, please report this issue on github (https://github.com/easytier/easytier/issues)
+            panic occurred, if this is a bug, please report this issue on github (https://github.com/alniyata-firefly/easytier/issues)
                 easytier version: {version}
                 os: {os}
                 arch: {arch}

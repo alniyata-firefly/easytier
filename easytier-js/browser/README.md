@@ -59,7 +59,7 @@ The browser must support WebAssembly JSPI.
 The repository contains a standalone Browser-to-Cloudflare example that only
 uses the public package entries:
 
-[`easytier-js/examples/web`](https://github.com/EasyTier/EasyTier/tree/main/easytier-js/examples/web)
+[`easytier-js/examples/web`](https://github.com/alniyata-firefly/easytier/tree/main/easytier-js/examples/web)
 
 It includes the Worker configuration, local secret setup, Browser UI, health
 check, deployment commands, and the expected `peer_added` result.

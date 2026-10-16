@@ -1,8 +1,11 @@
 [package]
+license-file = "../../LICENSE"
+homepage = "https://github.com/alniyata-firefly/easytier"
+repository = "https://github.com/alniyata-firefly/easytier"
 name = "easytier-gui"
 version = "2.7.2"
 description = "EasyTier GUI"
-authors = ["you"]
+authors = ["alniyata-firefly"]
 edition.workspace = true
 rust-version.workspace = true
 
