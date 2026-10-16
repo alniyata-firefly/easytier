@@ -354,7 +354,7 @@ async fn ensure_native_tun_stop_listener(app: &AppHandle) -> Result<(), String> 
                     // Cleanup works even when the WebView receives no JS events.
                     tauri::async_runtime::spawn(async move {
                         if let Err(error) = cleanup_android_tun(lease).await {
-                            log::warn!("Native VPN TUN cleanup failed: {}", error);
+                            eprintln!("Native VPN TUN cleanup failed: {error}");
                         }
                     });
                 })
