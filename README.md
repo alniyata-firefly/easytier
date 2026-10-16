@@ -28,8 +28,6 @@
 - 补齐自定义 STUN、中转限速与策略、虚拟 IPv6、完整 SOCKS5 监听地址、端口白名单、实例名及 Linux 命名空间等管理配置接口，参见[配置与下发语义](docs/central-network-connectivity.md)。
 - Android/iOS 隐藏不支持的上联网卡选择与绑定控件，导入和保存本地配置时清理这些选项；桌面端保留对应能力。
 
-平面界面的视觉参考来自 [UniFi Network 10.5 官方介绍](https://blog.ui.com/article/introducing-network-10-5)及 [UniFi Design Center](https://design.ui.com/)。本项目不是 Ubiquiti 官方项目，也未获其官方背书，不主张获得其商标或图标的使用授权。新三节点标识在本仓库中自行绘制，并非从这些网站提取的图标。具体设计约定见 [DESIGN.md](easytier-web/frontend/DESIGN.md)。
-
 本下游适配版基于并修改 EasyTier 代码，继续遵循 **LGPL-3.0（GNU LGPL 第 3 版）**许可证。保留原始[许可证](LICENSE)、版权声明和贡献者说明；下游修改已在上文列明，对应源码在本仓库公开。内置 HarmonyOS Sans SC 和 Inter 分别遵循各自的[鸿蒙字体许可协议](easytier-web/frontend/public/fonts/LICENSE-HarmonyOS-Sans.txt)与 [SIL Open Font License 1.1](easytier-web/frontend/public/fonts/LICENSE-Inter-GoogleFonts.txt)；字体来源、未经修改的官方网页切片及许可记录见[字体来源清单](easytier-web/frontend/public/fonts/provenance.json)和[字体许可页面](easytier-web/frontend/public/fonts/font-notices.html)。
 
 下文的详细功能说明、文档链接、安装脚本示例和贡献者信息保留自上游；其中安装脚本安装的是原始 EasyTier 发行版。本下游版本的安装包及对应源码请使用[本仓库 Releases](https://github.com/alniyata-firefly/easytier/releases)，构建与打包方式见 [GitHub Actions 构建说明](docs/github-actions.md)。
