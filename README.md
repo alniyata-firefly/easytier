@@ -30,9 +30,9 @@ The downstream work adds and adapts:
 
 The flat interface takes visual inspiration from the official [UniFi Network 10.5 presentation](https://blog.ui.com/article/introducing-network-10-5) and [UniFi Design Center](https://design.ui.com/). This is not a Ubiquiti project, is not endorsed by Ubiquiti, and does not claim a license to its branding or icons. The new three-node mark is drawn in this repository rather than extracted from those sites. Design details are documented in [DESIGN.md](easytier-web/frontend/DESIGN.md).
 
-The project retains the upstream **GNU LGPL version 3** [LICENSE](LICENSE) and existing contributor notices. Bundled HarmonyOS Sans SC and Inter keep their own licenses: the [HarmonyOS Sans Fonts License Agreement](easytier-web/frontend/public/fonts/LICENSE-HarmonyOS-Sans.txt) and [SIL Open Font License 1.1](easytier-web/frontend/public/fonts/LICENSE-Inter-GoogleFonts.txt). Font origins and original, unmodified web subsets are recorded in [font provenance](easytier-web/frontend/public/fonts/provenance.json) and the [font notices](easytier-web/frontend/public/fonts/font-notices.html).
+This downstream adaptation uses and modifies EasyTier code and continues under **LGPL-3.0 (GNU Lesser General Public License, version 3)**. The original [LICENSE](LICENSE), copyright notices and contributor acknowledgments are retained. The downstream changes are described above, with their source available in this repository. Bundled HarmonyOS Sans SC and Inter keep their own licenses: the [HarmonyOS Sans Fonts License Agreement](easytier-web/frontend/public/fonts/LICENSE-HarmonyOS-Sans.txt) and [SIL Open Font License 1.1](easytier-web/frontend/public/fonts/LICENSE-Inter-GoogleFonts.txt). Font origins and original, unmodified web subsets are recorded in [font provenance](easytier-web/frontend/public/fonts/provenance.json) and the [font notices](easytier-web/frontend/public/fonts/font-notices.html).
 
-The detailed feature descriptions, documentation links, installation script examples, sponsorship information, and contributor acknowledgments below are retained from upstream. The installation scripts refer to the original EasyTier distribution. Use [this repository’s Releases](https://github.com/alniyata-firefly/easytier/releases) for downstream binaries and the matching source revision; see [GitHub Actions builds](docs/github-actions.md) for the build and packaging workflow.
+The detailed feature descriptions, documentation links, installation script examples, and contributor acknowledgments below are retained from upstream. The installation scripts refer to the original EasyTier distribution. Use [this repository’s Releases](https://github.com/alniyata-firefly/easytier/releases) for downstream binaries and the matching source revision; see [GitHub Actions builds](docs/github-actions.md) for the build and packaging workflow.
 
 > ✨ A simple, secure, decentralized virtual private network solution powered by Rust and Tokio
 
@@ -48,7 +48,7 @@ These screenshots render this adaptation’s actual React interfaces with anonym
 
 [Downloads](https://github.com/alniyata-firefly/easytier/releases) · [Build and packaging documentation](docs/github-actions.md)
 
-📚 **[Full Documentation](https://easytier.cn/en/)** | 🖥️ **[Web Console](https://easytier.cn/web)** | 📝 **[Download Releases](https://github.com/alniyata-firefly/easytier/releases)** | 🧩 **[Third Party Tools](https://easytier.cn/en/guide/installation_gui.html#third-party-graphical-interfaces)** | ❤️ **[Sponsor](#sponsor)**
+📚 **[Full Documentation](https://easytier.cn/en/)** | 🖥️ **[Web Console](https://easytier.cn/web)** | 📝 **[Download Releases](https://github.com/alniyata-firefly/easytier/releases)** | 🧩 **[Third Party Tools](https://easytier.cn/en/guide/installation_gui.html#third-party-graphical-interfaces)**
 
 ## Features
 
@@ -328,43 +328,10 @@ sudo easytier-core --network-name mysharednode --network-secret mysharednode
 
 ## License
 
-EasyTier is released under the [LGPL-3.0](https://github.com/EasyTier/EasyTier/blob/main/LICENSE).
+The upstream EasyTier project and this downstream adaptation use the [GNU LGPL version 3 (LGPL-3.0)](LICENSE). The upstream source is [EasyTier/EasyTier](https://github.com/EasyTier/EasyTier); this repository preserves its history and notices alongside the downstream changes.
 
 ## Responsible Use
 
 Use EasyTier only for lawful purposes and in compliance with applicable laws
 and regulations. You are responsible for ensuring that you are authorized to
 connect to and administer the networks and devices involved.
-
-## Sponsor
-
-CDN acceleration and security protection for this project are sponsored by Tencent EdgeOne.
-
-<p align="center">
-  <a href="https://edgeone.ai/?from=github" target="_blank">
-    <img src="assets/edgeone.png" width="200" alt="EdgeOne Logo">
-  </a>
-</p>
-
-Special thanks to [Langlang Cloud](https://langlangy.cn/?i26c5a5)  and [RainCloud](https://www.rainyun.com/NjM0NzQ1_) for sponsoring our public servers.
-We also thank [Linfeng Cloud (林枫云)](https://www.dkdun.cn/aff/RZGBFYSW) for supporting EasyTier.
-
-<p align="center">
-<a href="https://langlangy.cn/?i26c5a5" target="_blank">
-<img src="assets/langlang.png" width="200">
-</a>
-<a href="https://langlangy.cn/?i26c5a5" target="_blank">
-<img src="assets/raincloud.png" width="200">
-</a>
-<a href="https://www.dkdun.cn/aff/RZGBFYSW" target="_blank">
-<img src="assets/linfengyun.png" width="200" alt="林枫云">
-</a>
-</p>
-
-
-If you find EasyTier helpful, please consider sponsoring us. Software development and maintenance require a lot of time and effort, and your sponsorship will help us better maintain and improve EasyTier.
-
-<p align="center">
-<img src="assets/wechat.png" width="200">
-<img src="assets/alipay.png" width="200">
-</p>

@@ -30,9 +30,9 @@
 
 平面界面的视觉参考来自 [UniFi Network 10.5 官方介绍](https://blog.ui.com/article/introducing-network-10-5)及 [UniFi Design Center](https://design.ui.com/)。本项目不是 Ubiquiti 官方项目，也未获其官方背书，不主张获得其商标或图标的使用授权。新三节点标识在本仓库中自行绘制，并非从这些网站提取的图标。具体设计约定见 [DESIGN.md](easytier-web/frontend/DESIGN.md)。
 
-项目保留上游的 **GNU LGPL 第 3 版**[许可证](LICENSE)及原有贡献者说明。内置 HarmonyOS Sans SC 和 Inter 分别遵循各自的[鸿蒙字体许可协议](easytier-web/frontend/public/fonts/LICENSE-HarmonyOS-Sans.txt)与 [SIL Open Font License 1.1](easytier-web/frontend/public/fonts/LICENSE-Inter-GoogleFonts.txt)；字体来源、未经修改的官方网页切片及许可记录见[字体来源清单](easytier-web/frontend/public/fonts/provenance.json)和[字体许可页面](easytier-web/frontend/public/fonts/font-notices.html)。
+本下游适配版基于并修改 EasyTier 代码，继续遵循 **LGPL-3.0（GNU LGPL 第 3 版）**许可证。保留原始[许可证](LICENSE)、版权声明和贡献者说明；下游修改已在上文列明，对应源码在本仓库公开。内置 HarmonyOS Sans SC 和 Inter 分别遵循各自的[鸿蒙字体许可协议](easytier-web/frontend/public/fonts/LICENSE-HarmonyOS-Sans.txt)与 [SIL Open Font License 1.1](easytier-web/frontend/public/fonts/LICENSE-Inter-GoogleFonts.txt)；字体来源、未经修改的官方网页切片及许可记录见[字体来源清单](easytier-web/frontend/public/fonts/provenance.json)和[字体许可页面](easytier-web/frontend/public/fonts/font-notices.html)。
 
-下文的详细功能说明、文档链接、安装脚本示例、赞助和贡献者信息保留自上游；其中安装脚本安装的是原始 EasyTier 发行版。本下游版本的安装包及对应源码请使用[本仓库 Releases](https://github.com/alniyata-firefly/easytier/releases)，构建与打包方式见 [GitHub Actions 构建说明](docs/github-actions.md)。
+下文的详细功能说明、文档链接、安装脚本示例和贡献者信息保留自上游；其中安装脚本安装的是原始 EasyTier 发行版。本下游版本的安装包及对应源码请使用[本仓库 Releases](https://github.com/alniyata-firefly/easytier/releases)，构建与打包方式见 [GitHub Actions 构建说明](docs/github-actions.md)。
 
 > ✨ 一个由 Rust 和 Tokio 驱动的简单、安全、去中心化的异地组网方案
 
@@ -48,7 +48,7 @@
 
 [下载安装包](https://github.com/alniyata-firefly/easytier/releases) · [构建与打包说明](docs/github-actions.md)
 
-📚 **[完整文档](https://easytier.cn)** | 🖥️ **[Web 控制台](https://easytier.cn/web)** | 📝 **[下载发布版本](https://github.com/alniyata-firefly/easytier/releases)** | 🧩 **[第三方工具](https://easytier.cn/guide/installation_gui.html#%E7%AC%AC%E4%B8%89%E6%96%B9%E5%9B%BE%E5%BD%A2%E7%95%8C%E9%9D%A2)** | ❤️ **[赞助](#赞助)**
+📚 **[完整文档](https://easytier.cn)** | 🖥️ **[Web 控制台](https://easytier.cn/web)** | 📝 **[下载发布版本](https://github.com/alniyata-firefly/easytier/releases)** | 🧩 **[第三方工具](https://easytier.cn/guide/installation_gui.html#%E7%AC%AC%E4%B8%89%E6%96%B9%E5%9B%BE%E5%BD%A2%E7%95%8C%E9%9D%A2)**
 
 ## 特性
 
@@ -327,40 +327,8 @@ sudo easytier-core --network-name mysharednode --network-secret mysharednode
 
 ## 许可证
 
-EasyTier 在 [LGPL-3.0](https://github.com/EasyTier/EasyTier/blob/main/LICENSE) 许可下发布。
+EasyTier 上游及本下游适配版均遵循 [GNU LGPL 第 3 版（LGPL-3.0）](LICENSE)。上游源码来自 [EasyTier/EasyTier](https://github.com/EasyTier/EasyTier)，本仓库保留其历史和声明，并记录下游修改。
 
 ## 使用规范
 
 请仅将 EasyTier 用于合法用途，并遵守适用的法律法规。使用者有责任确保其已获授权连接和管理相关网络与设备。
-
-## 赞助
-
-本项目的 CDN 加速和安全防护由腾讯云 EdgeOne 赞助。
-
-<p align="center">
-<a href="https://edgeone.ai/?from=github" target="_blank">
-<img src="assets/edgeone.png" width="200">
-</a>
-</p>
-
-特别感谢 [浪浪云](https://langlangy.cn/?i26c5a5) 和 [雨云](https://www.rainyun.com/NjM0NzQ1_) 赞助我们的公共服务器。
-也感谢 [林枫云](https://www.dkdun.cn/aff/RZGBFYSW) 对 EasyTier 的支持。
-
-<p align="center">
-<a href="https://langlangy.cn/?i26c5a5" target="_blank">
-<img src="assets/langlang.png" width="200">
-</a>
-<a href="https://langlangy.cn/?i26c5a5" target="_blank">
-<img src="assets/raincloud.png" width="200">
-</a>
-<a href="https://www.dkdun.cn/aff/RZGBFYSW" target="_blank">
-<img src="assets/linfengyun.png" width="200" alt="林枫云">
-</a>
-</p>
-
-如果您觉得 EasyTier 有帮助，请考虑赞助我们。软件开发和维护需要大量的时间和精力，您的赞助将帮助我们更好地维护和改进 EasyTier。
-
-<p align="center">
-<img src="assets/wechat.png" width="200">
-<img src="assets/alipay.png" width="200">
-</p>
