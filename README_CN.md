@@ -317,14 +317,6 @@ sudo easytier-core --network-name mysharednode --network-secret mysharednode
 - [ZeroTier](https://www.zerotier.com/)：用于连接设备的全球虚拟网络。
 - [TailScale](https://tailscale.com/)：旨在简化网络配置的 VPN 解决方案。
 
-### 联系我们
-
-- 💬 **[Telegram 群组](https://t.me/easytier)**
-- 👥 **QQ 群**
-  - 一群 [949700262](https://qm.qq.com/q/wFoTUChqZW)
-  - 二群 [837676408](https://qm.qq.com/q/4V33DrfgHe)
-  - 三群 [957189589](https://qm.qq.com/q/YNyTQjwlai)
-
 ## 许可证
 
 EasyTier 上游及本下游适配版均遵循 [GNU LGPL 第 3 版（LGPL-3.0）](LICENSE)。上游源码来自 [EasyTier/EasyTier](https://github.com/EasyTier/EasyTier)，本仓库保留其历史和声明，并记录下游修改。
