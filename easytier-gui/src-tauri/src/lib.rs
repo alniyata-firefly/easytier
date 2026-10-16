@@ -1,9 +1,9 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod elevate;
 #[cfg(target_os = "android")]
 mod android_tun_lease;
+mod elevate;
 #[cfg(target_os = "android")]
 mod local_client_lifecycle;
 
@@ -907,6 +907,19 @@ fn gui_machine_id_options(app: &AppHandle) -> anyhow::Result<easytier::common::M
 }
 
 #[tauri::command]
+async fn get_management_device_id(app: AppHandle) -> Result<String, String> {
+    let options =
+        gui_machine_id_options(&app).map_err(|_| "management_device_id_unavailable".to_owned())?;
+    tokio::task::spawn_blocking(move || {
+        easytier::common::resolve_machine_id(&options)
+            .map(|machine_id| machine_id.to_string())
+            .map_err(|_| "management_device_id_unavailable".to_owned())
+    })
+    .await
+    .map_err(|_| "management_device_id_unavailable".to_owned())?
+}
+
+#[tauri::command]
 async fn init_web_client(app: AppHandle, url: Option<String>) -> Result<(), String> {
     let mut web_client_guard = WEB_CLIENT.write().await;
     let Some(url) = url else {
@@ -949,6 +962,16 @@ async fn is_web_client_connected() -> Result<bool, String> {
     } else {
         Ok(false)
     }
+}
+
+#[tauri::command]
+async fn get_web_client_status() -> web_client::WebClientConnectionState {
+    WEB_CLIENT
+        .read()
+        .await
+        .as_ref()
+        .map(|client| client.connection_state())
+        .unwrap_or(web_client::WebClientConnectionState::Disconnected)
 }
 
 // 获取日志目录的辅助函数
@@ -1935,6 +1958,8 @@ pub fn run_gui() -> std::process::ExitCode {
             is_client_running,
             init_web_client,
             is_web_client_connected,
+            get_web_client_status,
+            get_management_device_id,
             get_log_dir_path,
         ])
         .on_window_event(|_win, event| match event {

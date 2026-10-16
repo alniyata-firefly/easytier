@@ -206,6 +206,31 @@ export interface NodeRuntimeInfo { peer_id?: number; hostname?: string; ipv4_add
 
 export interface DeviceAccessToken { status?: string; id: string; label: string; machine_id?: string | null; created_at: string; bound_at?: string | null; last_used_at?: string | null; expires_at?: string | null; revoked_at?: string | null; auth_generation?: number; }
 
+export interface DeviceRebindRequest {
+    id: string;
+    token_id: string;
+    token_label: string;
+    old_machine_id: string;
+    new_machine_id: string;
+    old_device_alias?: string | null;
+    old_hostname?: string | null;
+    hostname: string;
+    easytier_version: string;
+    device_os: string;
+    created_at: string;
+    last_seen_at: string;
+    attempt_count: number;
+    status: string;
+}
+
+export interface DeviceRebindApproval {
+    request_id: string;
+    old_machine_id: string;
+    new_machine_id: string;
+    token_id: string;
+    auth_generation: number;
+}
+
 export interface CredentialGrant { acl_groups?: string[]; allow_relay?: boolean; allowed_proxy_cidrs?: string[]; device_id?: string | null; }
 
 export interface NetworkCredential extends CredentialGrant {
@@ -419,6 +444,19 @@ export class ApiClient {
     public async list_blocked_devices(): Promise<BlockedDevice[]> {
         const response = await this.client.get<any, { blocked: BlockedDevice[] }>('/blocked-devices');
         return response.blocked;
+    }
+
+    public async list_device_rebind_requests(): Promise<DeviceRebindRequest[]> {
+        const response = await this.client.get<any, { requests: DeviceRebindRequest[] }>('/device-rebind-requests');
+        return response.requests;
+    }
+
+    public async approve_device_rebind_request(id: string): Promise<DeviceRebindApproval> {
+        return this.client.post<any, DeviceRebindApproval>(`/device-rebind-requests/${encodeURIComponent(id)}/approve`);
+    }
+
+    public async reject_device_rebind_request(id: string): Promise<void> {
+        await this.client.post(`/device-rebind-requests/${encodeURIComponent(id)}/reject`);
     }
 
     public async unblock_device(machine_id: string): Promise<undefined> {

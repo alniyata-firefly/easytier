@@ -617,6 +617,7 @@ impl NetworkApi {
                     support_config_source: false,
                     failed_network_instances: Vec::new(),
                     support_heartbeat_policy: false,
+                    support_auth_state: false,
                 }),
             };
             machines.push(ListMachineItem {
@@ -1155,6 +1156,7 @@ mod tests {
                 *self.0.lock().unwrap() = request.applied_config_revision.clone();
                 Ok(ValidateTokenResponse {
                     valid: true,
+                    pending_rebind: false,
                     pre_approved: true,
                     binding_version: 0,
                     config_revision: "revision-1".to_owned(),

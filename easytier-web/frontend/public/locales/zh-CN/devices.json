@@ -274,5 +274,33 @@
       "1": "允许",
       "2": "丢弃"
     }
+  },
+  "rebind": {
+    "title": "设备身份变更审批",
+    "loading": "正在读取审批请求",
+    "none": "没有待审批的身份变更",
+    "originalDevice": "原设备",
+    "newIdentity": "新设备身份",
+    "client": "客户端",
+    "discovered": "首次发现",
+    "tokenLabel": "令牌：{{label}}",
+    "attemptCount_one": "{{countFormatted}} 次接入尝试",
+    "attemptCount_other": "{{countFormatted}} 次接入尝试",
+    "approve": "审批",
+    "reject": "拒绝",
+    "approveTitle": "批准设备身份变更",
+    "rejectTitle": "拒绝设备身份变更",
+    "approvePrompt": "确认这是 {{name}} 重装或更换后的设备？批准后将使用新设备 ID，并继承原设备的网络成员身份、虚拟 IP 和保存的配置。此管理令牌不再授权原设备 ID。",
+    "rejectPrompt": "拒绝此身份变更请求？原设备身份和配置保持不变，新设备仍不能接入。",
+    "oldId": "原设备 ID",
+    "newId": "新设备 ID",
+    "token": "管理令牌",
+    "lastSeen": "最近尝试",
+    "confirmApprove": "确认批准",
+    "confirmReject": "确认拒绝",
+    "approved": "身份变更已批准，等待设备重新认证。",
+    "rejected": "身份变更已拒绝。",
+    "conflict": "此请求已失效或目标设备存在冲突，请刷新并重新核对设备。",
+    "noLongerPending": "此请求已不在待审批列表中，请关闭弹窗后刷新。"
   }
 }

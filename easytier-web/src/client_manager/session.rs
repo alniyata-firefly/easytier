@@ -14,7 +14,10 @@ use easytier::proto::{
     },
     rpc::bidirect::BidirectRpcManager,
     rpc_types::{self, controller::BaseController},
-    web::{HeartbeatRequest, HeartbeatResponse, WebServerService, WebServerServiceServer},
+    web::{
+        HeartbeatAuthState, HeartbeatRequest, HeartbeatResponse, WebServerService,
+        WebServerServiceServer,
+    },
 };
 use easytier_core::tunnel::Tunnel;
 use tokio::sync::{Notify, RwLock, broadcast};
@@ -140,6 +143,7 @@ pub struct SessionData {
     heartbeat_count: std::sync::atomic::AtomicU32,
     session_identity: Option<HeartbeatIdentity>,
     auth_state: SessionAuthState,
+    pending_rebind: bool,
     webhook_connected_binding_version: Option<u64>,
     webhook_validation_dirty: bool,
     webhook_validation_change_epoch: u64,
@@ -185,6 +189,7 @@ impl SessionData {
             heartbeat_count: std::sync::atomic::AtomicU32::new(0),
             session_identity: None,
             auth_state: SessionAuthState::Init,
+            pending_rebind: false,
             webhook_connected_binding_version: None,
             webhook_validation_dirty: false,
             webhook_validation_change_epoch: 0,
@@ -482,6 +487,25 @@ pub(super) struct SessionRpcService {
 impl SessionRpcService {
     fn heartbeat_response(&self) -> HeartbeatResponse {
         self.heartbeat_policy.response()
+    }
+
+    fn heartbeat_response_with_auth(
+        &self,
+        supports_auth_state: bool,
+        data: &SessionData,
+    ) -> HeartbeatResponse {
+        let mut response = self.heartbeat_response();
+        if supports_auth_state {
+            response.auth_state = Some(match data.auth_state {
+                SessionAuthState::Init => HeartbeatAuthState::Authenticating,
+                SessionAuthState::Authorized => HeartbeatAuthState::Authorized,
+                SessionAuthState::Invalid if data.pending_rebind => {
+                    HeartbeatAuthState::PendingApproval
+                }
+                SessionAuthState::Invalid => HeartbeatAuthState::Rejected,
+            } as i32);
+        }
+        response
     }
 }
 
@@ -791,6 +815,7 @@ impl SessionRpcService {
         req: HeartbeatRequest,
         machine_id: uuid::Uuid,
     ) -> rpc_types::error::Result<HeartbeatResponse> {
+        let supports_auth_state = req.support_auth_state;
         let db = storage.db();
         let _guard = db.device_auth_gate.read().await;
         {
@@ -804,12 +829,17 @@ impl SessionRpcService {
                     == Some(identity);
                 if !valid {
                     data.auth_state = SessionAuthState::Invalid;
+                    data.pending_rebind = false;
                     data.webhook_validation_change_epoch =
                         data.webhook_validation_change_epoch.wrapping_add(1);
                     if let Some(token) = data.storage_token.as_ref() {
                         storage.remove_session_client(token, data.session_epoch);
                     }
-                    return Err(anyhow::anyhow!("device credential is no longer valid").into());
+                    return if supports_auth_state {
+                        Ok(self.heartbeat_response_with_auth(true, &data))
+                    } else {
+                        Err(anyhow::anyhow!("device credential is no longer valid").into())
+                    };
                 }
             }
         }
@@ -818,6 +848,9 @@ impl SessionRpcService {
             Self::ensure_session_identity_locked(&mut data, &req, machine_id)
                 .map_err(rpc_types::error::Error::from)?;
             if matches!(data.auth_state, SessionAuthState::Invalid) {
+                if supports_auth_state {
+                    return Ok(self.heartbeat_response_with_auth(true, &data));
+                }
                 tracing::info!(
                     %machine_id,
                     "webhook session is invalid; failing heartbeat to require client reconnect"
@@ -855,13 +888,14 @@ impl SessionRpcService {
         if let Some(notify) = notify {
             notify.notify_one();
         }
-        Ok(self.heartbeat_response())
+        Ok(self.heartbeat_response_with_auth(supports_auth_state, &*self.data.read().await))
     }
 
     async fn handle_heartbeat(
         &self,
         req: HeartbeatRequest,
     ) -> rpc_types::error::Result<HeartbeatResponse> {
+        let supports_auth_state = req.support_auth_state;
         let (storage, feature_flags, webhook_config) = {
             let data = self.data.read().await;
             let Ok(storage) = Storage::try_from(data.storage.clone()) else {
@@ -939,6 +973,7 @@ impl SessionRpcService {
                 );
             }
             data.auth_state = SessionAuthState::Authorized;
+            data.pending_rebind = false;
 
             let Some(storage_token) = data.storage_token.as_ref().cloned() else {
                 tracing::error!("Heartbeat succeeded before session token was initialized");
@@ -959,7 +994,7 @@ impl SessionRpcService {
         if let Some(notify) = validation_notify {
             notify.notify_one();
         }
-        Ok(self.heartbeat_response())
+        Ok(self.heartbeat_response_with_auth(supports_auth_state, &*self.data.read().await))
     }
 }
 
@@ -973,6 +1008,7 @@ impl WebServerService for SessionRpcService {
         req: HeartbeatRequest,
     ) -> rpc_types::error::Result<HeartbeatResponse> {
         let started_at = Instant::now();
+        let machine_id = req.machine_id.map(uuid::Uuid::from);
         let support_heartbeat_policy = req.support_heartbeat_policy;
         let should_delay_response = {
             let data = self.data.read().await;
@@ -980,8 +1016,24 @@ impl WebServerService for SessionRpcService {
         };
         let ret = self.handle_heartbeat(req).await;
         if ret.is_err() {
-            tracing::warn!("Failed to handle heartbeat: {:?}", ret);
-            // sleep for a while to avoid client busy loop
+            let data = self.data.read().await;
+            tracing::warn!(
+                ?machine_id,
+                client_url = %data.client_url,
+                pending_rebind = data.pending_rebind,
+                "Failed to handle heartbeat: {:?}", ret
+            );
+        }
+        let denied = ret.as_ref().is_ok_and(|response| {
+            matches!(
+                response
+                    .auth_state
+                    .and_then(|value| HeartbeatAuthState::try_from(value).ok()),
+                Some(HeartbeatAuthState::Rejected | HeartbeatAuthState::PendingApproval)
+            )
+        });
+        if ret.is_err() || denied {
+            // Keep the existing rejection pacing for negotiated status replies too.
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         } else if should_delay_response
             && let Some(delay) = heartbeat_response_delay(
@@ -1396,6 +1448,97 @@ mod tests {
                 None, None, None, None, None,
             )),
         )
+    }
+
+    #[tokio::test]
+    async fn heartbeat_auth_state_reports_actual_authorization_only_when_negotiated() {
+        let mut data = failure_state_test_data().await;
+        let service = SessionRpcService {
+            data: Arc::new(RwLock::new(failure_state_test_data().await)),
+            heartbeat_policy: HeartbeatPolicy::default(),
+        };
+        for (state, pending, expected) in [
+            (
+                SessionAuthState::Init,
+                false,
+                HeartbeatAuthState::Authenticating,
+            ),
+            (
+                SessionAuthState::Authorized,
+                false,
+                HeartbeatAuthState::Authorized,
+            ),
+            (
+                SessionAuthState::Invalid,
+                false,
+                HeartbeatAuthState::Rejected,
+            ),
+            (
+                SessionAuthState::Invalid,
+                true,
+                HeartbeatAuthState::PendingApproval,
+            ),
+        ] {
+            data.auth_state = state;
+            data.pending_rebind = pending;
+            assert_eq!(
+                service
+                    .heartbeat_response_with_auth(false, &data)
+                    .auth_state,
+                None
+            );
+            assert_eq!(
+                service.heartbeat_response_with_auth(true, &data).auth_state,
+                Some(expected as i32)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_heartbeat_has_no_authorization_and_preserves_legacy_rejection() {
+        let storage = Storage::new(crate::db::Db::memory_db().await);
+        let mut data = SessionData::new(
+            storage.weak_ref(),
+            "udp://127.0.0.1:40001".parse().unwrap(),
+            None,
+            Arc::new(FeatureFlags::default()),
+            Arc::new(crate::webhook::WebhookConfig::new(
+                Some("http://127.0.0.1:1".to_owned()),
+                None,
+                None,
+                None,
+                None,
+            )),
+        );
+        data.auth_state = SessionAuthState::Invalid;
+        data.pending_rebind = true;
+        let service = SessionRpcService {
+            data: Arc::new(RwLock::new(data)),
+            heartbeat_policy: HeartbeatPolicy::default(),
+        };
+        let mut request = heartbeat_request("test-token-not-logged", uuid::Uuid::new_v4());
+        assert!(service.handle_heartbeat(request.clone()).await.is_err());
+        request.support_auth_state = true;
+        let started = Instant::now();
+        let response = service
+            .heartbeat(BaseController::default(), request.clone())
+            .await
+            .unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert_eq!(
+            response.auth_state,
+            Some(HeartbeatAuthState::PendingApproval as i32)
+        );
+        let data = service.data.read().await;
+        assert!(!data.auth_state.is_authorized());
+        assert!(data.storage_token.is_none());
+        assert!(storage.list_clients().is_empty());
+        drop(data);
+        service.data.write().await.pending_rebind = false;
+        assert_eq!(
+            service.handle_heartbeat(request).await.unwrap().auth_state,
+            Some(HeartbeatAuthState::Rejected as i32)
+        );
     }
 
     #[tokio::test]

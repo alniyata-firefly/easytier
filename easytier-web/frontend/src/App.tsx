@@ -60,7 +60,7 @@ function Console() {
   const title=entries.find(entry=>entry.id===active)?.label??t('nav.overview');
   try {
     if(active==='networks'&&!info.webhook_auth){page=parts[2]?<NetworkPage api={api} networkId={decodeURIComponent(parts[2])} consoleInfo={info} onTitleChange={updateDetailTitle}/>:<NetworksPage api={api} consoleInfo={info}/>;}
-    if(active==='devices'){page=parts[2]==='device'&&parts[3]?<DevicePage api={api} deviceId={decodeURIComponent(parts[3])} instanceId={parts[4]?decodeURIComponent(parts[4]):undefined} onTitleChange={updateDetailTitle}/>:<DevicesPage api={api}/>;}
+    if(active==='devices'){page=parts[2]==='device'&&parts[3]?<DevicePage api={api} deviceId={decodeURIComponent(parts[3])} instanceId={parts[4]?decodeURIComponent(parts[4]):undefined} onTitleChange={updateDetailTitle}/>:<DevicesPage api={api} consoleInfo={info}/>;}
     if(active==='tokens'&&!info.webhook_auth){page=<TokensPage api={api} consoleInfo={info}/>;}
   } catch {page=<Alert tone="error">{t('page.invalidLink')}</Alert>;}
   const logout=async()=>{if(loggingOut)return;setLoggingOut(true);try{await api.logout();}catch(failure){notice(errorDescriptor(failure),'error');}finally{setLoggingOut(false);}};

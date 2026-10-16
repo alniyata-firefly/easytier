@@ -30,6 +30,7 @@ use crate::{
 };
 
 pub use easytier_core::management::InstanceMutationHooks as WebClientHooks;
+pub use easytier_core::management::WebClientConnectionState;
 
 pub struct WebClient {
     inner: easytier_core::management::WebClient<NativeInstanceFactory>,
@@ -80,6 +81,10 @@ impl WebClient {
 
     pub fn is_connected(&self) -> bool {
         self.inner.is_connected()
+    }
+
+    pub fn connection_state(&self) -> WebClientConnectionState {
+        self.inner.connection_state()
     }
 }
 

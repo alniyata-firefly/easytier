@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { version as guiVersion } from '../../../package.json';
 import { type NativeSession, buildConfigServerUrl, splitConfigServerUrl, getServiceDefaults, nativeApi, copyText, getLogDirPath, openLogDirectory, exitApplication, type Mode, type SessionSnapshot } from '../../native/bridge';
 import { Alert, Button, Dialog, Field, Panel, Status, useNotice } from './ui';
+import { managementStatus } from '../lib/management-status';
 
 const levels = ['off', 'warn', 'info', 'debug', 'trace'] as const;
 export function SettingsPanel({ session, snapshot }: { session: NativeSession; snapshot: SessionSnapshot }) {
@@ -13,6 +14,17 @@ export function SettingsPanel({ session, snapshot }: { session: NativeSession; s
   const [theme, setTheme] = useState(() => { try { return localStorage.getItem('easytier.client.theme') || 'system'; } catch { return 'system'; } });
   const [logLevel, setLogLevel] = useState('off');
   const [modePreparing, setModePreparing] = useState(false);
+  const [managementDeviceId, setManagementDeviceId] = useState<string>(), [deviceIdFailed, setDeviceIdFailed] = useState(false);
+  const showManagementDeviceId = snapshot.mode.mode === 'normal' && !!snapshot.mode.config_server_url;
+  const connectionStatus = managementStatus(snapshot);
+  useEffect(() => {
+    let active = true;
+    setManagementDeviceId(undefined); setDeviceIdFailed(false);
+    if (showManagementDeviceId) void nativeApi.getManagementDeviceId()
+      .then(value => { if (active) setManagementDeviceId(value); })
+      .catch(() => { if (active) setDeviceIdFailed(true); });
+    return () => { active = false; };
+  }, [showManagementDeviceId]);
   useEffect(() => { const media = matchMedia('(prefers-color-scheme: dark)'); const update = () => { document.documentElement.dataset.theme = theme === 'system' ? media.matches ? 'dark' : 'light' : theme; }; update(); media.addEventListener('change', update); try { localStorage.setItem('easytier.client.theme', theme); } catch {} return () => media.removeEventListener('change', update); }, [theme]);
   const operation = async (task: () => Promise<unknown>, done?: () => void) => { try { await task(); done?.(); notice(t('saved')); } catch { notice(t('nativeError'), 'error'); } };
   const closeManagement = () => { setManagementOpen(false); setAddress(''); setToken(''); setManagementError(''); setPending(undefined); };
@@ -35,8 +47,9 @@ export function SettingsPanel({ session, snapshot }: { session: NativeSession; s
     <div className="page-heading"><h1>{t('settings')}</h1></div>
     <div className="client-settings-grid">
       <Panel title={t('management')} action={<Button icon="key" disabled={snapshot.busy || snapshot.mode.mode === 'remote'} onClick={openManagement}>{t('connectManagement')}</Button>}>
-        <Status state={snapshot.managementConnected ? 'online' : snapshot.mode.mode !== 'normal' && snapshot.mode.config_server_url ? 'unknown' : 'offline'} label={t(snapshot.managementConnected ? 'managementConnected' : snapshot.mode.mode !== 'normal' && snapshot.mode.config_server_url ? 'managementUnknown' : snapshot.mode.config_server_url ? 'managementConnecting' : 'disconnected')}/>
+        <Status state={connectionStatus.state} label={t(connectionStatus.label)}/>
         {snapshot.mode.config_server_url && <p className="entity-secondary">{splitConfigServerUrl(snapshot.mode.config_server_url).address}</p>}
+        {showManagementDeviceId && <dl className="detail-list setting-actions"><dt>{t('managementDeviceId')}</dt><dd className="management-device-id"><code>{managementDeviceId || (deviceIdFailed ? t('resourceUnavailable') : '—')}</code><Button tone="ghost" icon="copy" disabled={!managementDeviceId} aria-label={t('copyManagementDeviceId')} onClick={() => { if (managementDeviceId) void copyText(managementDeviceId).then(() => notice(t('copied'))).catch(() => notice(t('nativeError'), 'error')); }}/></dd></dl>}
       </Panel>
       {snapshot.platform !== 'android' && <Panel title={t('mode')} action={<Button icon="settings" disabled={snapshot.busy || modePreparing} onClick={() => void openMode()}>{t('mode')}</Button>}><dl className="detail-list"><dt>{t('mode')}</dt><dd>{t(snapshot.mode.mode)}</dd><dt>{t('serviceStatus')}</dt><dd>{t(snapshot.serviceStatus)}</dd></dl><div className="actions setting-actions"><Button icon="clock" disabled={snapshot.busy || modePreparing} onClick={() => void openMode(true)}>{t('boot')}</Button></div></Panel>}
       <Panel title={t('theme')}><div className="form-grid"><Field label={t('theme')}><select value={theme} onChange={event => setTheme(event.target.value)}>{['system', 'light', 'dark'].map(value => <option key={value} value={value}>{t(value)}</option>)}</select></Field><Field label={t('language')}><select value={i18n.resolvedLanguage} onChange={event => void i18n.changeLanguage(event.target.value)}><option value="zh-CN">简体中文</option><option value="en">English</option></select></Field></div></Panel>

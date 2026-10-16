@@ -7,6 +7,12 @@ vi.mock('../../../easytier-web/frontend-lib/src/types/network', () => ({
 vi.mock('./storage', () => ({ loadStoredConfigs: () => mock.configs }))
 
 describe('Tauri native command payload contract', () => {
+  it('reads the local persisted management identity without a token or a running instance', async () => {
+    const backend = await import('./backend')
+    await backend.getManagementDeviceId()
+    expect(mock.invoke).toHaveBeenLastCalledWith('get_management_device_id')
+  })
+
   it('uses the Rust parameter names for validation, generation and saving', async () => {
     const backend = await import('./backend')
     const config = { instance_id: 'fixture' } as unknown as Parameters<typeof backend.validateConfig>[0]

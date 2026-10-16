@@ -87,6 +87,7 @@ impl HeartbeatPolicy {
         HeartbeatResponse {
             heartbeat_interval_ms: Some(self.interval.as_millis() as u32),
             heartbeat_timeout_ms: Some(self.timeout.as_millis() as u32),
+            auth_state: None,
         }
     }
 

@@ -4,6 +4,7 @@ import { NativeSession, Api, NetworkTypes, Utils, loadLastNetworkInstanceId, sav
 import { Alert, Button, Dialog, Empty, Field, Icon, BrandMark, LanguageSwitch, Panel, Status, useNotice } from './components/ui';
 import { RuntimePanel } from './components/RuntimePanel';
 import { supportsUplinkSelectionForTarget } from './lib/uplink-capabilities';
+import { managementStatus } from './lib/management-status';
 const NetworkEditor = lazy(() => import('./components/NetworkEditor').then(module => ({ default: module.NetworkEditor })));
 const SettingsPanel = lazy(() => import('./components/SettingsPanel').then(module => ({ default: module.SettingsPanel })));
 
@@ -14,6 +15,8 @@ export function App() {
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot), client = session.remoteClient;
   const localAndroid = snapshot.platform === 'android' && snapshot.mode.mode === 'normal';
   const canManageConfigs = snapshot.connected || snapshot.mode.mode === 'normal';
+  const connectionStatus = snapshot.mode.config_server_url ? managementStatus(snapshot)
+    : { state: snapshot.clientPaused ? 'stopped' : snapshot.connected ? 'online' : 'offline', label: snapshot.clientPaused ? 'clientPaused' : snapshot.connected ? 'connected' : 'disconnected' };
   const configurationScope = JSON.stringify(snapshot.mode);
   const [page, setPage] = useState('networks'), [networks, setNetworks] = useState<NetworkRow[]>([]);
   const [selected, setSelected] = useState<string>(() => loadLastNetworkInstanceId() ?? ''), [info, setInfo] = useState<NetworkTypes.NetworkInstanceRunningInfo>();
@@ -65,7 +68,7 @@ export function App() {
   });
   const parseImport = async () => { setBusy(true); setImportError(false); try { const parsed = await client.parse_config(importText); if (!parsed.config || parsed.error) throw new Error('config_parse_failed'); const config = { ...parsed.config, instance_id: crypto.randomUUID() }; setImporting(false); setImportText(''); setEditor(config); } catch { setImportError(true); } finally { setBusy(false); } };
   return <div className="client-shell">
-    <header className="client-topbar"><a className="client-brand" href="#" onClick={event => { event.preventDefault(); setPage('networks'); }}><span className="brand-mark"><BrandMark size={24}/></span>EasyTier</a><span className="desktop-version">{snapshot.version}</span><div className="client-topbar-actions"><Status state={snapshot.clientPaused ? 'stopped' : snapshot.connected ? 'online' : 'offline'} label={t(snapshot.clientPaused ? 'clientPaused' : snapshot.connected ? 'connected' : 'disconnected')}/><LanguageSwitch/></div></header>
+    <header className="client-topbar"><a className="client-brand" href="#" onClick={event => { event.preventDefault(); setPage('networks'); }}><span className="brand-mark"><BrandMark size={24}/></span>EasyTier</a><span className="desktop-version">{snapshot.version}</span><div className="client-topbar-actions"><Status state={connectionStatus.state} label={t(connectionStatus.label)}/><LanguageSwitch/></div></header>
     <nav className="client-navigation" aria-label="EasyTier"><Button icon="network" tone={page === 'networks' ? 'primary' : 'ghost'} onClick={() => setPage('networks')}>{t('networks')}</Button><Button icon="settings" tone={page === 'settings' ? 'primary' : 'ghost'} onClick={() => setPage('settings')}>{t('settings')}</Button></nav>
     <main className="client-workspace">
       {snapshot.errorCode && <Alert tone="error">{t(snapshot.errorCode === 'config_server_credentials_required' ? 'legacyCredentials' : snapshot.errorCode === 'client_stop_failed' ? 'clientStopFailed' : snapshot.errorCode === 'client_start_failed' ? 'clientStartFailed' : 'nativeError')}</Alert>}

@@ -48,7 +48,7 @@ export class NativeSession {
 
   constructor() {
     const platform = osType()
-    this.snapshot = { platform, version: '', mode: loadMode(platform), connected: false, managementConnected: false, clientPaused: platform === 'android' && loadLocalClientPaused(), serviceStatus: 'NotInstalled', busy: false, revision: 0 }
+    this.snapshot = { platform, version: '', mode: loadMode(platform), connected: false, managementConnected: false, managementState: 'disconnected', clientPaused: platform === 'android' && loadLocalClientPaused(), serviceStatus: 'NotInstalled', busy: false, revision: 0 }
   }
   getSnapshot = (): SessionSnapshot => this.snapshot
   subscribe = (listener: () => void): (() => void) => { this.subscribers.add(listener); return () => this.subscribers.delete(listener) }
@@ -177,7 +177,9 @@ export class NativeSession {
     this.manuallyStopped = false
     this.reconnectAttempts = 0
     this.retryAt = 0
-    this.patch({ mode, connected: true, errorCode: mode.config_server_needs_credentials ? 'config_server_credentials_required' : undefined,
+    this.patch({ mode, connected: true, managementConnected: false,
+      managementState: mode.config_server_url ? mode.mode === 'normal' ? 'connecting' : 'unknown' : 'disconnected',
+      errorCode: mode.config_server_needs_credentials ? 'config_server_credentials_required' : undefined,
       serviceStatus: this.snapshot.platform === 'android' ? 'NotInstalled' : await backend.getServiceStatus().catch(() => 'NotInstalled' as const) })
   }
   applyMode(mode: Mode): Promise<void> {
@@ -208,7 +210,7 @@ export class NativeSession {
             await backend.initService(previousServiceStatus === 'Stopped' ? serviceOptions(previous) : undefined)
           } catch { this.patch({ errorCode: 'service_update_and_restore_failed' }) }
           this.manuallyStopped = true
-          this.patch({ connected: false, managementConnected: false, serviceStatus: previousServiceStatus,
+          this.patch({ connected: false, managementConnected: false, managementState: 'disconnected', serviceStatus: previousServiceStatus,
             errorCode: this.snapshot.errorCode || 'mode_apply_failed' })
         } else {
           try { await this.connect(previous) } catch { this.patch({ connected: false }) }
@@ -226,7 +228,7 @@ export class NativeSession {
     this.assertLocalAndroid()
     this.manuallyStopped = true
     saveLocalClientPaused(true)
-    this.patch({ clientPaused: true, connected: false, managementConnected: false })
+    this.patch({ clientPaused: true, connected: false, managementConnected: false, managementState: 'disconnected' })
     // Attempt both effects even if one fails. Neither a stopped TUN alone nor
     // a disconnected management agent alone means the client is fully stopped.
     const vpn = suspendMobileVpnService()
@@ -265,7 +267,7 @@ export class NativeSession {
   stopService(): Promise<void> {
     return this.serial(async () => {
       this.manuallyStopped = true
-      try { await backend.setServiceStatus(false); this.patch({ connected: false, serviceStatus: 'Stopped' }) }
+      try { await backend.setServiceStatus(false); this.patch({ connected: false, managementConnected: false, managementState: 'disconnected', serviceStatus: 'Stopped' }) }
       catch { this.patch({ errorCode: 'service_stop_failed' }); throw new Error('service_stop_failed') }
     })
   }
@@ -286,12 +288,13 @@ export class NativeSession {
       if (!this.snapshot.busy) {
         const generation = this.generation
         const connected = await backend.isClientRunning().catch(() => false)
-        const managementConnected = this.snapshot.mode.mode === 'normal' && !!this.snapshot.mode.config_server_url
-          ? await backend.isWebClientConnected().catch(() => false) : false
+        const managementState = !connected || !this.snapshot.mode.config_server_url ? 'disconnected'
+          : this.snapshot.mode.mode === 'normal' ? await backend.getWebClientStatus().catch(() => 'unknown' as const) : 'unknown'
+        const managementConnected = managementState === 'authorized'
         if (this.disposed) return
         if (generation !== this.generation || this.snapshot.busy) { this.schedulePoll(); return }
         const shouldReconnect = !connected && !this.manuallyStopped && Date.now() >= this.retryAt
-        if (connected !== this.snapshot.connected || managementConnected !== this.snapshot.managementConnected) this.patch({ connected, managementConnected })
+        if (connected !== this.snapshot.connected || managementState !== this.snapshot.managementState) this.patch({ connected, managementConnected, managementState })
         if (shouldReconnect) {
           await this.reconnect().catch(() => undefined)
           if (!this.snapshot.connected) {

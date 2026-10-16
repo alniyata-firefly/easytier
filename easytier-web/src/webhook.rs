@@ -352,6 +352,8 @@ pub struct ValidateTokenRequest {
 pub struct ValidateTokenResponse {
     pub valid: bool,
     #[serde(default)]
+    pub pending_rebind: bool,
+    #[serde(default)]
     pub pre_approved: bool,
     #[serde(default)]
     pub binding_version: u64,

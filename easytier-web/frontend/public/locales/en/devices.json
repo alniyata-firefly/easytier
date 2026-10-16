@@ -274,5 +274,33 @@
       "1": "Allow",
       "2": "Drop"
     }
+  },
+  "rebind": {
+    "title": "Device identity approvals",
+    "loading": "Loading identity requests",
+    "none": "No pending identity changes",
+    "originalDevice": "Original device",
+    "newIdentity": "New device identity",
+    "client": "Client",
+    "discovered": "First seen",
+    "tokenLabel": "Token: {{label}}",
+    "attemptCount_one": "{{countFormatted}} connection attempt",
+    "attemptCount_other": "{{countFormatted}} connection attempts",
+    "approve": "Review",
+    "reject": "Reject",
+    "approveTitle": "Approve device identity change",
+    "rejectTitle": "Reject device identity change",
+    "approvePrompt": "Confirm that this is {{name}} after reinstalling or replacing the device. Approval uses the new device ID and retains the original network memberships, virtual IPs and saved configurations. This management token will no longer authorize the old device ID.",
+    "rejectPrompt": "Reject this identity change? The original device identity and configurations remain unchanged. The new device will remain unauthorized.",
+    "oldId": "Original device ID",
+    "newId": "New device ID",
+    "token": "Management token",
+    "lastSeen": "Last attempt",
+    "confirmApprove": "Confirm approval",
+    "confirmReject": "Confirm rejection",
+    "approved": "Identity change approved. Waiting for device reauthentication.",
+    "rejected": "Identity change rejected.",
+    "conflict": "This request is no longer valid or the target device has conflicting data. Refresh and review the device again.",
+    "noLongerPending": "This request is no longer pending. Close this dialog and refresh."
   }
 }

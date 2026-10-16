@@ -286,6 +286,36 @@ impl CentralNetworkService {
         self.mutation_lock.lock().await
     }
 
+    pub(crate) async fn approve_device_rebind(
+        &self,
+        user_id: UserIdInDb,
+        request_id: Uuid,
+    ) -> Result<crate::db::DeviceRebindApproval, crate::db::DeviceRebindError> {
+        let _mutation = self.mutation_lock.lock().await;
+        let result = self
+            .db
+            .approve_device_rebind_request(user_id, request_id)
+            .await?;
+        // Generation fencing takes effect at commit, before asynchronous stops.
+        // Never disconnect by the unchanged token hash: a newly authenticated
+        // replacement connection may already belong to the new generation.
+        self.client_manager
+            .disconnect_sessions_by_device_token(user_id, &result.token_id, result.auth_generation)
+            .await;
+        for machine in [&result.old_machine_id, &result.new_machine_id] {
+            if let Ok(machine) = Uuid::parse_str(machine) {
+                self.client_manager
+                    .invalidate_applied_config_revision(user_id, machine)
+                    .await;
+                self.publication_errors
+                    .write()
+                    .await
+                    .remove(&(user_id, Some(machine)));
+            }
+        }
+        Ok(result)
+    }
+
     pub fn network_instances(
         &self,
     ) -> Option<&Arc<crate::central_network::gateway::NetworkInstanceManager>> {

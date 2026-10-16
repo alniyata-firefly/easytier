@@ -1,6 +1,7 @@
 // sea-orm-cli generate entity -u sqlite:./et.db -o easytier-web/src/db/entity/ --with-serde both --with-copy-enums
 mod central_intent;
 mod device_access_tokens;
+mod device_rebind_requests;
 mod devices;
 #[allow(unused_imports)]
 pub mod entity;
@@ -9,6 +10,9 @@ pub(crate) use central_intent::{CentralIntentError, CentralOwnedRuntimeConfig};
 pub(crate) use device_access_tokens::token_hash as device_access_token_hash;
 pub(crate) use device_access_tokens::{
     DeviceAccessTokenInfo, DeviceTokenIdentity, IssuedDeviceAccessToken,
+};
+pub(crate) use device_rebind_requests::{
+    DeviceRebindApproval, DeviceRebindError, DeviceRebindRequestInfo,
 };
 pub use devices::DeviceHeartbeatRecord;
 

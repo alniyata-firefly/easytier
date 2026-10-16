@@ -33,6 +33,7 @@ impl WebhookHandler for DeviceAuth {
             pre_approved: false,
             binding_version: 0,
             config_revision: String::new(),
+            pending_rebind: false,
         };
         let Ok(machine_id) = Uuid::parse_str(&request.machine_id) else {
             return Ok(response);
@@ -57,6 +58,10 @@ impl WebhookHandler for DeviceAuth {
             )
             .await?;
         let Some(identity) = identity else {
+            response.pending_rebind = self
+                .db
+                .has_pending_device_rebind(&request.token, machine_id)
+                .await?;
             return Ok(response);
         };
         let device = (identity.user_id, machine_id);
@@ -242,6 +247,111 @@ mod tests {
                 .is_none()
         );
         core.delete_network_instances([instance_id]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn approved_reinstall_retires_old_session_and_delivers_preserved_config() {
+        let db = Db::memory_db().await;
+        let owner = db.auto_create_user("live-recovery-owner").await.unwrap().id;
+        let old = Uuid::new_v4();
+        let new = Uuid::new_v4();
+        let token = db
+            .create_device_access_token(owner, "phone", None, None)
+            .await
+            .unwrap()
+            .token;
+        let (manager, url) = start_config_server(db.clone()).await;
+        let manager = Arc::new(manager);
+        let service = crate::central_network::service::CentralNetworkService::new(
+            db.clone(),
+            manager.clone(),
+        );
+        let instance = Uuid::new_v4();
+        let old_core = Arc::new(native_instance_manager());
+        let old_client = WebClient::new(
+            runtime_udp_tunnel_dialer(url.clone()),
+            token.clone(),
+            old,
+            "before-reinstall",
+            false,
+            old_core.clone(),
+            None,
+        );
+        wait_until(|| async { manager.get_session_by_machine_id(owner, &old).is_some() }).await;
+        let old_session = manager.get_session_by_machine_id(owner, &old).unwrap();
+        manager
+            .reconcile_managed_network_configs(
+                owner,
+                old,
+                vec![ManagedNetworkConfig {
+                    instance_id: instance.to_string(),
+                    network_config: serde_json::json!({
+                        "instance_id": instance.to_string(),
+                        "network_name": "preserved-reinstalled-network",
+                        "network_secret": "preserved-secret",
+                        "networking_method": "Standalone",
+                        "no_tun": true,
+                        "disable_ipv6": true,
+                        "multi_thread": false
+                    }),
+                }],
+                Some("preserved-revision".into()),
+                None,
+            )
+            .await
+            .unwrap();
+        wait_until(|| async { old_core.config(instance).is_some() }).await;
+        let new_core = Arc::new(native_instance_manager());
+        let new_client = WebClient::new(
+            runtime_udp_tunnel_dialer(url),
+            token,
+            new,
+            "after-reinstall",
+            false,
+            new_core.clone(),
+            None,
+        );
+        wait_until(|| async {
+            !db.list_device_rebind_requests(owner)
+                .await
+                .unwrap()
+                .is_empty()
+        })
+        .await;
+        assert!(manager.get_session_by_machine_id(owner, &new).is_none());
+        assert!(
+            new_core.config(instance).is_none(),
+            "pending clients cannot receive private network config"
+        );
+        let pending = db.list_device_rebind_requests(owner).await.unwrap();
+        service
+            .approve_device_rebind(owner, Uuid::parse_str(&pending[0].id).unwrap())
+            .await
+            .unwrap();
+        assert!(!old_session.management_access_valid().await);
+        assert!(!old_session.is_running());
+        drop(old_client);
+        wait_until(|| async {
+            manager.get_session_by_machine_id(owner, &new).is_some()
+                && new_core.config(instance).is_some()
+        })
+        .await;
+        let actual = NetworkConfig::new_from_config(&new_core.config(instance).unwrap()).unwrap();
+        assert_eq!(
+            actual.network_name.as_deref(),
+            Some("preserved-reinstalled-network")
+        );
+        assert!(db.get_device((owner, old)).await.unwrap().is_none());
+        assert_eq!(
+            db.get_managed_config_revision((owner, new))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("preserved-revision")
+        );
+        drop(new_client);
+        old_core.delete_network_instances([instance]).await.unwrap();
+        new_core.delete_network_instances([instance]).await.unwrap();
     }
 
     fn request(token: &str, machine_id: Uuid) -> ValidateTokenRequest {
@@ -601,6 +711,52 @@ mod tests {
                 .valid
         );
         assert_eq!(db.list_devices(owner).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn mismatched_identity_waits_for_owner_approval_without_config_access() {
+        let db = Db::memory_db().await;
+        let owner = db.auto_create_user("recovery-owner").await.unwrap().id;
+        let issued = db
+            .create_device_access_token(owner, "phone", None, None)
+            .await
+            .unwrap();
+        let old = Uuid::new_v4();
+        let new = Uuid::new_v4();
+        let auth = DeviceAuth::new(db.clone(), false);
+        assert!(
+            auth.validate_token(&request(&issued.token, old))
+                .await
+                .unwrap()
+                .valid
+        );
+        db.set_managed_config_revision((owner, old), "private-configuration-revision")
+            .await
+            .unwrap();
+        let blocked = auth
+            .validate_token(&request(&issued.token, new))
+            .await
+            .unwrap();
+        assert!(!blocked.valid && !blocked.pre_approved && blocked.pending_rebind);
+        assert_eq!(blocked.binding_version, 0);
+        assert!(blocked.config_revision.is_empty());
+        let pending = db.list_device_rebind_requests(owner).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        db.approve_device_rebind_request(owner, Uuid::parse_str(&pending[0].id).unwrap())
+            .await
+            .unwrap();
+        let approved = auth
+            .validate_token(&request(&issued.token, new))
+            .await
+            .unwrap();
+        assert!(approved.valid && approved.pre_approved && !approved.pending_rebind);
+        assert_eq!(approved.binding_version, 2);
+        assert_eq!(approved.config_revision, "private-configuration-revision");
+        let bad_token = auth
+            .validate_token(&request("not-a-credential", Uuid::new_v4()))
+            .await
+            .unwrap();
+        assert!(!bad_token.valid && !bad_token.pending_rebind);
     }
 
     #[tokio::test]

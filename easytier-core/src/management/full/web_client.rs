@@ -1,15 +1,15 @@
 use std::collections::HashSet;
 use std::sync::{
     Arc, Weak,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 
 use async_trait::async_trait;
 use easytier_proto::{
     rpc_types::controller::BaseController,
     web::{
-        DeviceOsInfo, GetFeatureRequest, GetFeatureResponse, HeartbeatRequest, HeartbeatResponse,
-        WebServerServiceClientFactory,
+        DeviceOsInfo, GetFeatureRequest, GetFeatureResponse, HeartbeatAuthState, HeartbeatRequest,
+        HeartbeatResponse, WebServerServiceClientFactory,
     },
 };
 use tokio::{sync::Mutex, task::JoinSet};
@@ -31,6 +31,7 @@ use super::{ConfigFileStorage, DaemonGuard, InstanceManager, InstanceMutationHoo
 use super::{LoggerControl, register_management_rpc};
 
 const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+const AUTH_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 // Keep retry ownership in this loop when transport or protocol handshakes stall.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const FEATURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -172,6 +173,88 @@ pub struct WebClientConfig {
     pub secure_mode: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum WebClientConnectionState {
+    Disconnected = 0,
+    Connecting = 1,
+    Authenticating = 2,
+    Authorized = 3,
+    Rejected = 4,
+    PendingApproval = 5,
+    Unknown = 6,
+}
+
+struct ConnectionState(AtomicU8);
+
+impl ConnectionState {
+    fn new() -> Self {
+        Self(AtomicU8::new(WebClientConnectionState::Connecting as u8))
+    }
+
+    fn get(&self) -> WebClientConnectionState {
+        match self.0.load(Ordering::Acquire) {
+            1 => WebClientConnectionState::Connecting,
+            2 => WebClientConnectionState::Authenticating,
+            3 => WebClientConnectionState::Authorized,
+            4 => WebClientConnectionState::Rejected,
+            5 => WebClientConnectionState::PendingApproval,
+            6 => WebClientConnectionState::Unknown,
+            _ => WebClientConnectionState::Disconnected,
+        }
+    }
+
+    fn set(&self, state: WebClientConnectionState) {
+        self.0.store(state as u8, Ordering::Release);
+    }
+
+    fn has_auth_decision(&self) -> bool {
+        matches!(
+            self.get(),
+            WebClientConnectionState::Rejected | WebClientConnectionState::PendingApproval
+        )
+    }
+
+    fn transport_state(&self, state: WebClientConnectionState) {
+        // A redial must not hide a known authentication failure from a polling UI.
+        if !self.has_auth_decision() {
+            self.set(state);
+        }
+    }
+
+    fn heartbeat_response(&self, response: &HeartbeatResponse) -> bool {
+        let state = match response
+            .auth_state
+            .and_then(|value| HeartbeatAuthState::try_from(value).ok())
+        {
+            Some(HeartbeatAuthState::Authenticating) => {
+                self.transport_state(WebClientConnectionState::Authenticating);
+                return true;
+            }
+            Some(HeartbeatAuthState::Authorized) => WebClientConnectionState::Authorized,
+            Some(HeartbeatAuthState::Rejected) => WebClientConnectionState::Rejected,
+            Some(HeartbeatAuthState::PendingApproval) => WebClientConnectionState::PendingApproval,
+            _ => {
+                // Older servers acknowledge heartbeats before asynchronous validation.
+                // An acknowledgement without an auth result cannot prove authorization.
+                self.set(WebClientConnectionState::Unknown);
+                return true;
+            }
+        };
+        self.set(state);
+        !self.has_auth_decision()
+    }
+
+    fn retry_interval(&self) -> std::time::Duration {
+        if self.has_auth_decision() {
+            AUTH_RETRY_INTERVAL
+        } else {
+            RETRY_INTERVAL
+        }
+    }
+}
+
 #[async_trait]
 pub(crate) trait WebClientBackend: Send + Sync + 'static {
     fn register(&self, registry: &ServiceRegistry);
@@ -248,6 +331,7 @@ struct WebClientController {
     config: WebClientConfig,
     backend: Arc<dyn WebClientBackend>,
     runtime_id: uuid::Uuid,
+    connection_state: ConnectionState,
 }
 
 /// Portable config-server client. Hosts only supply identity and adapters.
@@ -255,7 +339,6 @@ pub struct WebClient<F> {
     _controller: Arc<WebClientController>,
     _tasks: AbortOnDropHandle<()>,
     _manager_guard: Option<DaemonGuard>,
-    connected: Arc<AtomicBool>,
     _factory: std::marker::PhantomData<F>,
 }
 
@@ -307,11 +390,10 @@ impl<F> WebClient<F> {
             config,
             backend,
             runtime_id: uuid::Uuid::new_v4(),
+            connection_state: ConnectionState::new(),
         });
-        let connected = Arc::new(AtomicBool::new(false));
         let tasks = AbortOnDropHandle::new(tokio::spawn(web_client_routine(
             controller.clone(),
-            connected.clone(),
             Box::new(connector),
         )));
 
@@ -319,32 +401,47 @@ impl<F> WebClient<F> {
             _controller: controller,
             _tasks: tasks,
             _manager_guard: manager_guard,
-            connected,
             _factory: std::marker::PhantomData,
         }
     }
 
+    /// Legacy liveness check. Older servers do not report authorization, so callers
+    /// that display authentication status must inspect `connection_state` instead.
     pub fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::Acquire)
+        matches!(
+            self.connection_state(),
+            WebClientConnectionState::Authorized | WebClientConnectionState::Unknown
+        )
+    }
+
+    pub fn connection_state(&self) -> WebClientConnectionState {
+        self._controller.connection_state.get()
     }
 }
 
 async fn web_client_routine(
     controller: Arc<WebClientController>,
-    connected: Arc<AtomicBool>,
     connector: Box<dyn TunnelDialer>,
 ) {
     loop {
+        controller
+            .connection_state
+            .transport_state(WebClientConnectionState::Connecting);
         let connection = match connect_config_server(connector.as_ref(), CONNECT_TIMEOUT).await {
             Ok(connection) => connection,
             Err(error) => {
+                controller
+                    .connection_state
+                    .transport_state(WebClientConnectionState::Disconnected);
                 tracing::warn!(%error, "failed to connect to config server; retrying");
-                time::sleep(RETRY_INTERVAL).await;
+                time::sleep(controller.connection_state.retry_interval()).await;
                 continue;
             }
         };
 
-        connected.store(true, Ordering::Release);
+        controller
+            .connection_state
+            .transport_state(WebClientConnectionState::Authenticating);
         // A WebSocket transport URL can contain the device access token.
         tracing::info!("connected to config server");
         let mut session = WebClientSession::new(connection, controller.clone());
@@ -366,33 +463,43 @@ async fn web_client_routine(
             {
                 Ok(connection) => connection,
                 Err(error) => {
-                    connected.store(false, Ordering::Release);
+                    controller
+                        .connection_state
+                        .transport_state(WebClientConnectionState::Disconnected);
                     tracing::warn!(%error, "failed to reconnect secure config-server tunnel");
-                    time::sleep(RETRY_INTERVAL).await;
+                    time::sleep(controller.connection_state.retry_interval()).await;
                     continue;
                 }
             };
             let connection = match web_security::upgrade_client_tunnel(connection).await {
                 Ok(connection) => connection,
                 Err(error) => {
-                    connected.store(false, Ordering::Release);
+                    controller
+                        .connection_state
+                        .transport_state(WebClientConnectionState::Disconnected);
                     tracing::warn!(%error, "config-server secure handshake failed");
-                    time::sleep(RETRY_INTERVAL).await;
+                    time::sleep(controller.connection_state.retry_interval()).await;
                     continue;
                 }
             };
             let mut session = WebClientSession::new(connection, controller.clone());
             session.start_heartbeat().await;
             session.wait().await;
-            connected.store(false, Ordering::Release);
+            drop(session);
+            controller
+                .connection_state
+                .transport_state(WebClientConnectionState::Disconnected);
+            time::sleep(controller.connection_state.retry_interval()).await;
             continue;
         }
 
         if support_encryption {
             if controller.config.secure_mode {
-                connected.store(false, Ordering::Release);
+                controller
+                    .connection_state
+                    .transport_state(WebClientConnectionState::Disconnected);
                 tracing::warn!("secure mode requires web secure-tunnel support in the local build");
-                time::sleep(RETRY_INTERVAL).await;
+                time::sleep(controller.connection_state.retry_interval()).await;
                 continue;
             }
             tracing::warn!(
@@ -400,15 +507,21 @@ async fn web_client_routine(
             );
         }
         if controller.config.secure_mode {
-            connected.store(false, Ordering::Release);
+            controller
+                .connection_state
+                .transport_state(WebClientConnectionState::Disconnected);
             tracing::warn!("secure mode requires config-server encryption support");
-            time::sleep(RETRY_INTERVAL).await;
+            time::sleep(controller.connection_state.retry_interval()).await;
             continue;
         }
 
         session.start_heartbeat().await;
         session.wait().await;
-        connected.store(false, Ordering::Release);
+        drop(session);
+        controller
+            .connection_state
+            .transport_state(WebClientConnectionState::Disconnected);
+        time::sleep(controller.connection_state.retry_interval()).await;
     }
 }
 
@@ -454,6 +567,7 @@ fn build_heartbeat_request(
             .map(Into::into)
             .collect(),
         support_heartbeat_policy: true,
+        support_auth_state: true,
     }
 }
 
@@ -535,6 +649,13 @@ impl WebClientSession {
                 {
                     Ok(response) => {
                         tracing::debug!(?response, "config-server heartbeat response");
+                        if !controller.connection_state.heartbeat_response(&response) {
+                            tracing::warn!(
+                                state = ?controller.connection_state.get(),
+                                "config-server authentication is not authorized; retrying after backoff"
+                            );
+                            break;
+                        }
                         let (next_policy, adjusted) = HeartbeatPolicy::from_response(&response);
                         if adjusted {
                             tracing::warn!(
@@ -596,6 +717,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use easytier_proto::web::{WebServerService, WebServerServiceServer};
 
     use super::*;
     use crate::tunnel::ring::create_ring_tunnel_pair;
@@ -605,6 +727,38 @@ mod tests {
     }
 
     struct ImmediateStateChangeBackend;
+
+    #[derive(Clone)]
+    struct AuthStateRpc {
+        state: Arc<AtomicU8>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl WebServerService for AuthStateRpc {
+        type Controller = BaseController;
+
+        async fn heartbeat(
+            &self,
+            _: BaseController,
+            request: HeartbeatRequest,
+        ) -> easytier_proto::rpc_types::error::Result<HeartbeatResponse> {
+            assert!(request.support_auth_state);
+            self.requests.fetch_add(1, Ordering::AcqRel);
+            Ok(HeartbeatResponse {
+                auth_state: Some(self.state.load(Ordering::Acquire) as i32),
+                ..Default::default()
+            })
+        }
+
+        async fn get_feature(
+            &self,
+            _: BaseController,
+            _: GetFeatureRequest,
+        ) -> easytier_proto::rpc_types::error::Result<GetFeatureResponse> {
+            Ok(GetFeatureResponse::default())
+        }
+    }
 
     #[async_trait]
     impl WebClientBackend for ImmediateStateChangeBackend {
@@ -668,6 +822,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(connector.attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_rpc_keeps_pending_authentication_separate_from_a_live_transport() {
+        let response_state = Arc::new(AtomicU8::new(HeartbeatAuthState::Authenticating as u8));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (client_tunnel, server_tunnel) = create_ring_tunnel_pair();
+        let server = BidirectRpcManager::new();
+        server.rpc_server().registry().register(
+            WebServerServiceServer::new(AuthStateRpc {
+                state: response_state.clone(),
+                requests: requests.clone(),
+            }),
+            "",
+        );
+        server.run_with_tunnel(server_tunnel);
+        let controller = Arc::new(WebClientController {
+            config: WebClientConfig {
+                token: "fixture-token".into(),
+                machine_id: uuid::Uuid::new_v4(),
+                hostname: "fixture-host".into(),
+                device_os: DeviceOsInfo::default(),
+                easytier_version: "fixture-version".into(),
+                secure_mode: false,
+            },
+            backend: Arc::new(ImmediateStateChangeBackend),
+            runtime_id: uuid::Uuid::new_v4(),
+            connection_state: ConnectionState::new(),
+        });
+        let mut session = WebClientSession::new(client_tunnel, controller.clone());
+        session.start_heartbeat().await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while requests.load(Ordering::Acquire) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("live transport should deliver heartbeats while validation is pending");
+        assert_eq!(
+            controller.connection_state.get(),
+            WebClientConnectionState::Authenticating
+        );
+
+        response_state.store(HeartbeatAuthState::Authorized as u8, Ordering::Release);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while controller.connection_state.get() != WebClientConnectionState::Authorized {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("explicit successful validation should authorize the client");
+
+        response_state.store(HeartbeatAuthState::PendingApproval as u8, Ordering::Release);
+        tokio::time::timeout(std::time::Duration::from_secs(2), session.wait())
+            .await
+            .expect("pending approval should end this session before the retry backoff");
+        assert_eq!(
+            controller.connection_state.get(),
+            WebClientConnectionState::PendingApproval
+        );
     }
 
     #[tokio::test]
@@ -798,6 +1012,7 @@ mod tests {
         let (minimum, adjusted) = HeartbeatPolicy::from_response(&HeartbeatResponse {
             heartbeat_interval_ms: Some(1),
             heartbeat_timeout_ms: Some(1),
+            ..Default::default()
         });
         assert!(adjusted);
         assert_eq!(
@@ -809,6 +1024,7 @@ mod tests {
         let (maximum, adjusted) = HeartbeatPolicy::from_response(&HeartbeatResponse {
             heartbeat_interval_ms: Some(u32::MAX),
             heartbeat_timeout_ms: Some(u32::MAX),
+            ..Default::default()
         });
         assert!(adjusted);
         assert_eq!(
@@ -820,8 +1036,96 @@ mod tests {
         let (margin, adjusted) = HeartbeatPolicy::from_response(&HeartbeatResponse {
             heartbeat_interval_ms: Some(60_000),
             heartbeat_timeout_ms: Some(5_000),
+            ..Default::default()
         });
         assert!(adjusted);
         assert_eq!(margin.timeout_ms, 65_000);
+    }
+
+    #[test]
+    fn heartbeat_authentication_requires_an_explicit_server_decision() {
+        let state = ConnectionState::new();
+        state.transport_state(WebClientConnectionState::Authenticating);
+        assert_eq!(state.get(), WebClientConnectionState::Authenticating);
+        assert!(state.heartbeat_response(&HeartbeatResponse::default()));
+        assert_eq!(state.get(), WebClientConnectionState::Unknown);
+        assert!(state.heartbeat_response(&HeartbeatResponse {
+            auth_state: Some(HeartbeatAuthState::Authenticating as i32),
+            ..Default::default()
+        }));
+        assert_eq!(state.get(), WebClientConnectionState::Authenticating);
+        assert!(state.heartbeat_response(&HeartbeatResponse {
+            auth_state: Some(HeartbeatAuthState::Authorized as i32),
+            ..Default::default()
+        }));
+        assert_eq!(state.get(), WebClientConnectionState::Authorized);
+        state.transport_state(WebClientConnectionState::Disconnected);
+        assert_eq!(state.get(), WebClientConnectionState::Disconnected);
+    }
+
+    #[test]
+    fn heartbeat_authentication_denial_remains_visible_during_redial() {
+        for (response_state, expected_state) in [
+            (
+                HeartbeatAuthState::Rejected,
+                WebClientConnectionState::Rejected,
+            ),
+            (
+                HeartbeatAuthState::PendingApproval,
+                WebClientConnectionState::PendingApproval,
+            ),
+        ] {
+            let state = ConnectionState::new();
+            assert!(!state.heartbeat_response(&HeartbeatResponse {
+                auth_state: Some(response_state as i32),
+                ..Default::default()
+            }));
+            assert_eq!(state.retry_interval(), AUTH_RETRY_INTERVAL);
+            for transport_state in [
+                WebClientConnectionState::Disconnected,
+                WebClientConnectionState::Connecting,
+                WebClientConnectionState::Authenticating,
+            ] {
+                state.transport_state(transport_state);
+                assert_eq!(state.get(), expected_state);
+            }
+            assert!(state.heartbeat_response(&HeartbeatResponse {
+                auth_state: Some(HeartbeatAuthState::Authenticating as i32),
+                ..Default::default()
+            }));
+            assert_eq!(state.get(), expected_state);
+            assert!(state.heartbeat_response(&HeartbeatResponse {
+                auth_state: Some(HeartbeatAuthState::Authorized as i32),
+                ..Default::default()
+            }));
+            assert_eq!(state.get(), WebClientConnectionState::Authorized);
+            assert_eq!(state.retry_interval(), RETRY_INTERVAL);
+        }
+    }
+
+    #[test]
+    fn heartbeat_legacy_or_unknown_auth_response_replaces_an_obsolete_denial() {
+        for previous in [
+            HeartbeatAuthState::Rejected,
+            HeartbeatAuthState::PendingApproval,
+        ] {
+            for response_state in [
+                None,
+                Some(HeartbeatAuthState::Unspecified as i32),
+                Some(i32::MAX),
+            ] {
+                let state = ConnectionState::new();
+                assert!(!state.heartbeat_response(&HeartbeatResponse {
+                    auth_state: Some(previous as i32),
+                    ..Default::default()
+                }));
+                assert!(state.heartbeat_response(&HeartbeatResponse {
+                    auth_state: response_state,
+                    ..Default::default()
+                }));
+                assert_eq!(state.get(), WebClientConnectionState::Unknown);
+                assert_eq!(state.retry_interval(), RETRY_INTERVAL);
+            }
+        }
     }
 }

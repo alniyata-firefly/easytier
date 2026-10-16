@@ -20,6 +20,11 @@ pub(super) struct WebhookHeartbeatValidation {
     pub(super) binding_version: u64,
 }
 
+enum HeartbeatValidationResult {
+    Authorized(WebhookHeartbeatValidation),
+    Rejected { pending_rebind: bool },
+}
+
 pub(super) struct WebhookValidationInput {
     pub(super) storage: Storage,
     pub(super) webhook_config: SharedWebhookConfig,
@@ -44,7 +49,7 @@ pub(super) fn retry_delay(machine_id: uuid::Uuid) -> Duration {
 async fn request_heartbeat_validation(
     input: &WebhookValidationInput,
     persisted_config_revision: Option<&str>,
-) -> anyhow::Result<Option<WebhookHeartbeatValidation>> {
+) -> anyhow::Result<HeartbeatValidationResult> {
     let webhook_req = crate::webhook::ValidateTokenRequest {
         token: input.req.user_token.clone(),
         machine_id: input.machine_id.to_string(),
@@ -80,13 +85,17 @@ async fn request_heartbeat_validation(
         .map_err(|e| anyhow::anyhow!("Webhook token validation failed: {:?}", e))?;
 
     if !resp.valid {
-        return Ok(None);
+        return Ok(HeartbeatValidationResult::Rejected {
+            pending_rebind: resp.pending_rebind,
+        });
     }
 
-    Ok(Some(WebhookHeartbeatValidation {
-        config_revision: resp.config_revision,
-        binding_version: resp.binding_version,
-    }))
+    Ok(HeartbeatValidationResult::Authorized(
+        WebhookHeartbeatValidation {
+            config_revision: resp.config_revision,
+            binding_version: resp.binding_version,
+        },
+    ))
 }
 
 async fn resolve_user_id(input: &WebhookValidationInput) -> anyhow::Result<i32> {
@@ -276,9 +285,18 @@ pub(super) async fn run_round(
         return Ok(());
     }
 
-    let Some(validation) = validation else {
-        apply_rejected(&session_data, &input, validation_change_epoch).await;
-        return Ok(());
+    let validation = match validation {
+        HeartbeatValidationResult::Authorized(validation) => validation,
+        HeartbeatValidationResult::Rejected { pending_rebind } => {
+            apply_rejected_with_reason(
+                &session_data,
+                &input,
+                validation_change_epoch,
+                pending_rebind,
+            )
+            .await;
+            return Ok(());
+        }
     };
 
     let user_id = resolve_user_id(&input).await?;
@@ -345,6 +363,15 @@ pub(super) async fn apply_rejected(
     input: &WebhookValidationInput,
     validation_change_epoch: u64,
 ) {
+    apply_rejected_with_reason(session_data, input, validation_change_epoch, false).await;
+}
+
+async fn apply_rejected_with_reason(
+    session_data: &std::sync::Weak<RwLock<SessionData>>,
+    input: &WebhookValidationInput,
+    validation_change_epoch: u64,
+    pending_rebind: bool,
+) {
     let Some(session_data) = session_data.upgrade() else {
         return;
     };
@@ -369,9 +396,11 @@ pub(super) async fn apply_rejected(
         tracing::info!(
             machine_id = %input.machine_id,
             client_url = %data.client_url,
+            pending_rebind,
             "webhook token rejected; marking session invalid and requiring client reconnect"
         );
         data.auth_state = SessionAuthState::Invalid;
+        data.pending_rebind = pending_rebind;
         data.webhook_validation_dirty = false;
         data.binding_version = None;
         let storage_token = data.storage_token.clone();
@@ -504,6 +533,7 @@ pub(super) async fn apply_success(
         });
         let storage_token = storage_token.clone();
         data.auth_state = SessionAuthState::Authorized;
+        data.pending_rebind = false;
         data.device_token_identity = identity;
         data.binding_version = Some(binding_version);
         if is_new_storage_token {

@@ -384,7 +384,16 @@ impl Db {
         let owner: UserIdInDb = row.try_get("user_id").map_err(sqlx_db_error)?;
         let id: String = row.try_get("id").map_err(sqlx_db_error)?;
         let bound: Option<String> = row.try_get("machine_id").map_err(sqlx_db_error)?;
-        if bound.as_deref().is_some_and(|bound| bound != machine_id) {
+        if let Some(old_machine_id) = bound.as_deref().filter(|bound| *bound != machine_id) {
+            super::device_rebind_requests::record_mismatch(
+                &mut transaction,
+                owner,
+                &id,
+                row.try_get("auth_generation").map_err(sqlx_db_error)?,
+                old_machine_id,
+                &record,
+            )
+            .await?;
             transaction.commit().await.map_err(sqlx_db_error)?;
             return Ok(None);
         }

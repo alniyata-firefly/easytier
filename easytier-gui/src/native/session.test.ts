@@ -4,6 +4,7 @@ const fixture = vi.hoisted(() => ({
   platform: 'windows', mode: { mode: 'normal' } as Record<string, unknown>,
   configs: [] as Array<{ config: { instance_id: string }; source: string }>, enabled: [] as string[],
   running: true, status: 'NotInstalled',
+  managementState: 'authorized',
   paused: false,
   stopLocalClient: vi.fn(), resumeLocalClient: vi.fn(), suspendMobileVpnService: vi.fn(), resumeMobileVpnService: vi.fn(),
   consumePendingMobileVpnTileAction: vi.fn(), syncMobileVpnService: vi.fn(),
@@ -19,6 +20,7 @@ vi.mock('./backend', () => ({
   sendConfigs: fixture.sendConfigs, initWebClient: fixture.initWebClient, getServiceStatus: fixture.getServiceStatus,
   initService: fixture.initService, setServiceStatus: fixture.setServiceStatus,
   isClientRunning: fixture.isClientRunning, isWebClientConnected: async () => true,
+  getWebClientStatus: async () => fixture.managementState,
   listNetworkInstanceIds: async () => ({ running_inst_ids: [], disabled_inst_ids: [] }),
   stopLocalClient: fixture.stopLocalClient, resumeLocalClient: fixture.resumeLocalClient,
 }))
@@ -48,6 +50,7 @@ beforeEach(() => {
   fixture.enabled = []
   fixture.status = 'NotInstalled'
   fixture.running = true
+  fixture.managementState = 'authorized'
   fixture.paused = false
   fixture.tileHandler = undefined
   fixture.stopLocalClient.mockReset().mockResolvedValue(undefined)
@@ -66,6 +69,42 @@ beforeEach(() => {
 })
 
 describe('native client lifecycle boundaries', () => {
+  it('keeps local Core readiness separate from management authentication and approval', async () => {
+    fixture.platform = 'android'
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
+    fixture.managementState = 'authenticating'
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: false, managementState: 'authenticating' })
+    fixture.managementState = 'pending_approval'
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: false, managementState: 'pending_approval' })
+    fixture.managementState = 'rejected'
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: false, managementState: 'rejected' })
+    fixture.managementState = 'authorized'
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, managementState: 'authorized' })
+    await session.stopLocalClient()
+    expect(session.getSnapshot()).toMatchObject({ connected: false, managementConnected: false, managementState: 'disconnected', clientPaused: true })
+    session.dispose()
+  })
+
+  it('does not infer authorization for an older server without an explicit auth response', async () => {
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
+    fixture.managementState = 'unknown'
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: false, managementState: 'unknown' })
+    await session.applyMode({ mode: 'normal' })
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: false, managementState: 'disconnected' })
+    session.dispose()
+  })
+
   it('pauses the whole Android client without forgetting management credentials or enabled instances', async () => {
     fixture.platform = 'android'
     fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }

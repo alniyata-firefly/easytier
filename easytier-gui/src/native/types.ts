@@ -34,12 +34,14 @@ export interface RemoteMode extends ManagementConfiguration {
 }
 export type Mode = NormalMode | ServiceMode | RemoteMode
 export interface ConfigServerCredentials { address: string; token: string }
+export type ManagementConnectionState = 'disconnected' | 'connecting' | 'authenticating' | 'authorized' | 'rejected' | 'pending_approval' | 'unknown'
 export interface SessionSnapshot {
   platform: string
   version: string
   mode: Mode
   connected: boolean
   managementConnected: boolean
+  managementState: ManagementConnectionState
   clientPaused: boolean
   serviceStatus: ServiceStatus
   busy: boolean

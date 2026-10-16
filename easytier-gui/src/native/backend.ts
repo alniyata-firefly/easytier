@@ -3,7 +3,7 @@ import { normalizeUplinkForTarget } from '../../../easytier-web/frontend-lib/src
 import { invoke } from '@tauri-apps/api/core'
 import * as Network from '../../../easytier-web/frontend-lib/src/types/network'
 import type * as Api from '../../../easytier-web/frontend-lib/src/modules/api'
-import type { ServiceOptions, ServiceStatus } from './types'
+import type { ManagementConnectionState, ServiceOptions, ServiceStatus } from './types'
 import { loadStoredConfigs } from './storage'
 
 export const parseNetworkConfig = (cfg: Network.NetworkConfig) => invoke<string>('parse_network_config', { cfg: Network.toBackendNetworkConfig(cfg) })
@@ -41,6 +41,8 @@ export const initRpcConnection = (isNormalMode: boolean, url?: string) => invoke
 export const isClientRunning = () => invoke<boolean>('is_client_running')
 export const initWebClient = (url?: string) => invoke('init_web_client', { url })
 export const isWebClientConnected = () => invoke<boolean>('is_web_client_connected')
+export const getWebClientStatus = () => invoke<ManagementConnectionState>('get_web_client_status')
+export const getManagementDeviceId = () => invoke<string>('get_management_device_id')
 export const stopLocalClient = () => invoke<void>('stop_local_client')
 export const resumeLocalClient = () => invoke<void>('resume_local_client')
 

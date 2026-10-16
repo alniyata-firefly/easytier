@@ -25,6 +25,8 @@
 .traffic-legend-rx { background: var(--chart-2); }
 .client-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
 .setting-actions { margin-top: 16px; }
+.management-device-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.management-device-id code { min-width: 0; flex: 1; overflow-wrap: anywhere; }
 .endpoint-cell { overflow-wrap: anywhere; min-width: 180px; }
 .event-list { display: flex; flex-direction: column; gap: 10px; }
 .event-list .code-block { margin: 0; }
@@ -44,9 +46,10 @@
 @media (max-width: 600px) {
   .traffic-chart .chart-axis-label { font-size: 24px; }
   .client-topbar { height: 56px; padding: 0 16px; gap: 8px; }
-  .client-topbar-actions { gap: 10px; }
-  .client-topbar-actions .status { font-size: 11px; }
-  .client-brand { font-size: 17px; }
+  .client-topbar-actions { gap: 10px; min-width: 0; }
+  .client-topbar-actions .status { font-size: 11px; white-space: normal; min-width: 0; }
+  .client-topbar-actions .language-switcher { flex-shrink: 0; }
+  .client-brand { font-size: 17px; flex-shrink: 0; }
   .desktop-version { display: none; }
   .client-navigation { padding: 10px 16px; }
   .client-workspace { padding: 18px 16px; gap: 16px; }

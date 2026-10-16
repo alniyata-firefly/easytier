@@ -57,6 +57,8 @@ export function installMockTauri({ platform = 'windows' } = {}) {
       if (command === 'resume_local_client') { window.__MOCK_LOCAL_CLIENT_PAUSED__ = false; return; }
       if (command === 'is_client_running') return !window.__MOCK_LOCAL_CLIENT_PAUSED__;
       if (command === 'is_web_client_connected') return true;
+      if (command === 'get_web_client_status') return window.__MOCK_MANAGEMENT_STATUS__ || 'authorized';
+      if (command === 'get_management_device_id') return '11111111-2222-4333-8444-555555555555';
       if (command === 'get_service_status') return window.__MOCK_SERVICE_STATUS__ || 'NotInstalled';
       if (command === 'set_service_status') { window.__MOCK_SERVICE_STATUS__ = args.enable ? 'Running' : 'Stopped'; return; }
       if (command === 'init_service') { window.__MOCK_SERVICE_STATUS__ = args.opts ? 'Stopped' : 'NotInstalled'; return; }

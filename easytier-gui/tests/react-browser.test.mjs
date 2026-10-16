@@ -151,7 +151,7 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
       await modes.getByRole('button', { name: '保存', exact: true }).click(); await modes.waitFor({ state: 'hidden' });
       const installed = await page.evaluate(() => window.__MOCK_CALLS__.findLast(call => call.command === 'init_service' && call.args.opts).args.opts);
       assert.equal(installed.config_server, 'udp://192.0.2.1:22020/mock-token-for-tests');
-      await page.getByText('管理连接状态未知', { exact: true }).waitFor();
+      await page.getByText('管理服务器认证状态未知', { exact: true }).first().waitFor();
       await page.getByRole('button', { name: '网络', exact: true }).click();
       await page.evaluate(() => { window.__MOCK_HOLD_META__ = true; });
       await page.getByRole('button', { name: '刷新', exact: true }).click();

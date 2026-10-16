@@ -38,7 +38,7 @@ jobs:
         run: pnpm --dir easytier-web/frontend exec playwright install --with-deps chromium
       - name: Verify member status and network settings in Chromium
         working-directory: easytier-web/frontend
-        run: node --test --test-concurrency=1 tests/network-member-runtime-browser.test.mjs tests/network-transport-browser.test.mjs tests/network-settings-restore-browser.test.mjs tests/advanced-node-browser.test.mjs
+        run: node --test --test-concurrency=1 tests/network-member-runtime-browser.test.mjs tests/network-transport-browser.test.mjs tests/network-settings-restore-browser.test.mjs tests/advanced-node-browser.test.mjs tests/device-rebind-browser.test.mjs
       - name: Verify the desktop React application in Chromium
         env:
           ET_GUI_QA_URL: http://127.0.0.1:1420
@@ -64,6 +64,8 @@ jobs:
           pnpm --dir easytier-gui exec node --test --test-concurrency=1 tests/react-browser.test.mjs tests/runtime-metadata.browser.test.mjs tests/runtime-routes.browser.test.mjs
       - name: Verify local configurations without a running client
         run: pnpm --dir easytier-gui exec node --test --test-concurrency=1 tests/local-config-offline-browser.test.mjs
+      - name: Verify management authentication independently of local client state
+        run: pnpm --dir easytier-gui exec node --test --test-concurrency=1 tests/management-auth-browser.test.mjs
   workflow:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
