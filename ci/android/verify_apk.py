@@ -30,6 +30,15 @@ def run(command, environment=None):
     return result.stdout
 
 
+def check_package_identity(badging, version):
+    package = re.search(r"^package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'", badging, re.M)
+    observed = package.groups() if package else None
+    expected = (APPLICATION_ID, str(VERSION_CODE), version)
+    check(observed == expected,
+          "APK package/version identity changed: "
+          + json.dumps({"expected": expected, "observed": observed}, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apk", type=Path, required=True)
@@ -57,8 +66,7 @@ def main():
     check(len(fingerprints) == 1 and fingerprints[0].replace(":", "").lower() == CERTIFICATE_SHA256,
           "APK signer differs from the existing adapted release certificate")
     badging = run([aapt, "dump", "badging", args.apk])
-    package = re.search(r"^package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'", badging, re.M)
-    check(package and package.groups() == (APPLICATION_ID, str(VERSION_CODE), version), "APK package/version identity changed")
+    check_package_identity(badging, version)
     check("platformBuildVersionCode='36'" in badging, "APK was not compiled against Android API 36")
     check(re.search(r"^sdkVersion:'24'$", badging, re.M), "APK minSdk must remain 24")
     check(re.search(r"^targetSdkVersion:'34'$", badging, re.M), "APK targetSdk must remain 34")

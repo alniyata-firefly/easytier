@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import struct
@@ -14,9 +15,33 @@ import zipfile
 import build
 from signing import CERTIFICATE_SHA256, SECRETS, property_value, require_secrets, signing_inputs
 from verify_page_size import inspect_native_libraries
+from verify_apk import check_package_identity
 
 
 class AndroidCiTests(unittest.TestCase):
+    def test_apk_identity_accepts_the_exact_adapted_release(self):
+        check_package_identity(
+            "package: name='com.kkrainbow.easytier.adapted' versionCode='2007003' versionName='2.7.2' platformBuildVersionCode='36'\n",
+            "2.7.2",
+        )
+
+    def test_apk_identity_rejects_each_changed_field_and_reports_observed_values(self):
+        expected = ("com.kkrainbow.easytier.adapted", "2007003", "2.7.2")
+        for index, replacement in enumerate(["com.kkrainbow.easytier", "2007002", "2.7.1"]):
+            observed = list(expected)
+            observed[index] = replacement
+            badging = "package: name='%s' versionCode='%s' versionName='%s'\n" % tuple(observed)
+            with self.subTest(field=index), self.assertRaises(RuntimeError) as failure:
+                check_package_identity(badging, "2.7.2")
+            diagnostic = json.loads(str(failure.exception).split(": ", 1)[1])
+            self.assertEqual(diagnostic, {"expected": list(expected), "observed": observed})
+
+    def test_apk_identity_rejects_missing_package_metadata_explicitly(self):
+        with self.assertRaises(RuntimeError) as failure:
+            check_package_identity("sdkVersion:'24'\n", "2.7.2")
+        diagnostic = json.loads(str(failure.exception).split(": ", 1)[1])
+        self.assertIsNone(diagnostic["observed"])
+
     def test_prefetch_covers_all_platforms_before_locked_offline_metadata(self):
         environment = {name: "fixture-signing-value" for name in SECRETS}
         environment.update({"ET_ANDROID_KEYSTORE_PROPERTIES": "/fixture/private/release.properties",

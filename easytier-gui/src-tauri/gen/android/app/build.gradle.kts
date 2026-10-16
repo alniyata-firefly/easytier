@@ -36,31 +36,39 @@ val privateKeystoreProperties = Properties().apply {
 
 val versionPattern = Regex("""^(\d+)\.(\d+)\.(\d+)$""")
 
-val tauriVersionName = tauriProperties.getProperty("tauri.android.versionName")?.ifBlank { null } ?: run {
-    val tauriConfFile = file("../../../tauri.conf.json")
-    check(tauriConfFile.exists()) { "Missing tauri.conf.json at ${tauriConfFile.path}" }
-
-    val tauriConf = tauriConfFile.reader(Charsets.UTF_8).use { JsonSlurper().parse(it) as? Map<*, *> }
-        ?: error("Failed to parse ${tauriConfFile.path} as a JSON object")
-    tauriConf["version"] as? String
-        ?: error("Missing string field \"version\" in ${tauriConfFile.path}")
+val tauriConfFile = file("../../../tauri.conf.json")
+check(tauriConfFile.exists()) { "Missing tauri.conf.json at ${tauriConfFile.path}" }
+val tauriConf = tauriConfFile.reader(Charsets.UTF_8).use { JsonSlurper().parse(it) as? Map<*, *> }
+    ?: error("Failed to parse ${tauriConfFile.path} as a JSON object")
+val tauriVersionName = tauriConf["version"] as? String
+    ?: error("Missing string field \"version\" in ${tauriConfFile.path}")
+val versionNameProp = tauriProperties.getProperty("tauri.android.versionName")?.ifBlank { null }
+check(versionNameProp == null || versionNameProp == tauriVersionName) {
+    "Property \"tauri.android.versionName\" conflicts with tauri.conf.json version"
 }
 
 val tauriVersionMatch = versionPattern.matchEntire(tauriVersionName)
     ?: error("Android version must use x.y.z format, but got \"$tauriVersionName\"")
 
-val tauriVersionCode = if (tauriProperties.getProperty("tauri.android.versionName")?.ifBlank { null } != null) {
-    val versionCodeProp = tauriProperties.getProperty("tauri.android.versionCode")
-    if (versionCodeProp != null) {
-        versionCodeProp.toIntOrNull()
-            ?: error("Property \"tauri.android.versionCode\" must be an integer, but got \"$versionCodeProp\"")
-    } else {
-        val (major, minor, patch) = tauriVersionMatch.destructured
-        major.toInt() * 1_000_000 + minor.toInt() * 1_000 + patch.toInt()
-    }
+val configuredVersionCode = ((tauriConf["bundle"] as? Map<*, *>)?.get("android") as? Map<*, *>)?.get("versionCode")
+val tauriVersionCode = if (configuredVersionCode != null) {
+    check(configuredVersionCode is Number) { "bundle.android.versionCode must be an integer" }
+    configuredVersionCode.toString().toIntOrNull()
+        ?: error("bundle.android.versionCode must be an integer within Android's supported range")
 } else {
     val (major, minor, patch) = tauriVersionMatch.destructured
-    major.toInt() * 1_000_000 + minor.toInt() * 1_000 + patch.toInt()
+    (major.toLong() * 1_000_000 + minor.toLong() * 1_000 + patch.toLong()).also {
+        check(it in 1..2_100_000_000L) { "Derived Android versionCode is outside the supported range" }
+    }.toInt()
+}
+check(tauriVersionCode in 1..2_100_000_000) { "Android versionCode is outside the supported range" }
+val versionCodeProp = tauriProperties.getProperty("tauri.android.versionCode")?.ifBlank { null }
+if (versionCodeProp != null) {
+    val propertyVersionCode = versionCodeProp.toIntOrNull()
+        ?: error("Property \"tauri.android.versionCode\" must be an integer")
+    check(propertyVersionCode == tauriVersionCode) {
+        "Property \"tauri.android.versionCode\" conflicts with tauri.conf.json Android versionCode"
+    }
 }
 
 android {
