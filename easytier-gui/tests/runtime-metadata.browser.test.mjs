@@ -9,7 +9,7 @@ for (const scenario of [
   { mode: { mode: 'service', config_dir: '/mock/config', rpc_portal: '127.0.0.1:15999', file_log_level: 'info', file_log_dir: '/mock/logs' }, heading: 'Local lab' },
   { mode: { mode: 'remote', remote_rpc_address: 'tcp://192.0.2.44:15999' }, heading: 'Remote core only' },
 ]) test(`metadata permissions through ${scenario.mode.mode} GUI RPC entry`, async () => {
-  const browser = await chromium.launch({ executablePath: '/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome', headless: true, args: ['--no-sandbox'] });
+  const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || undefined, headless: true, args: ['--no-sandbox'] });
   const context = await browser.newContext(), page = await context.newPage();
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(installMockTauri, { platform: 'windows' });

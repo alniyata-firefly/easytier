@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import artifacts
 from plan_packages import plan
+from public_assets import validate_frontend_tree
 
 COMMIT = "a" * 40
 VERSION = "2.7.2"
@@ -98,10 +99,52 @@ class PackagePlanning(unittest.TestCase):
 
     def test_configured_signing_enables_android(self):
         for name in ("ANDROID_KEYSTORE_BASE64", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD"):
-            self.env[name] = "synthetic-fixture"
+            self.env['HAS_' + name] = "true"
         outputs, warning = plan(self.env, VERSION)
         self.assertEqual(outputs["android"], "true")
         self.assertIsNone(warning)
+
+
+class FrontendPublication(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        (self.root / 'react-bundle-audit.json').write_text(json.dumps({
+            'framework': 'react', 'react_module_count': 1, 'legacy_vue_module_count': 0}))
+        (self.root / 'index.html').write_text('<html>React fixture</html>')
+
+    def test_refuses_signing_material_and_dotenv(self):
+        for filename in ('release.p12', 'upload.jks', 'signing.properties', 'database.sqlite3', '.env.production', 'client.key', 'trace.har'):
+            path = self.root / filename
+            path.write_text('synthetic-sensitive-file')
+            with self.subTest(filename=filename), self.assertRaises(ValueError):
+                validate_frontend_tree(self.root)
+            path.unlink()
+
+    def test_refuses_private_material_disguised_as_text(self):
+        for key_type in ('', 'RSA ', 'EC ', 'DSA ', 'OPENSSH ', 'ENCRYPTED '):
+            (self.root / 'notes.txt').write_text('-----BEGIN ' + key_type + 'PRIVATE KEY-----\n' + 'A' * 128 + '\n-----END ' + key_type + 'PRIVATE KEY-----')
+            with self.subTest(key_type=key_type), self.assertRaises(ValueError):
+                validate_frontend_tree(self.root)
+        (self.root / 'notes.txt').write_text('-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,fixture\n' + 'A' * 128 + '\n-----END RSA PRIVATE KEY-----')
+        with self.assertRaises(ValueError):
+            validate_frontend_tree(self.root)
+
+    def test_refuses_vue_report_and_private_directories(self):
+        (self.root / 'private').mkdir()
+        with self.assertRaises(ValueError):
+            validate_frontend_tree(self.root)
+        (self.root / 'private').rmdir()
+        (self.root / 'react-bundle-audit.json').write_text(json.dumps({
+            'framework': 'react', 'react_module_count': 1, 'legacy_vue_module_count': 1}))
+        with self.assertRaises(ValueError):
+            validate_frontend_tree(self.root)
+
+    def test_accepts_public_react_assets_and_font_licenses(self):
+        (self.root / 'fonts').mkdir()
+        (self.root / 'fonts/LICENSE.txt').write_text('Synthetic font license fixture')
+        self.assertEqual(validate_frontend_tree(self.root)['framework'], 'react')
 
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Verify real desktop payloads before collecting same-commit CI artifacts."""
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,8 +9,11 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tarfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from frontend_assets import verify_native_assets
 from branding import ico_images, verify_icons
 from prepare import IDENTIFIER, PRODUCT, TARGETS, git, sha
 
@@ -28,35 +30,7 @@ def one(paths, label):
 
 
 def native_assets(release, binary, source, manifest):
-    decoded = {}
-    html = []
-    # Node is already required by the React build. Its standard Brotli decoder
-    # avoids Linux-only shared libraries or an extra native Python dependency.
-    records = json.loads(run(['node', Path(__file__).with_name('decode-assets.mjs'), release]).stdout)
-    for item in records:
-        encoded = Path(item['file']).read_bytes()
-        if not encoded or encoded not in binary:
-            continue
-        decoded[item['decoded_sha256']] = {'encoding': item['encoding'], 'encoded_bytes': len(encoded),
-                                          'encoded_sha256': hashlib.sha256(encoded).hexdigest()}
-        if item['html'] is not None:
-            html.append(item['html'])
-    checks = []
-    for item in manifest['frontend_files']:
-        path = source / 'easytier-gui/dist' / item['path']
-        if path.stat().st_size != item['bytes'] or sha(path) != item['sha256']:
-            raise RuntimeError('Frozen frontend changed: ' + item['path'])
-        if item['path'] == 'index.html':
-            continue  # Tauri injects its production CSP into the entry HTML.
-        if item['sha256'] not in decoded:
-            raise RuntimeError('Fresh frontend content is absent from the native binary: ' + item['path'])
-        checks.append({'path': item['path'], 'sha256': item['sha256'], **decoded[item['sha256']]})
-    if not any(all('/' + entry in text for entry in manifest['entry_assets']) for text in html):
-        raise RuntimeError('Embedded entry HTML does not reference the frozen React modules/styles')
-    if b'fonts/font-notices.html' not in binary:
-        raise RuntimeError('Embedded font license page is missing its runtime route')
-    return {'non_entry_assets_verified': len(checks), 'entry_html_verified': True,
-            'font_notice_full_html_verified': True, 'assets': checks}
+    return verify_native_assets(release, binary, source / 'easytier-gui/dist', manifest)
 
 
 def windows(release, binary_path, source, work, frozen):

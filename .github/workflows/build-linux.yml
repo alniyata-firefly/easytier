@@ -28,7 +28,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -37,24 +37,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential musl-tools pkg-config cmake clang iproute2
           command -v musl-gcc
-      - uses: arduino/setup-protoc@v3
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
           version: '35.1'
           repo-token: ${{ github.token }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           toolchain: '1.95'
           target: ${{ matrix.target }}
           cache: false
           rustflags: ''
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: web-static
           path: downloaded-web
       - name: Restore and verify the frontend built from this commit
         run: |
           python3 ci/artifacts.py restore-web --input downloaded-web
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: linux-${{ matrix.target }}-rust195-thin8
           cache-targets: true
@@ -71,19 +71,47 @@ jobs:
           TARGET: ${{ matrix.target }}
           ARCH: ${{ matrix.arch }}
         run: python3 ci/artifacts.py linux --target "$TARGET" --arch "$ARCH"
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: '22'
-      - name: Test the built Web and Core over isolated loopback UDP
+      - name: Test embedded React assets, member lifecycle and network settings
         env:
           TARGET: ${{ matrix.target }}
         run: |
           sudo env EASYTIER_WEB_BIN="$PWD/target/$TARGET/release/easytier-web" \
             EASYTIER_CORE_BIN="$PWD/target/$TARGET/release/easytier-core" \
+            ET_EXPECTED_FRONTEND_DIST="$PWD/easytier-web/frontend/dist" \
+            ET_EXPECTED_SOURCE_COMMIT="$GITHUB_SHA" \
             ET_TEST_NETWORK_ISOLATED=1 ET_NATIVE_E2E_OUTPUT="$RUNNER_TEMP/native-e2e" \
             unshare --net sh -c 'ip link set lo up; exec "$@"' sh \
-            "$(command -v node)" --test easytier-web/frontend/tests/member-offline-native-e2e.test.mjs
-      - uses: actions/upload-artifact@v5
+            "$(command -v node)" --test --test-concurrency=1 \
+            easytier-web/frontend/tests/native-web-assets-e2e.test.mjs \
+            easytier-web/frontend/tests/member-offline-native-e2e.test.mjs \
+            easytier-web/frontend/tests/network-transport-native-e2e.test.mjs
+      - name: Make only structured test results readable by the artifact uploader
+        if: always()
+        run: |
+          sudo env ET_PROOF_ROOT="$RUNNER_TEMP/native-e2e" ET_PROOF_UID="$(id -u)" ET_PROOF_GID="$(id -g)" python3 - <<'PY'
+          import os, pathlib
+          root = pathlib.Path(os.environ['ET_PROOF_ROOT'])
+          uid, gid = int(os.environ['ET_PROOF_UID']), int(os.environ['ET_PROOF_GID'])
+          if root.is_dir() and not root.is_symlink():
+              os.chown(root, uid, gid)
+              for proof in root.glob('*/proof.json'):
+                  if proof.is_file() and not proof.is_symlink() and not proof.parent.is_symlink():
+                      os.chown(proof.parent, uid, gid)
+                      os.chown(proof, uid, gid)
+          PY
+      - name: Upload structured native test results
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          overwrite: true
+          name: native-proof-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/native-e2e/**/proof.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           overwrite: true
           name: linux-${{ matrix.arch }}

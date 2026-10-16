@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -12,7 +11,7 @@ import { chromium } from 'playwright';
 const frontend = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const esbuild = createRequire(require.resolve('vite'))('esbuild');
-const output = process.env.ET_MOBILE_UPLINK_QA_OUTPUT || resolve(frontend, '../../../evidence/web-mobile-uplink');
+const output = process.env.ET_MOBILE_UPLINK_QA_OUTPUT || join(tmpdir(), 'easytier-web-mobile-uplink-qa');
 const instanceId = '20000000-0000-4000-8000-000000000001';
 
 test('Web member and instance editors gate by target OS and normalize mobile JSON/TOML saves', { timeout: 180000 }, async context => {
@@ -55,7 +54,7 @@ test('Web member and instance editors gate by target OS and normalize mobile JSO
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   context.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
-  const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || (existsSync('/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome') ? '/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome' : undefined), headless: true, args: ['--no-sandbox'] });
+  const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || undefined, headless: true, args: ['--no-sandbox'] });
   context.after(() => browser.close());
   const proof = { scope: 'Real React NetworkMembers/DevicePage through target list_machines metadata to editors and captured synthetic API/RPC payloads; no native Core or production access', cases: [] };
   context.after(() => writeFile(join(output, 'proof.json'), JSON.stringify(proof, null, 2)));

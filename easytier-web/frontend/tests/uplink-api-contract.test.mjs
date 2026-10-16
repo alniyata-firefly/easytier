@@ -20,7 +20,7 @@ test('interface discovery addresses the target RPC and does not invalidate read 
   let summaries = 0;
   api.client.defaults.adapter = async config => {
     calls.push({ url: config.url, body: config.data ? JSON.parse(config.data) : undefined });
-    const data = config.url === '/summary' ? { device_count: ++summaries } : { supported: true, interfaces: [{ name: 'Ethernet 2', addresses: [{ address: '10.7.0.46', prefix_length: 24 }], manual_selectable: true }] };
+    const data = config.url === '/summary' ? { device_count: ++summaries } : { supported: true, interfaces: [{ name: 'Ethernet 2', addresses: [{ address: '192.0.2.46', prefix_length: 24 }], manual_selectable: true }] };
     return { data, status: 200, statusText: 'OK', headers: {}, config };
   };
   const machine = '01234567-89ab-cdef-0123-456789abcdef';
@@ -28,7 +28,7 @@ test('interface discovery addresses the target RPC and does not invalidate read 
   await api.get_summary();
   const inventory = await api.get_network_interfaces(machine, instance);
   assert.equal(inventory.interfaces[0].name, 'Ethernet 2');
-  assert.deepEqual(inventory.interfaces[0].addresses, ['10.7.0.46/24']);
+  assert.deepEqual(inventory.interfaces[0].addresses, ['192.0.2.46/24']);
   assert.deepEqual(calls[1], { url: `/machines/${machine}/proxy-rpc`, body: {
     service_name: 'api.manage.WebClientService', method_name: 'get_network_interfaces',
     payload: { inst_id: { part1: 0x89abcdef, part2: 0x01234567, part3: 0x89abcdef, part4: 0x01234567 } },

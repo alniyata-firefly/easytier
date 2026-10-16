@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, mkdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -12,7 +11,7 @@ import { chromium } from 'playwright';
 const frontend = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const esbuild = createRequire(require.resolve('vite'))('esbuild');
-const output = process.env.ET_LAYOUT_QA_OUTPUT || '/root/easytier-uplink-policy-20261015/runtime/ui-layout';
+const output = process.env.ET_LAYOUT_QA_OUTPUT || join(tmpdir(), 'easytier-console-layout-qa');
 const deviceId = '10000000-0000-4000-8000-000000000001', instanceId = '20000000-0000-4000-8000-000000000001';
 const uuid = value => { const hex = value.replaceAll('-', ''); return Object.fromEntries([1,2,3,4].map(part => [`part${part}`, parseInt(hex.slice((part - 1) * 8, part * 8), 16)])); };
 const network = { network_id: instanceId, display_name: 'Office network', network_name: 'office-net', networking_method: 'Standalone', virtual_cidr: '10.80.0.0/24', secure_mode: false, prefer_ipv6: true, member_count: 1, online_member_count: 0, network_secret: 'synthetic-only', peer_urls: [], deployment: { state: 'applied', devices: [] } };
@@ -37,7 +36,7 @@ test('console layout, navigation, global search and account popover use syntheti
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   context.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
-  const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || (existsSync('/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome') ? '/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome' : undefined), headless: true, args: ['--no-sandbox'] });
+  const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || undefined, headless: true, args: ['--no-sandbox'] });
   context.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   const errors = [], unexpected = [], checked = [];

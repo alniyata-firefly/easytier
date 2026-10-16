@@ -9,8 +9,11 @@ from pathlib import Path
 import re
 import struct
 import subprocess
+import sys
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from frontend_assets import verify_native_assets
 from dex_bridge import verify_apk_bridge
 from signing import APPLICATION_ID, CERTIFICATE_SHA256, VERSION_CODE
 from verify_page_size import extract_native_libs_from_manifest, inspect_native_libraries
@@ -35,6 +38,7 @@ def main():
     parser.add_argument("--jdk", type=Path, required=True)
     parser.add_argument("--native", type=Path, required=True)
     parser.add_argument("--commit", required=True)
+    parser.add_argument("--frontend-manifest", type=Path, required=True)
     parser.add_argument("--proof", type=Path, required=True)
     args = parser.parse_args()
     check(bool(re.fullmatch("[0-9a-f]{40}", args.commit)), "full source commit required")
@@ -95,12 +99,10 @@ def main():
         core_version = f"{version}-{description}"
         check(core_version.encode() in library and (core_version + "~").encode() not in library,
               "embedded Core does not report this clean source version")
-        frontend = args.source / "easytier-gui/dist"
-        assets = [path.relative_to(frontend).as_posix() for path in frontend.rglob("*") if path.is_file()]
-        check("index.html" in assets and any(name.startswith("assets/") and name.endswith(".js") for name in assets),
-              "React production assets are missing")
-        check(all(name.encode() in library for name in assets), "JNI is missing a production frontend asset key (custom-protocol required)")
-        check(any("font" in name.lower() and "notice" in name.lower() for name in assets), "font notices are missing")
+        frozen = json.loads(args.frontend_manifest.read_text())
+        check(frozen["source_commit"] == args.commit and frozen["version"] == version,
+              "frontend input freeze differs from the requested release")
+        frontend_proof = verify_native_assets(args.native.parent, library, args.source / "easytier-gui/dist", frozen)
         for entry in archive.namelist():
             check(not entry.lower().endswith((".jks", ".keystore", ".p12", "keystore.properties", "release.properties")),
                   "private signing files were packaged")
@@ -115,12 +117,14 @@ def main():
         "signing_certificate_sha256": CERTIFICATE_SHA256, "signature_verified": True,
         "compile_sdk": 36, "target_sdk": 34, "min_sdk": 24, "android_gradle_plugin": "8.10.1",
         "all_native_libraries_16k_compatible": True, "zip_16k_alignment": True,
-        "embedded_frontend_asset_count": len(assets), "embedded_core_verified": True,
+        "embedded_frontend_asset_count": len(frozen["frontend_files"]), "embedded_core_verified": True,
+        "embedded_frontend": frontend_proof,
         "dex_reflection_bridge": bridge, "physical_android_device_tested": False,
     }
     args.proof.write_text(json.dumps(proof, indent=2) + "\n")
     print(json.dumps({"status": "PASS", "artifact": args.apk.name, "core_version": core_version,
-                      "all_native_libraries_16k_compatible": True, "embedded_frontend_asset_count": len(assets)}))
+                      "all_native_libraries_16k_compatible": True,
+                      "embedded_frontend_asset_count": len(frozen["frontend_files"])}))
 
 
 if __name__ == "__main__":

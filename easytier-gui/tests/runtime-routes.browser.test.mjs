@@ -23,7 +23,7 @@ for (const scenario of [
   { name: 'omitted fields and real prefixes', fixture: routeFixture, rows: 4 },
   { name: 'omitted empty route list', fixture: { running: true }, rows: 0 },
 ]) test(`routes click with protobuf JSON: ${scenario.name}`, async () => {
-  const browser = await chromium.launch({ executablePath: '/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome', headless: true, args: ['--no-sandbox'] });
+  const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || undefined, headless: true, args: ['--no-sandbox'] });
   const context = await browser.newContext(), page = await context.newPage();
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(installMockTauri, { platform: 'windows' });

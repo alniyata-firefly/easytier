@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -30,7 +29,7 @@ for (const target of ['web', 'gui', 'gui-android', 'gui-ios']) test(`${target} u
   i18nReady.then(()=>createRoot(document.getElementById('root')).render(<React.Suspense fallback="Loading"><NetworkEditor initial={initial} client={client} allowRemoteSave={true} supportsUplinkSelection={false} onClose={()=>{}} onSaved={()=>{}}/></React.Suspense>));`;
   const desktopFixture = `import React, {useCallback,useState} from 'react'; import {createRoot} from 'react-dom/client'; import {NodeParameters} from ${JSON.stringify(component)}; import {i18nReady} from ${JSON.stringify(i18n)}; import {UplinkInventoryError} from ${JSON.stringify(inventoryModule)};
   const make=(name,addresses=[],extra={})=>({name,addresses,kind:'ethernet',up:true,selectable:true,...extra});
-  window.__INVENTORY__={interfaces:[make('eth0',['10.7.0.46/24','fd00:7::46/64']),make('Ethernet 2',['192.168.1.5/24']),make('备用网卡',[],{up:false}),make('wg0',['fd00:8::1/64'],{kind:'wireguard'}),make('lo',['127.0.0.1/8'],{kind:'loopback',selectable:false})]};window.__FAILURE__=undefined;window.__DEFER__=false;window.__CALLS__=0;
+  window.__INVENTORY__={interfaces:[make('eth0',['192.0.2.46/24','2001:db8:7::46/64']),make('Ethernet 2',['192.168.1.5/24']),make('备用网卡',[],{up:false}),make('wg0',['fd00:8::1/64'],{kind:'wireguard'}),make('lo',['127.0.0.1/8'],{kind:'loopback',selectable:false})]};window.__FAILURE__=undefined;window.__DEFER__=false;window.__CALLS__=0;
   function Fixture(){const[value,setValue]=useState(${JSON.stringify(initial)});const[valid,setValid]=useState(true);const load=useCallback(async()=>{window.__CALLS__++;if(window.__DEFER__)return new Promise(resolve=>window.__RESOLVE__=resolve);if(window.__FAILURE__)throw new UplinkInventoryError(window.__FAILURE__);return structuredClone(window.__INVENTORY__);},[]);return <main style={{maxWidth:700,margin:'24px auto',padding:16}}><NodeParameters loadUplinkInventory={load} mode=${JSON.stringify(target === 'web' ? 'member' : 'instance')} value={value} onPatch={patch=>setValue(old=>({...old,...patch}))} onValidityChange={setValid}/><button disabled={!valid} id="save">Save fixture</button><button id="saved-config" onClick={()=>setValue({mtu:1280,uplink:{mode:'manual',interfaces:['old adapter']}})}>Load saved fixture</button><pre id="value" style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{JSON.stringify(value)}</pre></main>};i18nReady.then(()=>createRoot(document.getElementById('root')).render(<React.Suspense fallback="Loading"><Fixture/></React.Suspense>));`;
   await esbuild.build({ stdin: { contents: unsupported ? mobileFixture : desktopFixture, resolveDir: frontend, loader: 'tsx' }, outfile, bundle: true, platform: 'browser', format: 'esm', jsx: 'automatic', loader: { '.svg': 'dataurl' }, logLevel: 'silent' });
   const bundle = await readFile(outfile);
@@ -44,7 +43,7 @@ for (const target of ['web', 'gui', 'gui-android', 'gui-ios']) test(`${target} u
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   context.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
-  const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || (existsSync('/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome') ? '/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome' : undefined), headless: true, args: ['--no-sandbox'] });
+  const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || undefined, headless: true, args: ['--no-sandbox'] });
   context.after(() => browser.close());
   const page = await browser.newPage(); page.setDefaultTimeout(7000);
   const errors = []; page.on('pageerror', error => errors.push(error.message));
@@ -81,7 +80,7 @@ for (const target of ['web', 'gui', 'gui-android', 'gui-ios']) test(`${target} u
   assert.equal(await popup.getByRole('checkbox', { name: 'lo', exact: true }).isDisabled(), true);
   assert.equal(await popup.getByRole('checkbox', { name: '备用网卡', exact: true }).isEnabled(), true);
   assert.equal(await popup.getByRole('checkbox', { name: 'wg0', exact: true }).isEnabled(), true);
-  assert.ok((await popup.textContent()).includes('fd00:7::46/64'));
+  assert.ok((await popup.textContent()).includes('2001:db8:7::46/64'));
   await popup.getByRole('checkbox', { name: 'eth0', exact: true }).check();
   await popup.getByRole('checkbox', { name: 'Ethernet 2', exact: true }).check();
   await page.waitForFunction(() => !document.getElementById('save').disabled);

@@ -52,9 +52,13 @@ normal build use the same Android link flags plus
 crate downloads are cached; native output is rebuilt for the checked-out commit.
 
 `verify_apk.py` checks the actual signer, package identity, SDK/AGP metadata,
-arm64 ELF architecture, Core version, native-output hash, every frontend asset
-key, reflected VPN/JNI bridge after R8, every native library's LOAD/RELRO
+arm64 ELF architecture, Core version, native-output hash, the frozen contents of
+every React asset (including the React bundle audit and full font notices),
+reflected VPN/JNI bridge after R8, every native library's LOAD/RELRO
 alignment, and APK ZIP alignment. A 4 KiB or incorrectly signed APK is rejected.
+The R8 gate includes `setClientEnabled`, its reflected boolean argument, saved
+pause preferences, explicit service-stop APIs and both services' pause guards;
+it follows renamed application helpers and closures through the actual mapping.
 These checks do not replace installation and VPN tests on an Android device.
 
 ## Local use

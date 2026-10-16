@@ -12,6 +12,7 @@ import subprocess
 import tarfile
 import tomllib
 from html.parser import HTMLParser
+from public_assets import validate_frontend_tree
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "easytier-web/frontend/dist"
@@ -95,9 +96,14 @@ def verify_web() -> dict:
     validate_manifest(DIST, manifest, commit, version)
     expected = {record["path"] for record in manifest["files"]} | {"source-manifest.json"}
     actual = {path.relative_to(DIST).as_posix() for path in DIST.rglob("*") if path.is_file()}
-    if actual != expected or "api_meta.js" in actual:
+    if actual != expected or "api_meta.js" in actual or any(path.startswith("config-generator/") for path in actual):
         raise ValueError("frontend contains unrecorded files or deployment-specific API metadata")
+    verify_react_bundle(DIST)
     return manifest
+
+
+def verify_react_bundle(dist: Path) -> dict:
+    return validate_frontend_tree(dist)
 
 
 def archive_tree(root: Path, output: Path) -> None:
@@ -126,8 +132,9 @@ def finish_artifact(output: Path, platform: str, paths: list[Path]) -> dict:
 
 def package_web() -> None:
     commit, version = source()
-    if not (DIST / "index.html").is_file() or not (DIST / "config-generator/index.html").is_file():
-        raise ValueError("build both the Web and config generator first")
+    if not (DIST / "index.html").is_file():
+        raise ValueError("build the React console first")
+    verify_react_bundle(DIST)
     # api_meta.js is served dynamically by the backend and must come from the target deployment.
     (DIST / "api_meta.js").unlink(missing_ok=True)
     (DIST / "source-manifest.json").unlink(missing_ok=True)

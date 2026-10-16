@@ -8,7 +8,7 @@
 
 | 项目 | 构建结果 | 签名要求 |
 | --- | --- | --- |
-| Web | React 控制台和配置生成器静态包 | 无 |
+| Web | 当前 React 控制台静态包 | 无 |
 | Linux x86_64 / ARM64 | 静态 musl Core、CLI、内嵌 Web | 无 |
 | Windows x64 GUI | 内嵌 Core 的安装包 | 默认没有 Authenticode 签名 |
 | macOS Intel / Apple Silicon GUI | 应用和 DMG | 默认未使用 Developer ID；可选正式签名 |
@@ -49,5 +49,15 @@
 `packages.yml` 协调 Web、Linux、GUI、Android 和最终汇总。原上游构建配置归档在 `.github/upstream-workflows/`，不再作为活动工作流执行。当前流程不调用上游 SignPath、Docker Hub、其他仓库发布或生产部署配置。
 
 Rust 工具链固定为 1.95，前端使用 Node.js 22 与 pnpm 10.12.4；依赖按 Cargo.lock、pnpm-lock.yaml 锁定。缓存按操作系统、架构、锁文件和编译参数隔离。首次构建需要下载 SDK 和完整编译 Rust，后续复用缓存；缓存不会打包进发行文件。
+
+默认发布只编译当前 React Web 和 React GUI，不编译、打包旧 Vue 配置生成器，也不需要为管理台生成 Rust/WASM。共享 TypeScript/Proto 模块直接从源码使用。旧 Vue 工具及组件保留为上游可选源码，未进入当前交付包。构建时检查实际模块图；出现 Vue/PrimeVue 运行时代码会失败，生成的审计报告不包含构建机绝对路径。
+
+## 公开文件与验收边界
+
+源码检查会拒绝新增的私钥、签名文件、运行数据库、部署私有目录和构建输出。上游原有的公开测试签名与开发环境样例，只按固定路径及内容 SHA256 白名单保留；发行 APK 必须使用 Secrets 中的现有私有签名，不能回落到公开测试签名。检查结果只输出路径与规则名，不输出命中的凭据内容。
+
+第三方 Actions 固定到完整提交 SHA。构建任务的 GitHub Token 只有源码读取权限，只有版本标签的草稿发布任务拥有仓库写权限；PR 检查不接收签名 Secrets。签名 Secrets 只传给对应平台任务，不使用整体继承。缓存限于依赖与指定 Rust 编译目录，不缓存临时签名目录、数据库或生产配置。
+
+前端打包额外拒绝私密目录、环境文件、密钥、调试记录和非网页文件。GUI/Android 核对真实原生二进制中的 React 资源字节；Linux 启动实际发行 Web，核对 HTTP 返回的所有前端文件与本次提交的独立构建输入。Linux 同时在仅有 loopback 的网络命名空间中测试成员离线和网络参数下发，测试产物只上传 `proof.json`，不上传原始日志、临时数据库或配置。浏览器检查使用模拟 Tauri bridge，不能代替真机 VPN 连接和 Android 生命周期验收。
 
 编译失败时，在相应平台任务中查看首个报错。修复提交后重新运行工作流；不要手工把不同提交的旧产物拼成一版发行。

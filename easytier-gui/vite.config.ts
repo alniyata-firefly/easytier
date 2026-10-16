@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite'
 import path from 'node:path'
+import { reactBundleAudit } from '../easytier-web/frontend-lib/src/build/reactBundleAudit'
 export default defineConfig({
+ plugins: [reactBundleAudit()],
  resolve: { alias: { '~/': `${path.resolve(__dirname, 'src')}/` } },
  esbuild: { jsx: 'automatic' }, clearScreen: false,
  server: { port: 1420, host: process.env.TAURI_DEV_HOST || '127.0.0.1', strictPort: true, watch: { ignored: ['**/src-tauri/**'] } },

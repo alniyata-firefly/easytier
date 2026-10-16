@@ -2,12 +2,15 @@
 """Freeze the React assets and prepare ignored, platform-specific CI inputs."""
 import argparse
 import hashlib
-from html.parser import HTMLParser
 import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from frontend_assets import Head, freeze_frontend
 
 TARGETS = {'x86_64-pc-windows-msvc', 'x86_64-apple-darwin', 'aarch64-apple-darwin'}
 IDENTIFIER = 'com.kkrainbow.easytier'
@@ -20,19 +23,6 @@ def sha(path):
 
 def git(source, *args):
     return subprocess.check_output(['git', *args], cwd=source, text=True).strip()
-
-
-class Head(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.entries = []
-
-    def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
-        if tag == 'script' and attrs.get('type') == 'module':
-            self.entries.append(attrs['src'].lstrip('/'))
-        if tag == 'link' and attrs.get('rel') == 'stylesheet':
-            self.entries.append(attrs['href'].lstrip('/'))
 
 
 def main():
@@ -52,20 +42,7 @@ def main():
     if windows['bundle']['externalBin'] != [] or 'easytier-core' not in cargo['dependencies']:
         raise RuntimeError('The GUI must contain Core as a Rust dependency, without external Core executables')
     dist = source / 'easytier-gui/dist'
-    head = Head()
-    head.feed((dist / 'index.html').read_text(encoding='utf-8'))
-    if not head.entries or not all((dist / name).is_file() for name in head.entries):
-        raise RuntimeError('React entry modules or styles are missing')
-    frontend = []
-    for path in sorted(dist.rglob('*')):
-        if path.is_symlink():
-            raise RuntimeError('Frontend assets must not be symlinks')
-        if path.is_file():
-            if path.suffix.lower() in {'.map', '.env', '.db', '.sqlite', '.key', '.pem', '.log', '.har'}:
-                raise RuntimeError('Unexpected private or development file in GUI assets')
-            frontend.append({'path': path.relative_to(dist).as_posix(), 'bytes': path.stat().st_size, 'sha256': sha(path)})
-    if not any(item['path'] == 'fonts/font-notices.html' for item in frontend):
-        raise RuntimeError('Font license page is missing')
+    frontend = freeze_frontend(dist)
     overlay = {'build': {'beforeBuildCommand': None}, 'bundle': {'externalBin': []}}
     vendor = []
     if args.target.endswith('windows-msvc'):
@@ -94,13 +71,12 @@ def main():
     manifest = {'schema_version': 1, 'source_commit': commit, 'version': config['version'],
                 'expected_core_version': config['version'] + '-' + describe,
                 'target': args.target, 'identifier': IDENTIFIER, 'product_name': PRODUCT,
-                'core_embedded': True, 'external_bin': [], 'entry_assets': head.entries,
-                'frontend_files': frontend, 'vendor_files': vendor,
+                'core_embedded': True, 'external_bin': [], **frontend, 'vendor_files': vendor,
                 'brand_files': {name: sha(source / 'easytier-gui/src-tauri/icons' / name)
                                 for name in ['icon.ico', 'icon.icns', 'icon.png']},
                 'macos_developer_id_requested': args.macos_sign}
     (work / 'source-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    print(json.dumps({'status': 'PASS', 'target': args.target, 'source_commit': commit, 'frontend_files': len(frontend)}))
+    print(json.dumps({'status': 'PASS', 'target': args.target, 'source_commit': commit, 'frontend_files': len(frontend['frontend_files'])}))
 
 
 if __name__ == '__main__':

@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 import { readFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { installMockTauri } from './mock-tauri.mjs';
 const base = process.env.ET_GUI_QA_URL || 'http://127.0.0.1:19420';
-const output = '/root/easytier-react-clients-20261014/qa';
+const output = process.env.ET_GUI_QA_OUTPUT || path.join(tmpdir(), 'easytier-gui-browser-qa');
 const labels = JSON.parse(await readFile(new URL('../public/locales/zh-CN/node-config.json', import.meta.url)));
 await mkdir(output, { recursive: true });
 for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: 'windows' }, { name: 'window800', width: 800, height: 600, platform: 'windows' }, { name: 'android', width: 390, height: 844, platform: 'android' }]) test(`React GUI ${scenario.name} with explicit Tauri mock`, async () => {
-  const browser = await chromium.launch({ executablePath: '/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome', headless: true, args: ['--no-sandbox'] });
+  const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || undefined, headless: true, args: ['--no-sandbox'] });
   const context = await browser.newContext({ viewport: { width: scenario.width, height: scenario.height } }), page = await context.newPage();
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(installMockTauri, { platform: scenario.platform });

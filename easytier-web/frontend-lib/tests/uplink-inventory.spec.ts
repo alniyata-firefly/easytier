@@ -6,7 +6,7 @@ import {
 
 const inventory: TargetUplinkInventory = {
   interfaces: [
-    { name: 'Ethernet 2', index: 4, addresses: ['10.7.0.46/24', 'fd00:7::46/64'], up: true, kind: 'ethernet', selectable: true },
+    { name: 'Ethernet 2', index: 4, addresses: ['192.0.2.46/24', '2001:db8:7::46/64'], up: true, kind: 'ethernet', selectable: true },
     { name: '以太网 备用', index: 8, addresses: ['192.168.1.5/24'], up: true, kind: 'ethernet', selectable: true },
     { name: 'wg0', index: 12, addresses: ['fd00:8::1/64'], up: true, kind: 'wireguard', selectable: false, unavailable_reason: 'overlay' },
     { name: 'eth-down', index: 13, addresses: [], up: false, kind: 'ethernet', selectable: false, unavailable_reason: 'down' },
@@ -43,7 +43,7 @@ describe('target uplink inventory options', () => {
 
   it('keeps stale inventory details without asserting current availability or removing saved names', () => {
     const rows = buildUplinkOptions(inventory, ['Ethernet 2', 'missing now?'], false)
-    expect(rows[0]).toMatchObject({ addresses: ['10.7.0.46/24', 'fd00:7::46/64'], availability: 'unverified', stale: true })
+    expect(rows[0]).toMatchObject({ addresses: ['192.0.2.46/24', '2001:db8:7::46/64'], availability: 'unverified', stale: true })
     expect(rows[rows.length - 1]).toMatchObject({ name: 'missing now?', availability: 'unverified', selected: true, stale: true })
     expect(inventory.interfaces[0]).not.toHaveProperty('availability')
     rows[0].addresses.push('test')

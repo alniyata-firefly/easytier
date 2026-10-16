@@ -5,10 +5,10 @@ import { buildConfigServerUrl, splitConfigServerUrl } from './config_server_cred
 const token = 'abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE'
 
 describe('config-server endpoint and management token', () => {
-  it('builds the production management transport without changing the token', () => {
-    const uri = buildConfigServerUrl(' udp://175.27.165.24:22020 ', ` ${token} `)
-    expect(uri).toBe(`udp://175.27.165.24:22020/${token}`)
-    expect(splitConfigServerUrl(uri)).toEqual({ address: 'udp://175.27.165.24:22020', token })
+  it('builds the management transport without changing the token', () => {
+    const uri = buildConfigServerUrl(' udp://192.0.2.1:22020 ', ` ${token} `)
+    expect(uri).toBe(`udp://192.0.2.1:22020/${token}`)
+    expect(splitConfigServerUrl(uri)).toEqual({ address: 'udp://192.0.2.1:22020', token })
   })
 
   it.each(['udp', 'tcp', 'quic'])('migrates an existing complete %s URL', (protocol) => {
@@ -58,8 +58,8 @@ describe('config-server endpoint and management token', () => {
   it.each([
     ['udp://vpn.example.test:22020', '', 'token_required'],
     ['', token, 'address_required'],
-    ['175.27.165.24:22020', token, 'invalid_address'],
-    ['https://easytier.zfgh.top', token, 'unsupported_protocol'],
+    ['192.0.2.1:22020', token, 'invalid_address'],
+    ['https://vpn.example.test', token, 'unsupported_protocol'],
     ['udp://vpn.example.test', token, 'invalid_address'],
     ['tcp://vpn.example.test:0', token, 'invalid_address'],
     [`udp://vpn.example.test:22020/${token}`, token, 'credentials_in_address'],

@@ -44,7 +44,7 @@ jobs:
       android: ${{ steps.plan.outputs.android }}
       platforms: ${{ steps.plan.outputs.platforms }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - name: Validate requested packages and signing configuration
@@ -53,10 +53,10 @@ jobs:
           WANT_LINUX: ${{ github.event_name != 'workflow_dispatch' || inputs.linux }}
           WANT_GUI: ${{ github.event_name != 'workflow_dispatch' || inputs.gui }}
           WANT_ANDROID: ${{ github.event_name != 'workflow_dispatch' || inputs.android }}
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          HAS_ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+          HAS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD != '' }}
+          HAS_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS != '' }}
+          HAS_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD != '' }}
         run: python3 ci/plan_packages.py
 
   web:
@@ -78,13 +78,23 @@ jobs:
     uses: ./.github/workflows/build-gui.yml
     with:
       macos-sign: ${{ github.event_name == 'workflow_dispatch' && inputs.macos-sign }}
-    secrets: inherit
+    secrets:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
   android:
     needs: [plan, checks]
     if: needs.plan.outputs.android == 'true'
     uses: ./.github/workflows/build-android.yml
-    secrets: inherit
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
   collect:
     if: >-
@@ -94,13 +104,11 @@ jobs:
     needs: [plan, checks, web, linux, gui, android]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: downloaded-packages
           pattern: '{web-static,linux-*,gui-*,android-arm64}'
@@ -115,16 +123,27 @@ jobs:
               command.extend(['--platform', platform])
           subprocess.run(command, check=True)
           PY
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           overwrite: true
           name: release-packages
           path: release-assets/
           if-no-files-found: error
           retention-days: 14
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: collect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-packages
+          path: release-assets
       - name: Create a draft release for a version tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
           draft: true

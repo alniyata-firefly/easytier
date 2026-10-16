@@ -18,11 +18,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-frontend
-      - uses: arduino/setup-protoc@v3
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
           version: '35.1'
           repo-token: ${{ github.token }}
@@ -39,14 +39,37 @@ jobs:
       - name: Verify member status and network settings in Chromium
         working-directory: easytier-web/frontend
         run: node --test --test-concurrency=1 tests/network-member-runtime-browser.test.mjs tests/network-transport-browser.test.mjs tests/network-settings-restore-browser.test.mjs tests/advanced-node-browser.test.mjs
+      - name: Verify the desktop React application in Chromium
+        env:
+          ET_GUI_QA_URL: http://127.0.0.1:1420
+          ET_GUI_QA_OUTPUT: ${{ runner.temp }}/gui-browser-qa
+        run: |
+          set -euo pipefail
+          pnpm --dir easytier-gui build
+          pnpm --dir easytier-gui exec vite preview --host 127.0.0.1 --port 1420 --strictPort > "$RUNNER_TEMP/gui-preview.log" 2>&1 &
+          preview_pid=$!
+          trap 'kill "$preview_pid" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import time, urllib.request
+          for attempt in range(100):
+              try:
+                  with urllib.request.urlopen('http://127.0.0.1:1420', timeout=1) as response:
+                      if response.status == 200:
+                          break
+              except OSError:
+                  time.sleep(.2)
+          else:
+              raise SystemExit('React GUI preview did not become ready')
+          PY
+          pnpm --dir easytier-gui exec node --test --test-concurrency=1 tests/react-browser.test.mjs tests/runtime-metadata.browser.test.mjs tests/runtime-routes.browser.test.mjs
   workflow:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.25.x'
           cache: false
@@ -58,5 +81,8 @@ jobs:
         run: |
           python3 -m compileall -q ci
           python3 ci/test_artifacts.py
+          python3 ci/test_public_source.py
+          python3 ci/public_source.py
           python3 -m unittest discover -s ci/android -p 'test_*.py'
           python3 -m unittest discover -s ci/gui -p 'test_*.py'
+          node --test easytier-web/frontend/tests/web-assets-verifier.test.mjs

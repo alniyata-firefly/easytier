@@ -17,6 +17,8 @@ import time
 from signing import SECRETS, VERSION_CODE, property_value, require_secrets, signing_inputs
 
 TOOLS = Path(__file__).resolve().parent
+sys.path.insert(0, str(TOOLS.parent))
+from frontend_assets import freeze_frontend
 
 
 def checked(command, *, cwd=None, env=None):
@@ -115,7 +117,7 @@ def main():
         raise RuntimeError("artifact output must be empty; do not mix release runs")
     environment = dict(os.environ)
     for name in [*SECRETS, "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER",
-                 "RUSTC_WORKSPACE_WRAPPER", "REMOVE_UNUSED_COMMANDS"]:
+                 "RUSTC_WORKSPACE_WRAPPER", "REMOVE_UNUSED_COMMANDS", "ET_ANDROID_KEYSTORE_PROPERTIES"]:
         environment.pop(name, None)
     gradle_home = output / "gradle-home"
     init_dir = gradle_home / "init.d"
@@ -136,15 +138,20 @@ def main():
     })
     started = time.time()
     with signing_inputs(jdk / "bin/keytool", source, os.environ.get("RUNNER_TEMP")) as (properties, private_key, secrets):
-        environment["ET_ANDROID_KEYSTORE_PROPERTIES"] = str(properties)
-        # Compile and tests never inherit the four signing-secret values.
+        # Frontend/tests/dependency fetching receive neither signing values nor
+        # the path to the private properties file. Only Gradle needs that path.
         run_logged([pnpm, "--dir", "tauri-plugin-vpnservice", "build"], cwd=source, env=environment,
                    log=output / "vpnservice-frontend.log")
         run_logged([pnpm, "build"], cwd=gui, env=environment, log=output / "frontend.log")
+        frozen = {"source_commit": commit, "version": version, **freeze_frontend(gui / "dist")}
+        frozen_path = output / "source-manifest.json"
+        frozen_path.write_text(json.dumps(frozen, indent=2) + "\n")
         run_logged([pnpm, "exec", "vitest", "run", "src/native/mobile_vpn.test.ts",
                     "src/native/mobile_vpn_tile.test.ts", "src/native/session.test.ts",
                     "src/react/lib/node-config.test.ts", "--silent"],
                    cwd=gui, env=environment, log=output / "focused-tests.log")
+        run_logged([sys.executable, TOOLS / "test_dex_lifecycle.py"], cwd=source, env=environment,
+                   log=output / "dex-gate-tests.log")
         run_logged(["cargo", "fetch", "--locked", "--target", "aarch64-linux-android"],
                    cwd=source, env=environment, log=output / "cargo-fetch.log")
         # Tauri's CLI generates its own target rustflags. Global RUSTFLAGS has
@@ -156,11 +163,13 @@ def main():
             "-Clink-arg=-Wl,-z,max-page-size=16384", "-Clink-arg=-Wl,-z,common-page-size=16384",
         ])
         environment["CARGO_NET_OFFLINE"] = "true"
+        environment["ET_ANDROID_KEYSTORE_PROPERTIES"] = str(properties)
         overlay = output / "tauri-build.json"
         overlay.write_text(json.dumps({"build": {"beforeBuildCommand": None}}) + "\n")
         run_logged([pnpm, "tauri", "android", "build", "--apk", "--target", "aarch64", "--split-per-abi",
                     "--features", "tauri/custom-protocol", "--config", overlay, "--", "--locked"],
                    cwd=gui, env=environment, log=output / "android-build.log")
+        environment.pop("ET_ANDROID_KEYSTORE_PROPERTIES", None)
         if checked(["git", "diff", "HEAD", "--name-only"], cwd=source):
             raise RuntimeError("tracked source changed during release build")
         outputs = android / "app/build/outputs/apk"
@@ -171,7 +180,8 @@ def main():
         destination = artifacts / f"easytier-gui-{version}-adapted-{commit[:8]}-arm64.apk"
         shutil.copy2(candidates[0], destination)
         verify = [sys.executable, TOOLS / "verify_apk.py", "--apk", destination, "--source", source,
-                  "--sdk", sdk, "--jdk", jdk, "--commit", commit, "--proof", artifacts / "verification.json"]
+                  "--sdk", sdk, "--jdk", jdk, "--commit", commit,
+                  "--frontend-manifest", frozen_path, "--proof", artifacts / "verification.json"]
         verify.extend(["--native", output / "cargo-target/aarch64-linux-android/release/libapp_lib.so"])
         run_logged(verify, cwd=source, env=environment, log=output / "verification.log")
         # Never distribute private signing material as application data.

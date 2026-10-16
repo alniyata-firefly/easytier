@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -12,7 +11,7 @@ import { chromium } from 'playwright';
 const gui = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const esbuild = createRequire(require.resolve('vite'))('esbuild');
-const output = process.env.ET_COMPRESSION_QA_OUTPUT || resolve(gui, '../../evidence/gui-compression');
+const output = process.env.ET_COMPRESSION_QA_OUTPUT || join(tmpdir(), 'easytier-gui-compression-qa');
 const labels = JSON.parse(await readFile(join(gui, 'public/locales/zh-CN/node-config.json')));
 
 test('GUI compression saves default, Off and Zstd on Windows and Android without losing other parameters', { timeout: 90000 }, async context => {
@@ -44,7 +43,7 @@ test('GUI compression saves default, Off and Zstd on Windows and Android without
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   context.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
-  const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || (existsSync('/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome') ? '/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome' : undefined), headless: true, args: ['--no-sandbox'] });
+  const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || undefined, headless: true, args: ['--no-sandbox'] });
   context.after(() => browser.close());
   const proof = { scope: 'Actual GUI NetworkEditor with synthetic local client RPC; no native Core, APK, production access or deployment', cases: [] };
   context.after(() => writeFile(join(output, 'proof.json'), JSON.stringify(proof, null, 2)));

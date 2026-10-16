@@ -13,6 +13,68 @@ import sys
 import zipfile
 
 
+def instruction_evidence(units, strings, types, methods, fields):
+    """Read references at instruction boundaries, never from operand/payload data.
+
+    Widths follow the public DEX bytecode formats. This is a packaging regression
+    gate, not an interpreter or a claim that Android lifecycle tests ran.
+    """
+    widths = {opcode: 1 for opcode in range(256)}
+    for opcode in [2, 5, 8, 0x13, 0x15, 0x16, 0x19, 0x1a, 0x1c, 0x1f, 0x20, 0x22, 0x23, 0x29,
+                   *range(0x2d, 0x3e), *range(0x44, 0x6e), *range(0x90, 0xb0), *range(0xd0, 0xe3), 0xfe, 0xff]:
+        widths[opcode] = 2
+    for opcode in [3, 6, 9, 0x14, 0x17, 0x1b, *range(0x24, 0x27), *range(0x2a, 0x2d),
+                   *range(0x6e, 0x73), *range(0x74, 0x79), 0xfc, 0xfd]:
+        widths[opcode] = 3
+    widths.update({0x18: 5, 0xfa: 4, 0xfb: 4})
+    calls, referenced_types, used_strings, literals = set(), set(), set(), set()
+    conditional = False
+    offset = 0
+    while offset < len(units):
+        word = units[offset]
+        opcode = word & 0xff
+        width = widths[opcode]
+        if opcode == 0 and word:
+            if offset + 2 > len(units):
+                raise ValueError("truncated DEX instruction payload")
+            if word == 0x0100:
+                width = 4 + units[offset + 1] * 2
+            elif word == 0x0200:
+                width = 2 + units[offset + 1] * 4
+            elif word == 0x0300 and offset + 4 <= len(units):
+                count = units[offset + 2] | units[offset + 3] << 16
+                width = 4 + (units[offset + 1] * count + 1) // 2
+            else:
+                raise ValueError("unsupported DEX instruction payload")
+        if offset + width > len(units):
+            raise ValueError("truncated DEX instruction")
+        if opcode in [*range(0x6e, 0x73), *range(0x74, 0x79), 0xfa, 0xfb]:
+            method = methods[units[offset + 1]]
+            calls.add(method)
+        elif opcode in [0x1a, 0x1b]:
+            index = units[offset + 1] | (units[offset + 2] << 16 if opcode == 0x1b else 0)
+            used_strings.add(strings[index])
+        elif opcode in [0x1c, 0x1f, 0x20, 0x22, 0x23, 0x24, 0x25]:
+            referenced_types.add(types[units[offset + 1]])
+        elif 0x52 <= opcode <= 0x6d:
+            owner, _, field_type = fields[units[offset + 1]]
+            referenced_types.update([owner, field_type])
+        elif opcode == 0x12:
+            value = word >> 12
+            literals.add(value - 16 if value & 8 else value)
+        elif opcode in [0x13, 0x14]:
+            value = units[offset + 1]
+            bits = 16
+            if opcode == 0x14:
+                value |= units[offset + 2] << 16
+                bits = 32
+            literals.add(value - (1 << bits) if value & (1 << (bits - 1)) else value)
+        conditional |= 0x32 <= opcode <= 0x3d
+        offset += width
+    return {"calls": sorted(calls), "types": sorted(referenced_types), "strings": sorted(used_strings),
+            "literal_constants": sorted(literals), "has_conditional": conditional}
+
+
 class Dex:
     def __init__(self, data):
         self.data = data
@@ -72,6 +134,13 @@ class Dex:
             result[self.types[type_id]] = self.data[item]
         return result
 
+    def code_evidence(self, offset):
+        if not offset:
+            return {}
+        length = self.u32(offset + 12)
+        units = struct.unpack_from(f"<{length}H", self.data, offset + 16)
+        return instruction_evidence(units, self.strings, self.types, self.methods, self.fields)
+
     def definitions(self):
         result = {}
         for i in range(self.u32(96)):
@@ -114,9 +183,92 @@ class Dex:
                             raise ValueError("DEX method/class ownership mismatch")
                         methods.append({"name": name, "signature": signature, "access": access,
                                         "code_present": bool(code_offset),
-                                        "annotations": method_annotations.get(index, {})})
+                                        "annotations": method_annotations.get(index, {}),
+                                        **self.code_evidence(code_offset)})
             result[descriptor] = {"methods": methods, "fields": fields, "annotations": class_annotations}
         return result
+
+
+def verify_lifecycle(definitions, mapping_text=""):
+    """Follow R8-renamed app helpers/closures and require key pause/stop APIs.
+
+    R8 can inline or merge ClientForegroundPolicy, so do not require an
+    implementation class/method name that is allowed to disappear. Android
+    framework callbacks and reflected plugin commands remain stable roots.
+    """
+    prefixes = ("com.plugin.vpnservice.", "com.kkrainbow.easytier.")
+    app_types = {descriptor for descriptor in definitions
+                 if descriptor.replace("/", ".")[1:-1].startswith(prefixes)}
+    closure_types = {descriptor for descriptor in app_types if "$" in descriptor and not descriptor.endswith("$Companion;")}
+    for original, actual in re.findall(r"^([^ #\s][^ ]*) -> ([^:]+):$", mapping_text, re.M):
+        if original.startswith(prefixes):
+            descriptor = "L" + actual.replace(".", "/") + ";"
+            app_types.add(descriptor)
+            if "$" in original and not original.endswith("$Companion"):
+                closure_types.add(descriptor)
+    method_map = {(owner, method["name"], method["signature"]): method
+                  for owner, definition in definitions.items() for method in definition["methods"]}
+
+    def evidence(owner, name, signature):
+        root = (owner, name, signature)
+        if root not in method_map or not method_map[root]["code_present"]:
+            raise ValueError("R8 removed a required Android lifecycle entry: " + name)
+        pending, seen = [root], set()
+        calls, strings, literals = set(), set(), set()
+        conditional = False
+        while pending:
+            key = pending.pop()
+            if key in seen:
+                continue
+            seen.add(key)
+            method = method_map[key]
+            calls.update(tuple(item) for item in method.get("calls", []))
+            strings.update(method.get("strings", []))
+            literals.update(method.get("literal_constants", []))
+            conditional |= method.get("has_conditional", False)
+            for call in method.get("calls", []):
+                call = tuple(call)
+                if call[0] in app_types and call in method_map:
+                    pending.append(call)
+            # Runnable/Function closures may be passed to framework methods,
+            # invoked later. Follow their actual post-R8 app class references.
+            for descriptor in method.get("types", []):
+                if descriptor in closure_types and descriptor in definitions:
+                    pending.extend((descriptor, item["name"], item["signature"])
+                                   for item in definitions[descriptor]["methods"])
+        return calls, strings, literals, conditional
+
+    def require_api(calls, name, signature, label):
+        if not any(item[1] == name and item[2] == signature for item in calls):
+            raise ValueError("R8 lifecycle gate missing " + label + ": " + name)
+
+    plugin = "Lcom/plugin/vpnservice/VpnServicePlugin;"
+    setter, setter_strings, _, _ = evidence(plugin, "setClientEnabled", "(Lapp/tauri/plugin/Invoke;)V")
+    require_api(setter, "putBoolean", "(Ljava/lang/String;Z)Landroid/content/SharedPreferences$Editor;", "persisted pause")
+    require_api(setter, "apply", "()V", "persisted pause")
+    require_api(setter, "stopService", "(Landroid/content/Intent;)Z", "paused foreground service")
+    if not {"easytier_client_lifecycle", "enabled"} <= setter_strings:
+        raise ValueError("R8 lifecycle gate missing persisted pause preference keys")
+    stopping, _, _, _ = evidence(plugin, "stopVpn", "(Lapp/tauri/plugin/Invoke;)V")
+    require_api(stopping, "stopService", "(Landroid/content/Intent;)Z", "explicit VPN stop")
+    # A final app class may have its direct onRevoke call inlined by R8.
+    # Accept its actual cleanup APIs in that case, rather than prescribing
+    # whether the optimizer must retain the original call instruction.
+    if not any(item[1:] == ("onRevoke", "()V") for item in stopping):
+        require_api(stopping, "stopForeground", "(I)V", "inlined VPN revoke")
+        require_api(stopping, "close", "()V", "inlined VPN revoke")
+    signature = "(Landroid/content/Intent;II)I"
+    for descriptor in ["Lcom/kkrainbow/easytier/MainForegroundService;", "Lcom/plugin/vpnservice/TauriVpnService;"]:
+        calls, strings, literals, conditional = evidence(descriptor, "onStartCommand", signature)
+        require_api(calls, "getBoolean", "(Ljava/lang/String;Z)Z", "saved pause guard")
+        require_api(calls, "stopSelf", "()V", "paused service stop")
+        if not {"easytier_client_lifecycle", "enabled"} <= strings or not conditional or not {1, 2} <= literals:
+            raise ValueError("R8 lifecycle gate missing conditional START_STICKY/START_NOT_STICKY pause guard")
+        if "MainForegroundService" in descriptor:
+            require_api(calls, "stopForeground", "(I)V", "paused foreground removal")
+    return {"set_client_enabled_persists_pause": True, "explicit_stop_service_apis_preserved": True,
+            "both_service_pause_guards_preserved": True, "r8_application_helpers_followed": True,
+            "static_check_only": True}
 
 
 def verify_apk_bridge(apk, mapping=None):
@@ -132,16 +284,23 @@ def verify_apk_bridge(apk, mapping=None):
                     definitions[descriptor] = definition
     if not dex_files:
         raise ValueError("APK has no DEX files")
+    result = verify_bridge_definitions(definitions, mapping)
+    result["dex_files"] = dex_files
+    return result
+
+
+def verify_bridge_definitions(definitions, mapping=None):
     required_classes = ["com.kkrainbow.easytier.MainActivity", "com.kkrainbow.easytier.TauriActivity",
                         "com.plugin.vpnservice.VpnServicePlugin", "com.plugin.vpnservice.TauriVpnService",
-                        "com.plugin.vpnservice.StartVpnArgs"]
+                        "com.plugin.vpnservice.StartVpnArgs", "com.plugin.vpnservice.SetClientEnabledArgs",
+                        "com.kkrainbow.easytier.MainForegroundService"]
     for name in required_classes:
         if "L" + name.replace(".", "/") + ";" not in definitions:
             raise ValueError(f"R8 removed or renamed required Android bridge class: {name}")
     plugin = definitions["Lcom/plugin/vpnservice/VpnServicePlugin;"]
     if plugin["annotations"].get("Lapp/tauri/annotation/TauriPlugin;") != 1:
         raise ValueError("R8 removed the runtime TauriPlugin annotation")
-    commands = ["ping", "prepareVpn", "startVpn", "stopVpn", "getVpnStatus", "consumeVpnTileAction"]
+    commands = ["ping", "prepareVpn", "startVpn", "stopVpn", "getVpnStatus", "consumeVpnTileAction", "setClientEnabled"]
     checked = []
     for command in commands:
         found = [method for method in plugin["methods"] if method["name"] == command
@@ -161,11 +320,12 @@ def verify_apk_bridge(apk, mapping=None):
     # Resolve this type only from the actual build's mapping; never guess it.
     activity_result = "Landroidx/activity/result/ActivityResult;"
     mapping_sha256 = None
+    mapping_text = ""
     if mapping is not None:
         mapping_path = Path(mapping)
         mapping_payload = gzip.decompress(mapping_path.read_bytes()) if mapping_path.suffix == ".gz" else mapping_path.read_bytes()
-        mapped = re.search(r"^androidx\.activity\.result\.ActivityResult -> ([^:]+):$",
-                           mapping_payload.decode("utf-8"), re.M)
+        mapping_text = mapping_payload.decode("utf-8")
+        mapped = re.search(r"^androidx\.activity\.result\.ActivityResult -> ([^:]+):$", mapping_text, re.M)
         if mapped:
             activity_result = "L" + mapped.group(1).replace(".", "/") + ";"
         mapping_sha256 = hashlib.sha256(mapping_payload).hexdigest()
@@ -180,11 +340,16 @@ def verify_apk_bridge(apk, mapping=None):
     required_fields = {"ipv4Addr", "routes", "dns", "disallowedApplications", "mtu"}
     if not required_fields <= fields:
         raise ValueError("R8 renamed or removed reflected VPN argument fields")
-    return {"status": "PASS", "dex_files": dex_files, "required_classes_preserved": required_classes,
+    client_fields = definitions["Lcom/plugin/vpnservice/SetClientEnabledArgs;"]["fields"]
+    if not any(field["name"] == "enabled" and field["type"] == "Z" for field in client_fields):
+        raise ValueError("R8 renamed or removed the reflected client enabled boolean")
+    lifecycle = verify_lifecycle(definitions, mapping_text)
+    return {"status": "PASS", "required_classes_preserved": required_classes,
             "vpn_commands_preserved": checked, "runtime_annotations_preserved": True,
             "activity_constructor_preserved": True, "vpn_permission_callback_preserved": True,
             "activity_result_descriptor": activity_result, "r8_mapping_sha256": mapping_sha256,
-            "vpn_argument_fields_preserved": sorted(required_fields), "static_check_only": True}
+            "vpn_argument_fields_preserved": sorted(required_fields), "client_enabled_argument_preserved": True,
+            "client_lifecycle": lifecycle, "static_check_only": True}
 
 
 def main():
