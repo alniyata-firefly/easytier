@@ -11,7 +11,7 @@ use base64::Engine as _;
 use easytier::{
     common::config::{ConfigLoader as _, NetworkConfig, TomlConfigLoader},
     proto::{
-        api::manage::{CollectNetworkInfoRequest, CollectNetworkInfoResponse, WebClientService as _},
+        api::manage::{CollectNetworkInfoRequest, CollectNetworkInfoResponse},
         rpc_types::{controller::BaseController, error::Error as RpcError},
     },
 };
