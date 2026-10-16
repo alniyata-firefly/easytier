@@ -4,10 +4,19 @@ export function installMockTauri({ platform = 'windows' } = {}) {
   const localId = '11111111-1111-4111-8111-111111111111', managedId = '22222222-2222-4222-8222-222222222222';
   const uuid = id => { const h = id.replaceAll('-', ''); return { part1: parseInt(h.slice(0, 8), 16), part2: parseInt(h.slice(8, 16), 16), part3: parseInt(h.slice(16, 24), 16), part4: parseInt(h.slice(24, 32), 16) }; };
   const configs = {
-    [localId]: { instance_id: localId, network_name: 'Local lab', network_secret: 'mock-secret', dhcp: false, virtual_ipv4: '10.100.0.2', network_length: 24, hostname: 'Mock desktop', peer_urls: ['udp://192.0.2.2:11010'], listener_urls: ['udp://0.0.0.0:11010'], bind_device: true, multi_thread: true, no_tun: platform === 'android', proxy_cidrs: [], port_forwards: [] },
-    [managedId]: { instance_id: managedId, network_name: 'Managed lab', dhcp: false, virtual_ipv4: '10.101.0.2', network_length: 24, peer_urls: [], listener_urls: [], proxy_cidrs: [] },
+    [localId]: { instance_id: localId, network_name: 'Local lab', network_secret: 'mock-secret', dhcp: false, virtual_ipv4: '10.100.0.2', network_length: 24, hostname: 'Mock desktop', peer_urls: ['udp://192.0.2.2:11010'], listener_urls: ['udp://0.0.0.0:11010'], bind_device: true, multi_thread: true, no_tun: false, proxy_cidrs: [], port_forwards: [] },
+    [managedId]: { instance_id: managedId, network_name: 'Managed lab', dhcp: false, virtual_ipv4: '10.101.0.2', network_length: 24, peer_urls: [], listener_urls: [], no_tun: platform === 'android', proxy_cidrs: [] },
   };
   const running = new Set([localId, managedId]);
+  const sources = { [localId]: 'user', [managedId]: 'web' };
+  const persistConfigs = () => localStorage.setItem('networkList', JSON.stringify(Object.values(configs).map(config => ({ config, source: sources[config.instance_id] || 'user' }))));
+  const persistEnabled = () => localStorage.setItem('enabled_networks', JSON.stringify([...running]));
+  if (localStorage.getItem('networkList') === null) persistConfigs();
+  if (localStorage.getItem('enabled_networks') === null) persistEnabled();
+  let clientEnabled = true, nextTunFd = 10;
+  let nativeVpn = { running: false, state: 'stopped', established: false };
+  const setNativeVpn = value => { nativeVpn = value; window.__MOCK_NATIVE_VPN__ = structuredClone(value); };
+  setNativeVpn(nativeVpn);
   const remoteId = '33333333-3333-4333-8333-333333333333';
   const remoteConfigs = { [remoteId]: { ...configs[localId], instance_id: remoteId, network_name: 'Remote core only' } };
   const activeConfigs = () => window.__MOCK_REMOTE_ACTIVE__ ? remoteConfigs : configs;
@@ -24,31 +33,72 @@ export function installMockTauri({ platform = 'windows' } = {}) {
       window.__MOCK_CALLS__.push({ command, args: JSON.parse(JSON.stringify(args)) });
       if (command === 'plugin:event|listen') return cb++;
       if (command === 'easytier_version') return '2.7.0-browser-mock';
-      if (command === 'init_rpc_connection') { window.__MOCK_REMOTE_ACTIVE__ = args.url === 'tcp://192.0.2.44:15999'; return; }
+      if (command === 'init_rpc_connection') { window.__MOCK_NORMAL_MODE__ = args.isNormalMode; window.__MOCK_REMOTE_ACTIVE__ = args.url === 'tcp://192.0.2.44:15999'; return; }
       if (command === 'list_network_instance_ids') return window.__MOCK_REMOTE_ACTIVE__ ? { running_inst_ids: [uuid(remoteId)], disabled_inst_ids: [] } : { running_inst_ids: [...running].map(uuid), disabled_inst_ids: Object.keys(configs).filter(id => !running.has(id)).map(uuid) };
-      if (command === 'get_network_metas') { const source = activeConfigs(), result = { metas: Object.fromEntries(args.instanceIds.filter(id => source[id]).map(id => [id, { network_name: source[id].network_name, config_permission: id === managedId ? 3 : 0 }])) }; if (window.__MOCK_HOLD_META__) { window.__MOCK_HOLD_META__ = false; window.__MOCK_META_WAITING__ = true; return new Promise(resolve => { window.__MOCK_RELEASE_META__ = () => { window.__MOCK_META_WAITING__ = false; resolve(result); }; }); } return result; }
+      if (command === 'get_network_metas') { const source = activeConfigs(), result = { metas: Object.fromEntries(args.instanceIds.filter(id => source[id]).map(id => [id, { network_name: source[id].network_name, config_permission: sources[id] === 'web' ? 3 : 0 }])) }; if (window.__MOCK_HOLD_META__) { window.__MOCK_HOLD_META__ = false; window.__MOCK_META_WAITING__ = true; return new Promise(resolve => { window.__MOCK_RELEASE_META__ = () => { window.__MOCK_META_WAITING__ = false; resolve(result); }; }); } return result; }
       if (command === 'get_config') return activeConfigs()[args.instanceId];
       if (command === 'collect_network_info') { const tick = window.__MOCK_COUNTER_TICKS__ = (window.__MOCK_COUNTER_TICKS__ || 0) + 1; const value = info(args.instanceId); for (const peer of value.peers) for (const conn of peer.conns) { conn.stats.rx_bytes = String(2048 + tick * 256); conn.stats.tx_bytes = String(1024 + tick * 1024); } return { info: { map: { [args.instanceId]: value } } }; }
       if (command === 'validate_config') { if (!args.config || args.cfg) throw new Error('wrong validate config payload'); return { toml_config: 'network_name = "validated"' }; }
-      if (command === 'save_network_config' || command === 'run_network_instance') { configs[args.cfg.instance_id] = args.cfg; if (command === 'run_network_instance') running.add(args.cfg.instance_id); return; }
-      if (command === 'update_network_config_state') { if (args.disabled) running.delete(args.instanceId); else running.add(args.instanceId); return; }
-      if (command === 'remove_network_instance') { delete configs[args.instanceId]; running.delete(args.instanceId); return; }
+      if (command === 'save_network_config' || command === 'run_network_instance') { configs[args.cfg.instance_id] = args.cfg; if (command === 'run_network_instance') running.add(args.cfg.instance_id); persistConfigs(); persistEnabled(); return; }
+      if (command === 'update_network_config_state') { if (args.disabled) running.delete(args.instanceId); else running.add(args.instanceId); persistEnabled(); return; }
+      if (command === 'remove_network_instance') { delete configs[args.instanceId]; delete sources[args.instanceId]; running.delete(args.instanceId); persistConfigs(); persistEnabled(); return; }
+      if (command === 'load_configs') {
+        // Service/remote Core processes retain their own running instances.
+        if (!window.__MOCK_NORMAL_MODE__) return;
+        for (const id of Object.keys(configs)) delete configs[id];
+        for (const entry of args.configs) { configs[entry.config.instance_id] = entry.config; sources[entry.config.instance_id] = entry.source; }
+        for (const id of args.enabledNetworks) if (configs[id]) running.add(id);
+        return;
+      }
       if (command === 'parse_network_config') return `network_name = "${args.cfg.network_name}"\n[flags]\nprefer_ipv6 = ${!!args.cfg.prefer_ipv6}\n`;
       if (command === 'generate_network_config') return { ...configs[localId], network_name: 'Imported lab' };
       if (command === 'get_vpn_portal_info') return { vpn_type: 'wireguard', listener: '0.0.0.0:22022', clients: [{ name: 'mock-phone', virtual_ip: '10.100.0.20/24', groups: [], client_config: '[Interface]\nPrivateKey = mock-client\nAddress = 10.100.0.20/24\n[Peer]\nPublicKey = mock-server\nEndpoint = 0.0.0.0:22022\n' }] };
-      if (command === 'stop_local_client') { window.__MOCK_LOCAL_CLIENT_PAUSED__ = true; return; }
+      if (command === 'stop_local_client') { window.__MOCK_LOCAL_CLIENT_PAUSED__ = true; running.clear(); return; }
       if (command === 'resume_local_client') { window.__MOCK_LOCAL_CLIENT_PAUSED__ = false; return; }
       if (command === 'is_client_running') return !window.__MOCK_LOCAL_CLIENT_PAUSED__;
       if (command === 'is_web_client_connected') return true;
       if (command === 'get_service_status') return window.__MOCK_SERVICE_STATUS__ || 'NotInstalled';
       if (command === 'set_service_status') { window.__MOCK_SERVICE_STATUS__ = args.enable ? 'Running' : 'Stopped'; return; }
       if (command === 'init_service') { window.__MOCK_SERVICE_STATUS__ = args.opts ? 'Stopped' : 'NotInstalled'; return; }
-      if (command === 'init_web_client' && window.__MOCK_FAIL_MANAGEMENT__) throw new Error('mock-sensitive-token');
+      if (command === 'init_web_client') {
+        if (window.__MOCK_FAIL_MANAGEMENT__) throw new Error('mock-sensitive-token');
+        // Managed networks return through controller reconciliation, not the
+        // local GUI's enabled-network restoration during load_configs.
+        if (args.url && !window.__MOCK_LOCAL_CLIENT_PAUSED__)
+          for (const [id, source] of Object.entries(sources)) if (source === 'web' && configs[id]) running.add(id);
+        return;
+      }
       if (command === 'get_log_dir_path') return '/mock/logs';
       if (command === 'plugin:path|resolve_directory') return '/mock/config';
       if (command === 'plugin:path|join') return args.paths.join('/');
       if (command === 'plugin:clipboard-manager|write_text') { window.__MOCK_CLIPBOARD__ = args.text; return; }
-      if (command === 'plugin:vpnservice|get_vpn_status') return { running: false };
+      if (command === 'plugin:vpnservice|get_vpn_status') return structuredClone(nativeVpn);
+      if (command === 'plugin:vpnservice|set_client_enabled') { clientEnabled = args.enabled; return {}; }
+      if (command === 'plugin:vpnservice|start_vpn') {
+        if (!clientEnabled) return { errorMsg: 'client_paused' };
+        if (nativeVpn.state !== 'stopped') return { errorMsg: 'vpn_service_busy' };
+        if (!args.requestId || !args.instanceId) throw new Error('mock start requires native request ownership');
+        setNativeVpn({ running: true, state: 'established', established: true, requestId: args.requestId, instanceId: args.instanceId, fd: nextTunFd++, ipv4Addr: args.ipv4Addr, routes: args.routes || [], dns: args.dns });
+        return {};
+      }
+      if (command === 'plugin:vpnservice|stop_vpn') {
+        setNativeVpn({ running: false, state: 'stopped', established: false, requestId: nativeVpn.requestId, instanceId: nativeVpn.instanceId });
+        return {};
+      }
+      if (command === 'set_tun_fd') {
+        if (!nativeVpn.running || !nativeVpn.established || nativeVpn.state !== 'established'
+          || !Number.isInteger(args.fd) || args.fd <= 0 || nativeVpn.fd !== args.fd
+          || nativeVpn.requestId !== args.requestId || nativeVpn.instanceId !== args.instanceId
+          || !running.has(args.instanceId) || configs[args.instanceId]?.no_tun || window.__MOCK_LOCAL_CLIENT_PAUSED__)
+          throw new Error('mock rejected stale TUN attachment');
+        window.__MOCK_TUN_BINDING__ = structuredClone(args);
+        return;
+      }
+      if (command === 'clear_tun_fd') {
+        if (window.__MOCK_TUN_BINDING__?.requestId === args.requestId && window.__MOCK_TUN_BINDING__?.instanceId === args.instanceId)
+          delete window.__MOCK_TUN_BINDING__;
+        return;
+      }
       if (command === 'plugin:vpnservice|consume_vpn_tile_action') return {};
       if (command === 'plugin:vpnservice|prepare_vpn') return { granted: true };
       if (command.startsWith('plugin:tray|') || command.startsWith('plugin:menu|')) return command.endsWith('get_by_id') ? null : [cb++, 'main'];

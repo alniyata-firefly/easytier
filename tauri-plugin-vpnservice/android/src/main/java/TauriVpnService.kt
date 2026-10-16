@@ -18,6 +18,7 @@ import java.net.InetAddress
 import java.util.Arrays
 
 import app.tauri.plugin.JSObject
+import org.json.JSONArray
 
 class TauriVpnService : VpnService() {
     companion object {
@@ -79,7 +80,7 @@ class TauriVpnService : VpnService() {
             it.put("fd", if (state == "established") establishedFd else null)
             it.put("errorMsg", errorMsg)
             it.put("ipv4Addr", ipv4Addr)
-            it.put("routes", routes)
+            it.put("routes", JSONArray(routes.toList()))
             it.put("dns", dns)
         }
 

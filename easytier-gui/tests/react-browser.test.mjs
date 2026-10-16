@@ -28,17 +28,67 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
     assert.equal(await page.getByRole('button', { name: '编辑网络', exact: true }).isEnabled(), false);
     assert.equal(await page.getByRole('button', { name: '删除', exact: true }).isEnabled(), false);
     if (scenario.platform === 'android') {
+      await page.waitForFunction(() => window.__MOCK_TUN_BINDING__?.requestId);
+      const originalBinding = await page.evaluate(() => window.__MOCK_TUN_BINDING__);
       const callsBeforeStop = await page.evaluate(() => window.__MOCK_CALLS__.length);
       await page.getByRole('button', { name: '停止客户端', exact: true }).click();
       await page.getByRole('button', { name: '启动客户端', exact: true }).waitFor();
+      await page.waitForFunction(() => window.__MOCK_NATIVE_VPN__?.state === 'stopped'
+        && !document.querySelector('.page-heading button[aria-busy="true"]'));
       assert.equal(await page.locator('.traffic-chart').count(), 0);
+      assert.equal(await page.getByRole('alert').count(), 0);
+      assert.equal(await page.evaluate(() => window.__MOCK_TUN_BINDING__), undefined);
       const stopCalls = await page.evaluate(offset => window.__MOCK_CALLS__.slice(offset), callsBeforeStop);
       assert.ok(stopCalls.some(call => call.command === 'stop_local_client'));
       assert.ok(stopCalls.some(call => call.command === 'plugin:vpnservice|set_client_enabled' && call.args.enabled === false));
+      assert.ok(stopCalls.some(call => call.command === 'clear_tun_fd' && call.args.instanceId === originalBinding.instanceId && call.args.requestId === originalBinding.requestId));
       assert.ok(!stopCalls.some(call => ['update_network_config_state', 'remove_network_instance', 'save_network_config', 'run_network_instance', 'init_web_client'].includes(call.command)));
+      const beforeOfflineSave = await page.evaluate(() => window.__MOCK_CALLS__.length);
+      await page.getByRole('button', { name: '新建网络', exact: true }).click();
+      const offlineEditor = page.getByRole('dialog', { name: '编辑网络', exact: true });
+      await offlineEditor.getByRole('textbox', { name: '网络名称', exact: true }).fill('Saved while stopped');
+      assert.equal(await offlineEditor.getByRole('button', { name: '保存并启动', exact: true }).isDisabled(), true);
+      await offlineEditor.getByRole('button', { name: '保存', exact: true }).click();
+      await offlineEditor.waitFor({ state: 'hidden' });
+      await page.getByRole('button', { name: /Saved while stopped/ }).waitFor();
+      const offlineId = await page.evaluate(() => JSON.parse(localStorage.getItem('networkList')).find(row => row.config.network_name === 'Saved while stopped').config.instance_id);
+      assert.equal(await page.evaluate(id => JSON.parse(localStorage.getItem('enabled_networks')).includes(id), offlineId), false);
+      const offlineCommands = await page.evaluate(offset => window.__MOCK_CALLS__.slice(offset).map(call => call.command), beforeOfflineSave);
+      for (const command of ['save_network_config', 'validate_config', 'run_network_instance', 'update_network_config_state', 'resume_local_client', 'init_web_client', 'plugin:vpnservice|prepare_vpn'])
+        assert.equal(offlineCommands.includes(command), false, command);
+      await page.getByRole('button', { name: 'Managed lab', exact: false }).click();
       await page.getByRole('button', { name: '启动客户端', exact: true }).click();
       await page.getByRole('button', { name: '停止客户端', exact: true }).waitFor();
       await page.getByRole('heading', { name: 'Managed lab', exact: true }).waitFor();
+      await page.waitForFunction(() => window.__MOCK_TUN_BINDING__?.requestId
+        && !document.querySelector('.page-heading button[aria-busy="true"]'));
+      assert.equal(await page.evaluate(() => window.__MOCK_TUN_BINDING__.instanceId), originalBinding.instanceId);
+      assert.equal(await page.getByRole('alert').count(), 0);
+      const restored = await page.evaluate(() => window.__MOCK_CALLS__.findLast(call => call.command === 'load_configs').args);
+      assert.ok(restored.configs.some(row => row.config.instance_id === offlineId));
+      assert.equal(restored.enabledNetworks.includes(offlineId), false);
+      assert.equal(restored.enabledNetworks.includes('22222222-2222-4222-8222-222222222222'), false);
+      await page.getByRole('button', { name: /Saved while stopped/ }).click();
+      await page.getByRole('button', { name: '启动', exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Managed lab', exact: false }).click();
+      let requestId = await page.evaluate(() => window.__MOCK_NATIVE_VPN__.requestId);
+      for (let cycle = 0; cycle < 2; cycle++) {
+        await page.getByRole('button', { name: '停止客户端', exact: true }).click();
+        await page.waitForFunction(() => window.__MOCK_NATIVE_VPN__?.state === 'stopped'
+          && !document.querySelector('.page-heading button[aria-busy="true"]'));
+        assert.equal(await page.evaluate(() => window.__MOCK_TUN_BINDING__), undefined);
+        assert.equal(await page.getByRole('alert').count(), 0);
+        await page.getByRole('button', { name: '启动客户端', exact: true }).click();
+        await page.waitForFunction(() => window.__MOCK_TUN_BINDING__?.requestId
+          && !document.querySelector('.page-heading button[aria-busy="true"]'));
+        const next = await page.evaluate(() => ({ native: window.__MOCK_NATIVE_VPN__, binding: window.__MOCK_TUN_BINDING__ }));
+        assert.notEqual(next.native.requestId, requestId);
+        assert.equal(next.binding.requestId, next.native.requestId);
+        assert.equal(next.binding.instanceId, next.native.instanceId);
+        assert.equal(next.binding.fd, next.native.fd);
+        requestId = next.native.requestId;
+        assert.equal(await page.getByRole('alert').count(), 0);
+      }
       assert.ok(await page.evaluate(() => window.__MOCK_CALLS__.some(call => call.command === 'resume_local_client')));
     } else {
       await page.getByRole('button', { name: '停止', exact: true }).click();

@@ -43,25 +43,25 @@ impl<R: Runtime> Vpnservice<R> {
 
     pub fn prepare_vpn(&self, payload: VoidRequest) -> crate::Result<Status> {
         self.0
-            .run_mobile_plugin("prepare_vpn", payload)
+            .run_mobile_plugin("prepareVpn", payload)
             .map_err(Into::into)
     }
 
     pub fn start_vpn(&self, payload: StartVpnRequest) -> crate::Result<Status> {
         self.0
-            .run_mobile_plugin("start_vpn", payload)
+            .run_mobile_plugin("startVpn", payload)
             .map_err(Into::into)
     }
 
     pub fn stop_vpn(&self, payload: VoidRequest) -> crate::Result<Status> {
         self.0
-            .run_mobile_plugin("stop_vpn", payload)
+            .run_mobile_plugin("stopVpn", payload)
             .map_err(Into::into)
     }
 
     pub fn set_client_enabled(&self, payload: SetClientEnabledRequest) -> crate::Result<Status> {
         self.0
-            .run_mobile_plugin("set_client_enabled", payload)
+            .run_mobile_plugin("setClientEnabled", payload)
             .map_err(Into::into)
     }
 
@@ -106,7 +106,7 @@ impl<R: Runtime> Vpnservice<R> {
         payload: VoidRequest,
     ) -> crate::Result<VpnTileActionResponse> {
         self.0
-            .run_mobile_plugin("consume_vpn_tile_action", payload)
+            .run_mobile_plugin("consumeVpnTileAction", payload)
             .map_err(Into::into)
     }
 }
