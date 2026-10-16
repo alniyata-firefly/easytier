@@ -142,11 +142,11 @@ jobs:
         with:
           name: release-packages
           path: release-assets
-      - name: Create a draft release for a version tag
+      - name: Publish verified packages for a version tag
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
-          draft: true
+          draft: false
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: release-assets/*
