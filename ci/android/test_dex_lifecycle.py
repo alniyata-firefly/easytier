@@ -154,6 +154,48 @@ class DexLifecycleTests(unittest.TestCase):
         self.assertIn('setClientEnabled', str(failure.exception))
         self.assertNotIn('fixture-private-string', str(failure.exception))
 
+    def test_directly_invoked_pause_writer_moved_to_library_holder_passes(self):
+        definitions = fixture()
+        callback = definitions['La/b;']['methods'][0]
+        holder = 'Lkotlin/jvm/internal/Intrinsics;'
+        signature = '(Landroid/content/Context;Z)V'
+        definitions[holder] = {'methods': [method('a', signature, calls=callback['calls'],
+                                                strings=callback['strings'])]}
+        callback['calls'] = [(holder, 'a', signature)]
+        callback['strings'] = []
+        self.assertTrue(verify_lifecycle(definitions, MAPPING)['set_client_enabled_persists_pause'])
+
+    def test_directly_invoked_pause_reader_moved_to_library_holder_passes(self):
+        definitions = fixture()
+        holder = 'Lkotlin/jvm/internal/Intrinsics;'
+        signature = '(Landroid/content/Context;)Z'
+        reader = definitions[MAIN]['methods'][0]
+        get_boolean = next(call for call in reader['calls'] if call[1] == 'getBoolean')
+        definitions[holder] = {'methods': [method('c', signature, calls=[get_boolean],
+                                                strings=reader['strings'])]}
+        reader['calls'] = [(holder, 'c', signature), *[call for call in reader['calls'] if call != get_boolean]]
+        reader['strings'] = []
+        self.assertTrue(verify_lifecycle(definitions, MAPPING)['both_service_pause_guards_preserved'])
+
+    def test_uninvoked_library_method_cannot_supply_pause_writer(self):
+        definitions = fixture()
+        callback = definitions['La/b;']['methods'][0]
+        definitions['Lkotlin/jvm/internal/Intrinsics;'] = {'methods': [
+            method('a', '()V', calls=callback['calls'], strings=callback['strings'])]}
+        callback['calls'] = []
+        with self.assertRaisesRegex(ValueError, 'persisted pause'):
+            verify_lifecycle(definitions, MAPPING)
+
+    def test_direct_edge_with_different_signature_does_not_match_helper(self):
+        definitions = fixture()
+        callback = definitions['La/b;']['methods'][0]
+        holder = 'Lkotlin/jvm/internal/Intrinsics;'
+        definitions[holder] = {'methods': [method('a', '()V', calls=callback['calls'],
+                                                strings=callback['strings'])]}
+        callback['calls'] = [(holder, 'a', '(Z)V')]
+        with self.assertRaisesRegex(ValueError, 'persisted pause'):
+            verify_lifecycle(definitions, MAPPING)
+
     def test_complete_new_bridge_passes_with_actual_mapping_input(self):
         with tempfile.TemporaryDirectory() as temporary:
             mapping = Path(temporary) / 'mapping.txt'

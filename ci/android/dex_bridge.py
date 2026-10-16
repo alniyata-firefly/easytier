@@ -236,7 +236,6 @@ def verify_lifecycle(definitions, mapping_text=""):
                 changed = True
     closure_types.update(descriptor for descriptor in functional_types & definitions.keys()
                          if not definitions[descriptor].get("access", 0) & (0x200 | 0x400))
-    helper_types = app_types | closure_types
     method_map = {(owner, method["name"], method["signature"]): method
                   for owner, definition in definitions.items() for method in definition["methods"]}
     trace = {}
@@ -261,7 +260,11 @@ def verify_lifecycle(definitions, mapping_text=""):
             conditional |= method.get("has_conditional", False)
             for call in method.get("calls", []):
                 call = tuple(call)
-                if call[0] in helper_types and call in method_map:
+                # R8 can move an app method to a library-named holder. Its
+                # actual invoke edge remains authoritative; class-name
+                # filtering would discard a real call. Do not guess virtual
+                # implementations or collect unrelated methods from a class.
+                if call in method_map and method_map[call]["code_present"]:
                     pending.append(call)
             # Runnable/Function closures may be passed to framework methods,
             # invoked later. Follow their actual post-R8 app class references.
