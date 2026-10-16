@@ -103,9 +103,18 @@ for (const target of ['web', 'gui']) test(`${target} advanced controls save real
         assert.equal(second[key].enable_socks5, false);
     }
     await text('foreign_relay_bps_limit').fill('18446744073709551616');
+    // NodeParameters reports validity from an effect; wait for its parent render.
+    await page.waitForFunction(() => document.querySelector('#save')?.disabled === true);
     assert.equal(await page.locator('#save').isDisabled(), true);
+    assert.equal(await page.getByText(labels.errors.uint64, { exact: true }).count(), 1);
+    assert.equal(await page.evaluate(() => window.__CAPTURE__.length), 2);
     await text('foreign_relay_bps_limit').fill('0');
+    await page.waitForFunction(() => document.querySelector('#save')?.disabled === false);
     assert.equal(await page.locator('#save').isEnabled(), true);
+    assert.equal(await page.getByText(labels.errors.uint64, { exact: true }).count(), 0);
+    await page.locator('#save').click();
+    const recovered = await page.evaluate(() => window.__CAPTURE__[2]);
+    for (const key of ['raw', 'json']) assert.equal(String(recovered[key].foreign_relay_bps_limit), '0');
     await page.setViewportSize({ width: 390, height: 844 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.deepEqual(errors, []);

@@ -1,4 +1,5 @@
 import type { Plugin } from 'vite'
+import { readFileSync } from 'node:fs'
 
 /** Verify the actual output graph rather than inferring the framework from package.json. */
 export function reactBundleAudit(): Plugin {
@@ -19,6 +20,17 @@ export function reactBundleAudit(): Plugin {
       if (legacy.length) this.error('The React application includes legacy Vue or PrimeVue runtime modules')
       const react = [...modules].filter(id => /\/node_modules\/(?:react|react-dom)\//.test(id))
       if (!react.length) this.error('The application does not contain the expected React runtime')
+      this.emitFile({
+        type: 'asset', fileName: 'legal/LICENSE.txt',
+        source: readFileSync(new URL('../../../../LICENSE', import.meta.url), 'utf8'),
+      })
+      this.emitFile({
+        type: 'asset', fileName: 'legal/source-notice.txt',
+        source: 'EasyTier downstream adaptation, licensed under GNU LGPL version 3.\n'
+          + 'Uses and modifies upstream EasyTier code. Original copyright and contributor notices are retained in the source.\n'
+          + 'Corresponding source and downstream changes: https://github.com/alniyata-firefly/easytier\n'
+          + 'Upstream source: https://github.com/EasyTier/EasyTier\n',
+      })
       // Never publish absolute source paths or environment values in the audit artifact.
       this.emitFile({
         type: 'asset',
