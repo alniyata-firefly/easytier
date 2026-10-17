@@ -6,9 +6,9 @@
   "connectDevice": "接入设备",
   "summary": "组网摘要",
   "registered": "已登记设备",
-  "online": "在线设备",
+  "online": "管理在线设备",
   "centralNetworks": "中央网络",
-  "instances": "运行实例",
+  "instances": "实例",
   "observe": "观察网络",
   "emptyNetworks": "还没有中央网络",
   "createDetail": "创建网络后，将已登记的设备加入网络。",
@@ -22,7 +22,7 @@
   "emptyDevices": "还没有设备",
   "registerDetail": "签发管理令牌后，在客户端完成登记。",
   "loadingNetworks": "正在加载网络",
-  "networkOnline": "{{online}} / {{total}} 在线",
+  "networkOnline": "{{online}} / {{total}} 在线成员",
   "external": {
     "title": "网络由外部系统管理",
     "detail": "可在设备页面查看当前实例。"

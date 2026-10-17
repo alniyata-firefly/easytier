@@ -492,6 +492,7 @@ export interface PeerInfo {
 
 export interface PeerConnInfo {
   conn_id: string
+  is_closed?: boolean
   my_peer_id: number
   is_client: boolean
   peer_id: number

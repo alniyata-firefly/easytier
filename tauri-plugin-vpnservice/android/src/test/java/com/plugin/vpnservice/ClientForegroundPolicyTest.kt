@@ -7,6 +7,22 @@ import org.junit.Test
 
 class ClientForegroundPolicyTest {
     @Test
+    fun warmManagementResumeReusesVpnForegroundAndVpnStopRestoresKeepalive() {
+        var enabled = false
+        var vpnRunning = true
+        val service = mutableListOf<Boolean>()
+        val policy = ClientForegroundPolicy({ enabled }, { enabled = it }, { service.add(it) }, { vpnRunning })
+        policy.setEnabled(true)
+        policy.setEnabled(true)
+        assertTrue(enabled)
+        assertEquals(listOf(false, false), service)
+        vpnRunning = false
+        policy.onVpnChanged(false)
+        assertTrue(enabled)
+        assertEquals(listOf(false, false, true), service)
+    }
+
+    @Test
     fun pausedClientStaysStoppedAfterLateRevokeOrDestroy() {
         var enabled = true
         val service = mutableListOf<Boolean>()

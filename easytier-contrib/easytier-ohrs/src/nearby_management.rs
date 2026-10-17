@@ -497,6 +497,25 @@ impl WebClientService for NearbyWebClientService {
     ) -> Result<easytier::proto::api::manage::GetNetworkInterfacesResponse, RpcError> {
         self.inner.get_network_interfaces(controller, request).await
     }
+
+    async fn save_network_instance_config(
+        &self,
+        _controller: BaseController,
+        _request: easytier::proto::api::manage::SaveNetworkInstanceConfigRequest,
+    ) -> Result<easytier::proto::api::manage::SaveNetworkInstanceConfigResponse, RpcError> {
+        Err(anyhow::anyhow!("durable save is unsupported by HarmonyOS nearby management").into())
+    }
+
+    async fn stop_network_instance(
+        &self,
+        _controller: BaseController,
+        _request: easytier::proto::api::manage::StopNetworkInstanceRequest,
+    ) -> Result<easytier::proto::api::manage::StopNetworkInstanceResponse, RpcError> {
+        // The external HarmonyOS host owns command execution. Its legacy
+        // Delete/STOP bridge cannot prove the new stop-only persistence
+        // contract, so do not silently substitute that older operation.
+        Err(anyhow::anyhow!("stop-only management is unsupported by this HarmonyOS host").into())
+    }
 }
 
 struct NearbyManagementHostServer {
@@ -1008,6 +1027,32 @@ fn valid_management_json_call(service_name: &str, method_name: &str, domain_name
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unsupported_persistence_operations_do_not_dispatch_host_commands() {
+        let service = NearbyWebClientService::new();
+        let save = service
+            .save_network_instance_config(
+                BaseController::default(),
+                easytier_proto::api::manage::SaveNetworkInstanceConfigRequest::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(save.to_string().contains("durable save is unsupported"));
+        let stop = service
+            .stop_network_instance(
+                BaseController::default(),
+                easytier_proto::api::manage::StopNetworkInstanceRequest {
+                    inst_id: Some(Uuid::new_v4().into()),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            stop.to_string()
+                .contains("stop-only management is unsupported")
+        );
+    }
 
     #[test]
     fn rejects_non_rpc_packets_before_the_harmony_transport() {

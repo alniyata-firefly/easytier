@@ -29,7 +29,7 @@ function normalizeRoute(route: Route): Route {
 
 function normalizePeers(peers: PeerInfo[] | undefined): PeerInfo[] {
   return normalizePeerInfos(peers ?? []).map(peer => ({ ...peer,
-    conns: peer.conns.map(conn => ({ ...conn, features: conn.features ?? [], loss_rate: conn.loss_rate ?? 0 })),
+    conns: peer.conns.filter(conn => !conn.is_closed).map(conn => ({ ...conn, features: conn.features ?? [], loss_rate: conn.loss_rate ?? 0 })),
   }))
 }
 

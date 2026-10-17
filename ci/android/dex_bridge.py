@@ -28,6 +28,7 @@ def instruction_evidence(units, strings, types, methods, fields):
         widths[opcode] = 3
     widths.update({0x18: 5, 0xfa: 4, 0xfb: 4})
     calls, referenced_types, used_strings, literals = set(), set(), set(), set()
+    field_reads, field_writes = set(), set()
     conditional = False
     offset = 0
     while offset < len(units):
@@ -57,8 +58,10 @@ def instruction_evidence(units, strings, types, methods, fields):
         elif opcode in [0x1c, 0x1f, 0x20, 0x22, 0x23, 0x24, 0x25]:
             referenced_types.add(types[units[offset + 1]])
         elif 0x52 <= opcode <= 0x6d:
-            owner, _, field_type = fields[units[offset + 1]]
+            field = fields[units[offset + 1]]
+            owner, _, field_type = field
             referenced_types.update([owner, field_type])
+            (field_reads if opcode <= 0x58 or 0x60 <= opcode <= 0x66 else field_writes).add(field)
         elif opcode == 0x12:
             value = word >> 12
             literals.add(value - 16 if value & 8 else value)
@@ -72,6 +75,7 @@ def instruction_evidence(units, strings, types, methods, fields):
         conditional |= 0x32 <= opcode <= 0x3d
         offset += width
     return {"calls": sorted(calls), "types": sorted(referenced_types), "strings": sorted(used_strings),
+            "field_reads": sorted(field_reads), "field_writes": sorted(field_writes),
             "literal_constants": sorted(literals), "has_conditional": conditional}
 
 
@@ -199,7 +203,7 @@ class Dex:
 
 
 def verify_lifecycle(definitions, mapping_text=""):
-    """Follow R8-renamed app helpers/closures and require key pause/stop APIs.
+    """Follow R8-renamed helpers and require distinct management/VPN guards.
 
     R8 can inline or merge ClientForegroundPolicy, so do not require an
     implementation class/method name that is allowed to disappear. Android
@@ -210,6 +214,21 @@ def verify_lifecycle(definitions, mapping_text=""):
                  if descriptor.replace("/", ".")[1:-1].startswith(prefixes)}
     closure_types = {descriptor for descriptor in app_types if "$" in descriptor and not descriptor.endswith("$Companion;")}
     class_mapping = dict(re.findall(r"^([^ #\s][^ ]*) -> ([^:]+):$", mapping_text, re.M))
+    # Private lifecycle fields may be renamed even when the Android service
+    # class is kept. Resolve their real identities from this build's mapping;
+    # a field with the same short name in an unrelated class is not evidence.
+    field_mapping = {}
+    mapping_owner = None
+    for line in mapping_text.splitlines():
+        owner = re.match(r"^([^ #\s][^ ]*) -> ([^:]+):$", line)
+        if owner:
+            mapping_owner = owner.groups()
+            continue
+        field = re.match(r"^\s+[^ ()]+ ([^ ()]+) -> ([^ ]+)$", line)
+        if mapping_owner and field:
+            original, actual = field.groups()
+            field_mapping[("L" + mapping_owner[0].replace(".", "/") + ";", original)] = (
+                "L" + mapping_owner[1].replace(".", "/") + ";", actual)
     for original, actual in class_mapping.items():
         if original.startswith(prefixes):
             descriptor = "L" + actual.replace(".", "/") + ";"
@@ -246,6 +265,7 @@ def verify_lifecycle(definitions, mapping_text=""):
             raise ValueError("R8 removed a required Android lifecycle entry: " + name)
         pending, seen = [root], set()
         calls, strings, literals, referenced = set(), set(), set(), set()
+        reads, writes = set(), set()
         conditional = False
         while pending:
             key = pending.pop()
@@ -257,6 +277,8 @@ def verify_lifecycle(definitions, mapping_text=""):
             strings.update(method.get("strings", []))
             literals.update(method.get("literal_constants", []))
             referenced.update(method.get("types", []))
+            reads.update(tuple(item) for item in method.get("field_reads", []))
+            writes.update(tuple(item) for item in method.get("field_writes", []))
             conditional |= method.get("has_conditional", False)
             for call in method.get("calls", []):
                 call = tuple(call)
@@ -278,7 +300,7 @@ def verify_lifecycle(definitions, mapping_text=""):
         trace.update(root=root, visited_count=len(seen), visited=sorted(seen)[:48],
                      call_count=len(calls), calls=sorted(calls)[:48],
                      referenced_type_count=len(referenced), referenced_types=sorted(referenced)[:48])
-        return calls, strings, literals, conditional
+        return calls, strings, literals, conditional, reads, writes
 
     def fail_gate(message):
         raise ValueError(message + "; reachable DEX symbols: " + json.dumps(trace, separators=(",", ":")))
@@ -287,38 +309,61 @@ def verify_lifecycle(definitions, mapping_text=""):
         if not any(item[1] == name and item[2] == signature for item in calls):
             fail_gate("R8 lifecycle gate missing " + label + ": " + name)
 
+    def require_fields(fields, owner, names, label):
+        identities = {item[:2] for item in fields}
+        for name in names:
+            identity = field_mapping.get((owner, name), (owner, name))
+            if identity not in identities:
+                fail_gate("R8 lifecycle gate missing " + label + ": " + name)
+
     plugin = "Lcom/plugin/vpnservice/VpnServicePlugin;"
-    setter, setter_strings, _, _ = evidence(plugin, "setClientEnabled", "(Lapp/tauri/plugin/Invoke;)V")
+    setter, setter_strings, _, _, _, _ = evidence(plugin, "setClientEnabled", "(Lapp/tauri/plugin/Invoke;)V")
     require_api(setter, "putBoolean", "(Ljava/lang/String;Z)Landroid/content/SharedPreferences$Editor;", "persisted pause")
     require_api(setter, "apply", "()V", "persisted pause")
     require_api(setter, "stopService", "(Landroid/content/Intent;)Z", "paused foreground service")
     if not {"easytier_client_lifecycle", "enabled"} <= setter_strings:
         fail_gate("R8 lifecycle gate missing persisted pause preference keys")
-    stopping, _, _, _ = evidence(plugin, "stopVpn", "(Lapp/tauri/plugin/Invoke;)V")
+    stopping, stop_strings, _, stop_conditional, _, stop_writes = evidence(plugin, "stopVpn", "(Lapp/tauri/plugin/Invoke;)V")
     require_api(stopping, "stopService", "(Landroid/content/Intent;)Z", "explicit VPN stop")
     require_api(stopping, "close", "()V", "requested VPN tunnel close")
+    service = "Lcom/plugin/vpnservice/TauriVpnService;"
+    require_fields(stop_writes, service, ["state", "establishedFd"], "pending VPN start cancellation")
+    if not {"stopping", "stopped"} <= stop_strings or not stop_conditional:
+        fail_gate("R8 lifecycle gate missing conditional pending VPN start cancellation")
     # Stop only requests shutdown. Android acknowledges real service exit via
     # onDestroy; do not require an early/manual onRevoke or foreground removal
     # inside the plugin command as proof of a completed stop.
-    destroyed, _, _, _ = evidence("Lcom/plugin/vpnservice/TauriVpnService;", "onDestroy", "()V")
+    destroyed, _, _, _, _, _ = evidence(service, "onDestroy", "()V")
     require_api(destroyed, "close", "()V", "framework VPN destroy cleanup")
     require_api(destroyed, "stopForeground", "(I)V", "framework VPN destroy cleanup")
-    revoked, _, _, _ = evidence("Lcom/plugin/vpnservice/TauriVpnService;", "onRevoke", "()V")
+    revoked, _, _, _, _, _ = evidence(service, "onRevoke", "()V")
     require_api(revoked, "close", "()V", "framework VPN revoke cleanup")
     require_api(revoked, "stopSelf", "()V", "framework VPN revoke cleanup")
     signature = "(Landroid/content/Intent;II)I"
-    for descriptor in ["Lcom/kkrainbow/easytier/MainForegroundService;", "Lcom/plugin/vpnservice/TauriVpnService;"]:
-        calls, strings, literals, conditional = evidence(descriptor, "onStartCommand", signature)
-        require_api(calls, "getBoolean", "(Ljava/lang/String;Z)Z", "saved pause guard")
-        require_api(calls, "stopSelf", "()V", "paused service stop")
-        if not {"easytier_client_lifecycle", "enabled"} <= strings or not conditional or not {1, 2} <= literals:
-            fail_gate("R8 lifecycle gate missing conditional START_STICKY/START_NOT_STICKY pause guard")
-        if "MainForegroundService" in descriptor:
-            require_api(calls, "stopForeground", "(I)V", "paused foreground removal")
-    return {"set_client_enabled_persists_pause": True, "explicit_stop_service_apis_preserved": True,
+    calls, strings, literals, conditional, _, _ = evidence(
+        "Lcom/kkrainbow/easytier/MainForegroundService;", "onStartCommand", signature)
+    require_api(calls, "getBoolean", "(Ljava/lang/String;Z)Z", "saved management enabled guard")
+    require_api(calls, "stopSelf", "()V", "paused management service stop")
+    require_api(calls, "stopForeground", "(I)V", "paused foreground removal")
+    if not {"easytier_client_lifecycle", "enabled"} <= strings or not conditional or not {1, 2} <= literals:
+        fail_gate("R8 lifecycle gate missing conditional START_STICKY/START_NOT_STICKY management guard")
+
+    # Management keepalive is independent of the VPN/TUN switch. Requiring its
+    # saved boolean here would reintroduce the old coupling. The VPN service
+    # instead rejects queued intents unless both owner IDs and state still
+    # match the pending start; stop must invalidate that same state above.
+    calls, strings, literals, conditional, reads, _ = evidence(service, "onStartCommand", signature)
+    require_api(calls, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;", "VPN intent identity guard")
+    require_api(calls, "stopSelf", "()V", "cancelled VPN intent stop")
+    require_fields(reads, service, ["requestId", "instanceId", "state"], "VPN request identity/state guard")
+    if not {"REQUEST_ID", "INSTANCE_ID", "starting", "stopped", "stopping"} <= strings or not conditional or not {1, 2} <= literals:
+        fail_gate("R8 lifecycle gate missing conditional START_STICKY/START_NOT_STICKY VPN intent guard")
+    return {"set_client_enabled_persists_management_intent": True, "explicit_stop_service_apis_preserved": True,
             "framework_on_destroy_cleanup_preserved": True,
             "framework_revoke_cleanup_preserved": True,
-            "both_service_pause_guards_preserved": True, "r8_application_helpers_followed": True,
+            "main_foreground_management_guard_preserved": True,
+            "vpn_request_identity_guard_preserved": True, "vpn_stop_invalidates_pending_start": True,
+            "r8_application_helpers_followed": True,
             "static_check_only": True}
 
 

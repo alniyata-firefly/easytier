@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+    any::Any,
+    sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
+};
 
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -8,9 +11,24 @@ pub(super) struct AndroidTunLease {
     pub(super) instance_id: Uuid,
     pub(super) request_id: String,
     cancelled: watch::Sender<bool>,
+    instance: OnceLock<Weak<dyn Any + Send + Sync>>,
 }
 
 impl AndroidTunLease {
+    pub(super) fn bind_instance<T: Any + Send + Sync>(&self, instance: &Arc<T>) -> bool {
+        let instance: Arc<dyn Any + Send + Sync> = instance.clone();
+        self.instance.set(Arc::downgrade(&instance)).is_ok()
+    }
+
+    pub(super) fn bound_instance<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        self.instance.get()?.upgrade()?.downcast::<T>().ok()
+    }
+
+    pub(super) fn matches_instance<T: Any + Send + Sync>(&self, instance: &Arc<T>) -> bool {
+        self.bound_instance::<T>()
+            .is_some_and(|bound| Arc::ptr_eq(&bound, instance))
+    }
+
     pub(super) fn is_cancelled(&self) -> bool {
         *self.cancelled.borrow()
     }
@@ -66,6 +84,7 @@ impl AndroidTunLeases {
             instance_id,
             request_id,
             cancelled,
+            instance: OnceLock::new(),
         });
         if let Some(previous) = self.lock_current().replace(lease.clone()) {
             previous.cancel();
@@ -152,6 +171,39 @@ mod tests {
         assert!(leases.is_current(&next));
         assert!(Arc::ptr_eq(&leases.current().unwrap(), &next));
         assert!(!next.is_cancelled());
+    }
+
+    #[test]
+    fn same_uuid_replacement_is_not_the_core_instance_bound_to_the_lease() {
+        let leases = AndroidTunLeases::new();
+        let original = Arc::new(instance(1));
+        let replacement = Arc::new(instance(1));
+        let lease = leases.begin(instance(1), "request-a".into());
+        assert!(lease.bind_instance(&original));
+        assert!(lease.matches_instance(&original));
+        assert!(!lease.matches_instance(&replacement));
+        assert!(!lease.bind_instance(&replacement));
+        drop(original);
+        assert!(lease.bound_instance::<Uuid>().is_none());
+        assert!(!lease.matches_instance(&replacement));
+    }
+
+    #[test]
+    fn stale_core_cleanup_releases_only_its_bound_resource() {
+        let leases = AndroidTunLeases::new();
+        let (old_fd, mut old_observer) = resource();
+        let (new_fd, mut new_observer) = resource();
+        let original = Arc::new(Mutex::new(Some(old_fd)));
+        let replacement = Arc::new(Mutex::new(Some(new_fd)));
+        let lease = leases.begin(instance(1), "request-a".into());
+        assert!(lease.bind_instance(&original));
+        assert!(!lease.matches_instance(&replacement));
+        let owned = lease.bound_instance::<Mutex<Option<OwnedFd>>>().unwrap();
+        drop(owned.lock().unwrap().take());
+        assert_closed(&mut old_observer);
+        assert_open(&mut new_observer);
+        assert!(leases.finish_if_current(&lease));
+        assert_open(&mut new_observer);
     }
 
     #[test]

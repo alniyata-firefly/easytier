@@ -71,7 +71,7 @@ impl<R: Runtime> Vpnservice<R> {
             .map_err(Into::into)
     }
 
-    /// Receives service destruction directly in Rust, without a live WebView
+    /// Receives service destruction or system revocation directly in Rust, without a live WebView
     /// JavaScript listener. The callback must not block Android's main thread.
     #[cfg(target_os = "android")]
     pub fn register_native_stop_listener(
@@ -83,7 +83,7 @@ impl<R: Runtime> Vpnservice<R> {
         let handler = Channel::<VpnStatus>::new(move |body| {
             // A malformed or intermediate payload must never cancel an owner.
             if let Ok(status) = body.deserialize::<VpnStatus>() {
-                if !status.running && status.state.as_deref() == Some("stopped") {
+                if status.is_native_stop_notification() {
                     callback(status);
                 }
             }

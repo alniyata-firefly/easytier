@@ -164,6 +164,17 @@ impl InstanceFactory for NativeInstanceFactory {
     type CreateContext = ();
     type Error = anyhow::Error;
 
+    fn supports_manual_uplink_config(&self) -> bool {
+        let host = if self.compact_runtime {
+            super::config::compact_runtime_core_host_config()
+        } else {
+            super::config::runtime_core_host_config()
+        };
+        host.uplink_policy_supported
+            || host.ignore_unsupported_uplink_policy
+            || host.ignore_unsupported_config
+    }
+
     fn network_interfaces(
         &self,
         namespace: Option<String>,
@@ -218,6 +229,23 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn manual_uplink_capability_follows_effective_host_policy() {
+        let host = super::super::config::runtime_core_host_config();
+        let factory = NativeInstanceFactory::new(CoreProcessRuntime::new());
+        assert_eq!(
+            factory.supports_manual_uplink_config(),
+            host.uplink_policy_supported
+                || host.ignore_unsupported_uplink_policy
+                || host.ignore_unsupported_config
+        );
+        assert!(
+            factory
+                .with_compact_runtime()
+                .supports_manual_uplink_config()
+        );
+    }
+
     #[cfg(feature = "management")]
     struct InventoryTestFactory {
         native: NativeInstanceFactory,
@@ -229,6 +257,10 @@ mod tests {
         type Instance = NativeCoreInstance;
         type CreateContext = ();
         type Error = anyhow::Error;
+
+        fn supports_manual_uplink_config(&self) -> bool {
+            self.native.supports_manual_uplink_config()
+        }
 
         fn create(
             &self,
@@ -289,6 +321,10 @@ mod tests {
                 .await
                 .unwrap();
             assert!(response.supported);
+            assert_eq!(
+                response.supports_manual_uplink_config,
+                Some(manager.supports_manual_uplink_config())
+            );
             assert_eq!(response.namespace, None);
         }
         let config = TomlConfig::default();

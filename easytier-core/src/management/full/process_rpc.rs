@@ -13,7 +13,9 @@ use easytier_proto::{
         ListNetworkInstanceMetaResponse, ListNetworkInstanceRequest, ListNetworkInstanceResponse,
         NetworkInstanceRunningInfoMap, NetworkMeta, RetainNetworkInstanceRequest,
         RetainNetworkInstanceResponse, RunNetworkInstanceRequest, RunNetworkInstanceResponse,
-        ValidateConfigRequest, ValidateConfigResponse, WebClientService,
+        SaveNetworkInstanceConfigRequest, SaveNetworkInstanceConfigResponse,
+        StopNetworkInstanceRequest, StopNetworkInstanceResponse, ValidateConfigRequest,
+        ValidateConfigResponse, WebClientService,
     },
     rpc_types::{self, controller::BaseController},
 };
@@ -34,6 +36,10 @@ use super::{
 
 #[async_trait::async_trait]
 pub trait InstanceMutationHooks: Send + Sync + 'static {
+    fn runtime_control(&self) -> Option<easytier_proto::web::RuntimeControl> {
+        None
+    }
+
     fn manages_remote_config_instances(&self) -> bool {
         false
     }
@@ -47,6 +53,13 @@ pub trait InstanceMutationHooks: Send + Sync + 'static {
     }
 
     async fn post_remove_network_instances(
+        &self,
+        _instance_ids: &[uuid::Uuid],
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn post_stop_network_instances(
         &self,
         _instance_ids: &[uuid::Uuid],
     ) -> Result<(), String> {
@@ -173,14 +186,22 @@ where
         }
     }
 
-    async fn is_remote_removable(&self, control: &ConfigFileControl) -> bool {
+    async fn is_remote_removable(
+        &self,
+        instance_id: uuid::Uuid,
+        control: &ConfigFileControl,
+    ) -> bool {
         if control.is_read_only() || !control.is_deletable() {
             return false;
         }
         let Some(path) = control.path.as_deref() else {
             return true;
         };
-        !self.storage.inspect(path).await.is_read_only()
+        match self.storage.read_instance(path, instance_id).await {
+            Ok(None) => true,
+            Ok(Some(_)) => !self.storage.inspect(path).await.is_read_only(),
+            Err(_) => false,
+        }
     }
 
     async fn ensure_overwritable(
@@ -231,7 +252,11 @@ where
         started_instance_id: Option<uuid::Uuid>,
         file_cleanup: Option<ConfigFileCleanup>,
         restore_instance: Option<(TomlConfig, ConfigFileControl)>,
+        restore_explicit_stop: bool,
     ) {
+        if restore_explicit_stop && let Some(instance_id) = started_instance_id {
+            self.instances.retain_stopped_instance(instance_id);
+        }
         if let Some(instance_id) = started_instance_id
             && let Err(error) = self.instances.delete_network_instances([instance_id]).await
         {
@@ -265,6 +290,193 @@ where
         .await
     }
 
+    fn persisted_config_control(&self, instance_id: uuid::Uuid) -> Option<ConfigFileControl> {
+        self.instances
+            .config_control(instance_id)
+            .or_else(|| self.instances.retained_config_control(instance_id))
+            .or_else(|| {
+                self.instances.config_dir().map(|directory| {
+                    ConfigFileControl::new(
+                        Some(directory.join(format!("{instance_id}.toml"))),
+                        ConfigFilePermission::default(),
+                    )
+                })
+            })
+    }
+
+    fn parse_persisted_config(
+        &self,
+        instance_id: uuid::Uuid,
+        contents: &[u8],
+    ) -> anyhow::Result<TomlConfig> {
+        let text = std::str::from_utf8(contents)
+            .map_err(|_| anyhow::anyhow!("persisted instance configuration is not UTF-8"))?;
+        let config = TomlConfig::new_from_str(text)
+            .map_err(|_| anyhow::anyhow!("persisted instance configuration is invalid"))?;
+        let document = toml::from_str::<toml::Table>(text)
+            .map_err(|_| anyhow::anyhow!("persisted instance configuration is invalid"))?;
+        if document.contains_key("instance_id") {
+            anyhow::ensure!(
+                config.get_id() == instance_id,
+                "persisted instance UUID mismatch"
+            );
+        } else {
+            // Legacy single-instance files may omit the UUID. Only a retained
+            // or active registered control proves which Instance it belongs to.
+            anyhow::ensure!(
+                self.instances.config_control(instance_id).is_some()
+                    || self
+                        .instances
+                        .retained_config_control(instance_id)
+                        .is_some(),
+                "persisted instance UUID missing"
+            );
+            config.set_id(instance_id);
+        }
+        Ok(config)
+    }
+
+    async fn read_persisted_config(
+        &self,
+        instance_id: uuid::Uuid,
+        control: &ConfigFileControl,
+    ) -> anyhow::Result<TomlConfig> {
+        anyhow::ensure!(
+            !control.is_read_only(),
+            "instance configuration is read-only"
+        );
+        let path = control.path.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("durable configuration is unsupported for this instance")
+        })?;
+        anyhow::ensure!(
+            !self.storage.inspect(path).await.is_read_only(),
+            "persisted configuration is unavailable or read-only"
+        );
+        let contents = self
+            .storage
+            .read_instance(path, instance_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("persisted instance configuration not found"))?;
+        self.parse_persisted_config(instance_id, &contents)
+    }
+
+    /// Saves the desired configuration on this Host, without touching its
+    /// running Instance. In-memory Hosts must not acknowledge durable saves.
+    pub async fn save_network_instance_config(
+        &self,
+        config: TomlConfig,
+        requested_id: Option<uuid::Uuid>,
+        requested_source: Option<ConfigSource>,
+        explicit_instance_name: bool,
+    ) -> anyhow::Result<(uuid::Uuid, TomlConfig)> {
+        let instance_id = requested_id.unwrap_or_else(|| config.get_id());
+        config.set_id(instance_id);
+        let _mutation = self.mutation_lock.lock().await;
+        let live = self.instances.config(instance_id);
+        let control = self
+            .persisted_config_control(instance_id)
+            .unwrap_or_else(|| ConfigFileControl::new(None, ConfigFilePermission::default()));
+        anyhow::ensure!(
+            !control.is_read_only(),
+            "configuration for instance {instance_id} is read-only"
+        );
+        let path = control.path.as_deref().ok_or_else(|| anyhow::anyhow!(
+            "durable save is unsupported: instance has no writable configuration file; configure the remote process with --config-dir"
+        ))?;
+        let stored = self.storage.read_instance(path, instance_id).await?;
+        let stored_config = if let Some(contents) = stored.as_ref() {
+            anyhow::ensure!(
+                !self.storage.inspect(path).await.is_read_only(),
+                "configuration file is read-only"
+            );
+            Some(self.parse_persisted_config(instance_id, contents)?)
+        } else {
+            None
+        };
+        let existing = live.as_ref().or(stored_config.as_ref());
+        let source = existing
+            .map(|config| config.get_network_config_source())
+            .or(requested_source)
+            .unwrap_or(ConfigSource::User);
+        anyhow::ensure!(
+            source != ConfigSource::Web,
+            "centrally managed configuration must be saved through its controller"
+        );
+        config.set_network_config_source(Some(source));
+        if !explicit_instance_name && let Some(existing) = existing {
+            config.set_inst_name(existing.get_inst_name());
+        }
+        let pending = match live.as_ref() {
+            Some(live) => normalized_saved_settings(live)? != normalized_saved_settings(&config)?,
+            None => false,
+        };
+        if self.instances.instances().iter().any(|instance| {
+            instance.instance_id() != instance_id
+                && instance.instance_name() == config.get_inst_name()
+        }) {
+            anyhow::bail!("instance name {} already exists", config.get_inst_name());
+        }
+        self.storage
+            .write_instance(path, instance_id, config.dump().as_bytes())
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to persist instance configuration: {error}")
+            })?;
+        self.instances.retain_config_control(instance_id, control);
+        self.instances.set_config_save_pending(instance_id, pending);
+        Ok((instance_id, config))
+    }
+
+    pub async fn saved_network_instance_config(
+        &self,
+        instance_id: uuid::Uuid,
+    ) -> anyhow::Result<TomlConfig> {
+        let _mutation = self.mutation_lock.lock().await;
+        let control = self.persisted_config_control(instance_id).ok_or_else(|| {
+            anyhow::anyhow!("durable configuration is unsupported for this instance")
+        })?;
+        self.read_persisted_config(instance_id, &control).await
+    }
+
+    /// Stop only. Keeping control separately allows a later remote client to
+    /// read and start a stopped single-file Instance without a GUI-side cache.
+    pub async fn stop_network_instance(&self, instance_id: uuid::Uuid) -> anyhow::Result<()> {
+        let _mutation = self.mutation_lock.lock().await;
+        if self.instances.instance(instance_id).is_none()
+            && self.instances.is_explicitly_stopped(instance_id)
+        {
+            return Ok(());
+        }
+        let control = self
+            .instances
+            .config_control(instance_id)
+            .or_else(|| self.instances.retained_config_control(instance_id))
+            .ok_or_else(|| anyhow::anyhow!("instance configuration not found"))?;
+        anyhow::ensure!(
+            !control.is_read_only(),
+            "instance configuration is read-only"
+        );
+        if let Some(config) = self.instances.config(instance_id) {
+            anyhow::ensure!(
+                config.get_network_config_source() != ConfigSource::Web,
+                "centrally managed network lifecycle is controlled by its controller"
+            );
+        }
+        self.instances.retain_config_control(instance_id, control);
+        self.instances.retain_stopped_instance(instance_id);
+        let existed = self.instances.instance(instance_id).is_some();
+        self.instances
+            .delete_network_instances([instance_id])
+            .await?;
+        if existed {
+            self.hooks
+                .post_stop_network_instances(&[instance_id])
+                .await
+                .map_err(|error| anyhow::anyhow!("post-stop hook failed: {error}"))?;
+        }
+        Ok(())
+    }
+
     async fn run_network_instance_with_name_policy(
         &self,
         config: TomlConfig,
@@ -280,23 +492,36 @@ where
         }
         let _mutation = self.mutation_lock.lock().await;
         let remote_managed = self.hooks.manages_remote_config_instances();
+        let restore_explicit_stop = self.instances.is_explicitly_stopped(instance_id)
+            && self.instances.instance(instance_id).is_none();
 
         let mut replacing = false;
         let mut restore_instance = None;
-        let mut control = if let Some(control) = self.instances.config_control(instance_id) {
-            let existing_source = self.instances.config_source(instance_id);
+        let registered_control = self
+            .instances
+            .config_control(instance_id)
+            .or_else(|| self.instances.retained_config_control(instance_id));
+        let had_registered_control = registered_control.is_some();
+        let mut control = if let Some(control) = registered_control {
+            let runtime_exists = self.instances.instance(instance_id).is_some();
             let error_message = self
                 .instances
                 .network_info(instance_id)
                 .await
                 .and_then(|info| info.error_msg)
                 .unwrap_or_default();
-            if !overwrite && error_message.is_empty() {
+            if runtime_exists && !overwrite && error_message.is_empty() {
                 return Ok(instance_id);
             }
             self.ensure_overwritable(instance_id, &control, remote_managed)
                 .await?;
-            let existing_config = self.instances.config(instance_id);
+            let existing_config = match self.instances.config(instance_id) {
+                Some(config) => Some(config),
+                None => Some(self.read_persisted_config(instance_id, &control).await?),
+            };
+            let existing_source = existing_config
+                .as_ref()
+                .map(|config| config.get_network_config_source());
             if !explicit_instance_name && let Some(existing_config) = existing_config.as_ref() {
                 // Legacy DTOs generate a name from the shared network label.
                 // Preserve this UUID's independent name unless the request
@@ -304,8 +529,10 @@ where
                 config.set_inst_name(existing_config.get_inst_name());
             }
             config.set_network_config_source(requested_source.or(existing_source));
-            replacing = true;
-            restore_instance = existing_config.map(|config| (config, control.clone()));
+            replacing = runtime_exists;
+            if runtime_exists {
+                restore_instance = existing_config.map(|config| (config, control.clone()));
+            }
             control
         } else if let Some(config_dir) = self.instances.config_dir() {
             config.set_network_config_source(requested_source);
@@ -368,7 +595,7 @@ where
                 .write_instance(path, instance_id, config.dump().as_bytes())
                 .await
             {
-                if replacing {
+                if had_registered_control {
                     return Err(anyhow::anyhow!(
                         "failed to persist configuration for existing instance {instance_id}: {error}"
                     ));
@@ -383,25 +610,42 @@ where
         if replacing
             && let Err(error) = self.instances.delete_network_instances([instance_id]).await
         {
-            self.rollback_started_instance(None, file_cleanup, restore_instance)
-                .await;
+            self.rollback_started_instance(
+                None,
+                file_cleanup,
+                restore_instance,
+                restore_explicit_stop,
+            )
+            .await;
             return Err(error);
         }
 
         if let Err(error) = self.instances.run_network_instance(config, control) {
-            self.rollback_started_instance(None, file_cleanup, restore_instance)
-                .await;
+            self.rollback_started_instance(
+                None,
+                file_cleanup,
+                restore_instance,
+                restore_explicit_stop,
+            )
+            .await;
             return Err(error);
         }
 
         if let Err(error) = self.hooks.post_run_network_instance(&instance_id).await {
             if remote_managed {
-                self.rollback_started_instance(Some(instance_id), file_cleanup, restore_instance)
-                    .await;
+                self.rollback_started_instance(
+                    Some(instance_id),
+                    file_cleanup,
+                    restore_instance,
+                    restore_explicit_stop,
+                )
+                .await;
                 return Err(anyhow::anyhow!("post-run hook failed: {error}"));
             }
             tracing::warn!(%error, "post-run hook failed");
         }
+        self.instances.set_config_save_pending(instance_id, false);
+        self.instances.release_stopped_instance(instance_id);
         Ok(instance_id)
     }
 
@@ -429,6 +673,11 @@ where
     ) -> anyhow::Result<InstanceMutationResult> {
         let before = self.instances.instance_ids();
         if !self.hooks.manages_remote_config_instances() {
+            for instance_id in before.iter().filter(|id| !retained.contains(id)) {
+                if let Some(control) = self.instances.config_control(*instance_id) {
+                    self.instances.retain_config_control(*instance_id, control);
+                }
+            }
             let remaining = self.instances.retain_network_instances(&retained).await?;
             let remaining_set = remaining.iter().copied().collect::<HashSet<_>>();
             let removed = before
@@ -452,7 +701,7 @@ where
             let Some(control) = self.instances.config_control(instance_id) else {
                 continue;
             };
-            if self.is_remote_removable(&control).await {
+            if self.is_remote_removable(instance_id, &control).await {
                 removed.push(instance_id);
             } else {
                 retained.insert(instance_id);
@@ -475,27 +724,27 @@ where
     ) -> anyhow::Result<InstanceMutationResult> {
         let _mutation = self.mutation_lock.lock().await;
         let requested = requested.into_iter().collect::<HashSet<_>>();
-        let remote_managed = self.hooks.manages_remote_config_instances();
         let mut removed = Vec::new();
         let mut files = Vec::new();
-        for instance in self.instances.instances() {
-            let instance_id = instance.instance_id();
-            if !requested.contains(&instance_id) {
-                continue;
-            }
-            let Some(control) = self.instances.config_control(instance_id) else {
+        for instance_id in requested.iter().copied() {
+            let Some(control) = self
+                .instances
+                .config_control(instance_id)
+                .or_else(|| self.instances.retained_config_control(instance_id))
+            else {
                 continue;
             };
-            let removable = if remote_managed {
-                self.is_remote_removable(&control).await
-            } else {
-                control.is_deletable()
-            };
-            if removable {
-                removed.push(instance_id);
-                if let Some(path) = control.path {
-                    files.push((path, instance_id));
-                }
+            anyhow::ensure!(
+                self.is_remote_removable(instance_id, &control).await,
+                "instance {instance_id} is read-only or cannot be deleted"
+            );
+            // Preserve enough control to retry a failed file removal even
+            // after the runtime has already stopped.
+            self.instances
+                .retain_config_control(instance_id, control.clone());
+            removed.push(instance_id);
+            if let Some(path) = control.path {
+                files.push((path, instance_id));
             }
         }
         let remaining = self
@@ -504,12 +753,28 @@ where
             .await?;
         self.notify_removed_instances(&removed).await?;
         for (path, instance_id) in files {
-            if remote_managed && self.storage.inspect(&path).await.is_read_only() {
-                continue;
+            if self
+                .storage
+                .read_instance(&path, instance_id)
+                .await?
+                .is_some()
+            {
+                anyhow::ensure!(
+                    !self.storage.inspect(&path).await.is_read_only(),
+                    "configuration file became read-only"
+                );
+                self.storage
+                    .remove_instance(&path, instance_id)
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!("failed to remove persisted instance configuration")
+                    })?;
             }
-            if let Err(error) = self.storage.remove_instance(&path, instance_id).await {
-                tracing::warn!(%error, path = %path.display(), "failed to remove config file");
-            }
+            self.instances.forget_config_control(instance_id);
+        }
+        for instance_id in requested {
+            self.instances.forget_config_control(instance_id);
+            self.instances.release_stopped_instance(instance_id);
         }
         Ok(InstanceMutationResult {
             remaining_instance_ids: remaining,
@@ -534,7 +799,10 @@ where
         {
             anyhow::bail!("instance name {instance_name} already exists");
         }
-        self.instances.run_network_instance(config, control)
+        let instance_id = self.instances.run_network_instance(config, control)?;
+        self.instances.set_config_save_pending(instance_id, false);
+        self.instances.release_stopped_instance(instance_id);
+        Ok(instance_id)
     }
 
     /// Removes caller-owned Instances without applying remote config-file policy.
@@ -706,6 +974,36 @@ where
         })
     }
 
+    async fn save_network_instance_config(
+        &self,
+        _: BaseController,
+        request: SaveNetworkInstanceConfigRequest,
+    ) -> rpc_types::error::Result<SaveNetworkInstanceConfigResponse> {
+        let input = request
+            .config
+            .ok_or_else(|| anyhow::anyhow!("config is required"))?;
+        let explicit_instance_name = input.instance_name.is_some();
+        let config = input.gen_config()?;
+        let management = self.management.clone();
+        let (instance_id, config) = tokio::spawn(async move {
+            management
+                .save_network_instance_config(
+                    config,
+                    request.inst_id.map(Into::into),
+                    config_source_from_rpc(request.source),
+                    explicit_instance_name,
+                )
+                .await
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("config save transaction failed: {error}"))??;
+        Ok(SaveNetworkInstanceConfigResponse {
+            inst_id: Some(instance_id.into()),
+            config: Some(network_config_from_toml(&config)),
+            source: config_source_to_rpc(config.get_network_config_source()),
+        })
+    }
+
     async fn retain_network_instance(
         &self,
         _: BaseController,
@@ -768,6 +1066,13 @@ where
         _: ListNetworkInstanceRequest,
     ) -> rpc_types::error::Result<ListNetworkInstanceResponse> {
         Ok(ListNetworkInstanceResponse {
+            configured_inst_ids: self
+                .management
+                .instances
+                .configured_instance_ids()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             inst_ids: self
                 .management
                 .instances
@@ -798,6 +1103,22 @@ where
         })
     }
 
+    async fn stop_network_instance(
+        &self,
+        _: BaseController,
+        request: StopNetworkInstanceRequest,
+    ) -> rpc_types::error::Result<StopNetworkInstanceResponse> {
+        let instance_id = request
+            .inst_id
+            .ok_or_else(|| anyhow::anyhow!("instance id is required"))?
+            .into();
+        let management = self.management.clone();
+        tokio::spawn(async move { management.stop_network_instance(instance_id).await })
+            .await
+            .map_err(|error| anyhow::anyhow!("instance stop transaction failed: {error}"))??;
+        Ok(StopNetworkInstanceResponse { stopped: true })
+    }
+
     async fn get_network_instance_config(
         &self,
         _: BaseController,
@@ -807,6 +1128,24 @@ where
             .inst_id
             .ok_or_else(|| anyhow::anyhow!("instance id is required"))?
             .into();
+        if request.prefer_persisted
+            || (self.management.instances.instance(instance_id).is_none()
+                && self
+                    .management
+                    .instances
+                    .retained_config_control(instance_id)
+                    .is_some())
+        {
+            let config = self
+                .management
+                .saved_network_instance_config(instance_id)
+                .await?;
+            return Ok(GetNetworkInstanceConfigResponse {
+                source: config_source_to_rpc(config.get_network_config_source()),
+                config: Some(network_config_from_toml(&config)),
+                persisted: true,
+            });
+        }
         let control = self
             .management
             .instances
@@ -818,6 +1157,7 @@ where
             );
         }
         Ok(GetNetworkInstanceConfigResponse {
+            persisted: false,
             config: self
                 .management
                 .instances
@@ -839,20 +1179,31 @@ where
     ) -> rpc_types::error::Result<ListNetworkInstanceMetaResponse> {
         let mut metas = Vec::with_capacity(request.inst_ids.len());
         for instance_id in request.inst_ids.into_iter().map(uuid::Uuid::from) {
-            let Some(instance) = self.management.instances.instance(instance_id) else {
+            let Some(control) = self
+                .management
+                .instances
+                .config_control(instance_id)
+                .or_else(|| {
+                    self.management
+                        .instances
+                        .retained_config_control(instance_id)
+                })
+            else {
                 continue;
             };
-            let Some(config) = instance.toml_config() else {
-                continue;
-            };
-            let Some(control) = self.management.instances.config_control(instance_id) else {
-                continue;
+            let config = match self.management.instances.config(instance_id) {
+                Some(config) => config,
+                None => {
+                    self.management
+                        .saved_network_instance_config(instance_id)
+                        .await?
+                }
             };
             metas.push(NetworkMeta {
                 inst_id: Some(instance_id.into()),
                 network_name: config.get_network_identity().network_name,
                 config_permission: control.permission.into(),
-                instance_name: instance.instance_name().to_owned(),
+                instance_name: config.get_inst_name(),
                 source: config_source_to_rpc(config.get_network_config_source()),
             });
         }
@@ -876,7 +1227,10 @@ where
             .instances
             .network_interfaces(namespace)
             .await?;
-        Ok(network_interfaces_to_rpc(inventory))
+        let mut response = network_interfaces_to_rpc(inventory);
+        response.supports_manual_uplink_config =
+            Some(self.management.instances.supports_manual_uplink_config());
+        Ok(response)
     }
 }
 
@@ -884,6 +1238,7 @@ fn network_interfaces_to_rpc(
     inventory: crate::host_inventory::NetworkInterfaceInventory,
 ) -> GetNetworkInterfacesResponse {
     GetNetworkInterfacesResponse {
+        supports_manual_uplink_config: None,
         supported: inventory.supported,
         sampled_at_unix_ms: inventory.sampled_at_unix_ms,
         namespace: inventory.namespace,
@@ -913,3 +1268,14 @@ fn network_interfaces_to_rpc(
             .collect(),
     }
 }
+
+fn normalized_saved_settings(
+    config: &TomlConfig,
+) -> anyhow::Result<easytier_proto::api::manage::NetworkConfig> {
+    let normalized = network_config_from_toml(config).gen_config()?;
+    Ok(network_config_from_toml(&normalized))
+}
+
+#[cfg(all(test, feature = "management"))]
+#[path = "process_rpc_tests.rs"]
+mod tests;

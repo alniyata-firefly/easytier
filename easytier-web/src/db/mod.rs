@@ -5,6 +5,7 @@ mod device_rebind_requests;
 mod devices;
 #[allow(unused_imports)]
 pub mod entity;
+mod management_connection_events;
 
 pub(crate) use central_intent::{CentralIntentError, CentralOwnedRuntimeConfig};
 pub(crate) use device_access_tokens::token_hash as device_access_token_hash;
@@ -15,6 +16,9 @@ pub(crate) use device_rebind_requests::{
     DeviceRebindApproval, DeviceRebindError, DeviceRebindRequestInfo,
 };
 pub use devices::DeviceHeartbeatRecord;
+pub(crate) use management_connection_events::{
+    ManagementConnectionEventKind, ManagementConnectionEventPage, ManagementFailureReason,
+};
 
 use easytier::common::config::{ConfigSource, NetworkConfig};
 use easytier_core::management::remote_client::{ListNetworkProps, Storage};

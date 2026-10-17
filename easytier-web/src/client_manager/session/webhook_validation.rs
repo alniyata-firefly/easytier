@@ -375,7 +375,7 @@ async fn apply_rejected_with_reason(
     let Some(session_data) = session_data.upgrade() else {
         return;
     };
-    let (storage_token, disconnect_notification, session_epoch) = {
+    let (storage_token, disconnect_notification, session_epoch, was_authorized) = {
         let mut data = session_data.write().await;
         if !data.req.as_ref().is_some_and(|req| {
             SessionRpcService::heartbeat_matches_identity(
@@ -399,6 +399,7 @@ async fn apply_rejected_with_reason(
             pending_rebind,
             "webhook token rejected; marking session invalid and requiring client reconnect"
         );
+        let was_authorized = data.auth_state.is_authorized();
         data.auth_state = SessionAuthState::Invalid;
         data.pending_rebind = pending_rebind;
         data.webhook_validation_dirty = false;
@@ -413,9 +414,22 @@ async fn apply_rejected_with_reason(
                     binding_version,
                 })
         });
-        (storage_token, disconnect_notification, data.session_epoch)
+        (
+            storage_token,
+            disconnect_notification,
+            data.session_epoch,
+            was_authorized,
+        )
     };
     if let Some(storage_token) = storage_token {
+        if was_authorized {
+            super::management_events::queue_connection(
+                &input.storage,
+                &storage_token,
+                session_epoch,
+                crate::db::ManagementConnectionEventKind::AuthorizationLost,
+            );
+        }
         let report_time = SessionRpcService::heartbeat_report_timestamp(&input.req);
         input
             .storage
@@ -602,6 +616,7 @@ pub(super) async fn apply_success(
     input
         .storage
         .update_session_client(storage_token, report_time, true, session_epoch);
+    super::management_events::record_authorized(&session_data).await;
 
     if let Some(validation_notify) = validation_notify {
         validation_notify.notify_one();

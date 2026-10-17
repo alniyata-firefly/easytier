@@ -1,0 +1,38 @@
+{
+  "title": "近期隧道事件",
+  "refresh": "刷新",
+  "loading": "正在读取隧道连接事件",
+  "unavailable": "无法读取当前实例事件，请检查设备与实例状态。",
+  "empty": "当前内存窗口暂无隧道连接事件",
+  "columns": {
+    "time": "时间",
+    "event": "事件",
+    "peer": "Peer ID",
+    "protocol": "协议",
+    "local": "本地端点",
+    "remote": "对端端点",
+    "reason": "失败原因"
+  },
+  "events": {
+    "Connecting": "正在建立隧道",
+    "ConnectError": "隧道连接失败",
+    "ConnectionAccepted": "已接受传输连接",
+    "ConnectionError": "传输连接异常",
+    "PeerAdded": "节点已连接",
+    "PeerRemoved": "节点已断开",
+    "PeerConnAdded": "节点隧道已建立",
+    "PeerConnRemoved": "节点隧道已断开"
+  },
+  "reasons": {
+    "timeout": "连接超时",
+    "refused": "对端拒绝连接",
+    "unreachable": "网络或主机不可达",
+    "name_resolution": "端点域名解析失败",
+    "reset": "连接被重置",
+    "closed": "连接提前关闭",
+    "permission": "系统拒绝网络操作",
+    "authentication": "连接认证或握手失败",
+    "cancelled": "连接请求已取消",
+    "unknown": "连接失败，原因未分类"
+  }
+}

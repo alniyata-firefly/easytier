@@ -16,12 +16,12 @@ use easytier::{
             instance::{InstanceIdentifier, instance_identifier},
             manage::{
                 ConfigSource as RpcConfigSource, GetNetworkInstanceConfigRequest,
-                ManagedCredentialConfig, ManagedCredentialSet, NetworkConfig,
-                RunNetworkInstanceRequest,
+                GetNetworkInterfacesRequest, GetNetworkInterfacesResponse, ManagedCredentialConfig,
+                ManagedCredentialSet, NetworkConfig, RunNetworkInstanceRequest,
             },
         },
         common::{CompressionAlgoPb, Ipv4Inet as RpcIpv4Inet},
-        rpc_types::controller::BaseController,
+        rpc_types::{controller::BaseController, error::Error as RpcError},
     },
 };
 
@@ -30,6 +30,67 @@ use super::session::{SessionConfigClient, SessionRpcClient};
 #[derive(Debug, thiserror::Error)]
 #[error("This client Core does not support IPv6 preference; update the client before enabling it")]
 pub(super) struct UnsupportedIpv6Preference;
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "This client Core does not report uplink policy support; upgrade the target client before selecting manual uplink interfaces. The existing network is retained"
+)]
+pub(super) struct UnsupportedUplinkPolicy;
+
+pub(super) fn is_client_runtime_paused_error(error: &RpcError) -> bool {
+    matches!(error, RpcError::ExecutionError(source)
+        if source.to_string().lines().next() == Some("pre-run hook failed: CLIENT_RUNTIME_PAUSED"))
+}
+
+fn requires_manual_uplink(config: &NetworkConfig) -> bool {
+    config
+        .uplink
+        .as_ref()
+        .is_some_and(|policy| policy.mode == "manual")
+}
+
+fn supports_manual_uplink_response(response: &GetNetworkInterfacesResponse) -> bool {
+    // The explicit marker also covers Android Hosts: they preserve a valid
+    // desktop policy without applying interface binding on the phone. Earlier
+    // builds of this fork predate the marker but support the inventory RPC on
+    // desktop. Unsupported/unknown RPCs never constitute capability evidence.
+    response
+        .supports_manual_uplink_config
+        .unwrap_or(response.supported)
+}
+
+pub(super) async fn ensure_manual_uplink_supported_before_run(
+    rpc_client: &mut SessionRpcClient,
+    desired: &NetworkConfig,
+) -> anyhow::Result<()> {
+    if !requires_manual_uplink(desired) {
+        return Ok(());
+    }
+    let response = rpc_client
+        .get_network_interfaces(
+            BaseController::default(),
+            GetNetworkInterfacesRequest { inst_id: None },
+        )
+        .await;
+    if response.as_ref().is_ok_and(supports_manual_uplink_response) {
+        return Ok(());
+    }
+    // This check precedes the first Run and its mutation fence. A version
+    // number, including this fork's version, cannot prove field support.
+    Err(UnsupportedUplinkPolicy.into())
+}
+
+fn ensure_uplink_policy_supported(
+    current: &NetworkConfig,
+    desired: &NetworkConfig,
+) -> anyhow::Result<()> {
+    // This fork reports an explicit policy, including Auto. Upstream builds can
+    // have the same release number while silently discarding this DTO field.
+    if current.uplink.is_none() && requires_manual_uplink(desired) {
+        return Err(UnsupportedUplinkPolicy.into());
+    }
+    Ok(())
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -482,6 +543,7 @@ pub(super) fn ensure_runtime_config_converged(
     desired: &NetworkConfig,
     hostname_applied: bool,
 ) -> anyhow::Result<()> {
+    ensure_uplink_policy_supported(current, desired)?;
     let patch = web_source_runtime_patch(current, desired)?;
     match patch {
         Some(mut patch) => {
@@ -531,6 +593,7 @@ pub(super) async fn get_runtime_config(
             BaseController::default(),
             GetNetworkInstanceConfigRequest {
                 inst_id: Some(inst_id.to_string().into()),
+                prefer_persisted: false,
             },
         )
         .await?
@@ -547,6 +610,7 @@ pub(super) async fn prepare_web_source_runtime_reconcile(
 ) -> anyhow::Result<RuntimeReconcileAction> {
     if !is_running {
         ensure_extended_config_supported(&desired_config, None, client_version)?;
+        ensure_manual_uplink_supported_before_run(rpc_client, &desired_config).await?;
         return Ok(RuntimeReconcileAction::Run {
             config: Box::new(desired_config),
             overwrite: false,
@@ -562,6 +626,7 @@ pub(super) fn prepare_web_source_runtime_reconcile_from_current(
     current_config: &NetworkConfig,
     desired_config: NetworkConfig,
 ) -> anyhow::Result<RuntimeReconcileAction> {
+    ensure_uplink_policy_supported(current_config, &desired_config)?;
     ensure_extended_config_supported(&desired_config, Some(current_config), None)?;
     // The optional DTO field is also a capability marker: updated Core always
     // reports Some(false/true), while older Core omits it. Avoid repeatedly
@@ -595,6 +660,9 @@ pub(super) async fn apply_web_source_runtime_reconcile(
     desired_config: NetworkConfig,
     action: RuntimeReconcileAction,
 ) -> anyhow::Result<NetworkConfig> {
+    if !matches!(action, RuntimeReconcileAction::Unchanged(_)) {
+        ensure_manual_uplink_supported_before_run(rpc_client, &desired_config).await?;
+    }
     match action {
         RuntimeReconcileAction::Unchanged(current_config) => Ok(*current_config),
         RuntimeReconcileAction::Run { config, overwrite } => {
@@ -626,6 +694,145 @@ pub(super) async fn apply_web_source_runtime_reconcile(
 
 #[cfg(test)]
 mod tests {
+    #[derive(Clone)]
+    struct UplinkCapabilityRpc {
+        response: Option<super::GetNetworkInterfacesResponse>,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl easytier::proto::rpc_types::handler::Handler for UplinkCapabilityRpc {
+        type Descriptor = <easytier::proto::api::manage::WebClientServiceClientFactory<
+            super::BaseController,
+        > as easytier::proto::rpc_types::__rt::RpcClientFactory>::Descriptor;
+        type Controller = super::BaseController;
+
+        async fn call(
+            &self,
+            _controller: Self::Controller,
+            method: <Self::Descriptor as easytier::proto::rpc_types::descriptor::ServiceDescriptor>::Method,
+            input: axum::body::Bytes,
+        ) -> easytier::proto::rpc_types::error::Result<axum::body::Bytes> {
+            use easytier::proto::rpc_types::{__rt, descriptor::MethodDescriptor as _};
+
+            assert_eq!(
+                method.input_type(),
+                std::any::TypeId::of::<super::GetNetworkInterfacesRequest>(),
+                "preflight must not create an instance to discover its capability"
+            );
+            let request: super::GetNetworkInterfacesRequest = __rt::decode(input)?;
+            assert!(request.inst_id.is_none());
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.response.clone() {
+                Some(response) => __rt::encode(response),
+                None => Err(super::RpcError::InvalidMethodIndex(
+                    method.index(),
+                    "WebClientService".into(),
+                )),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn first_manual_run_requires_capability_before_any_runtime_is_created() {
+        use easytier::proto::{
+            api::manage::WebClientServiceClientFactory, rpc_types::__rt::RpcClientFactory as _,
+        };
+
+        for (response, allowed) in [
+            (None, false),
+            (Some(GetNetworkInterfacesResponse::default()), false),
+            (
+                Some(GetNetworkInterfacesResponse {
+                    supported: false,
+                    supports_manual_uplink_config: Some(true),
+                    ..Default::default()
+                }),
+                true,
+            ),
+            (
+                Some(GetNetworkInterfacesResponse {
+                    supported: true,
+                    supports_manual_uplink_config: Some(false),
+                    ..Default::default()
+                }),
+                false,
+            ),
+        ] {
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut rpc_client: SessionRpcClient =
+                WebClientServiceClientFactory::<BaseController>::new(UplinkCapabilityRpc {
+                    response,
+                    calls: calls.clone(),
+                });
+            let result = prepare_web_source_runtime_reconcile(
+                &mut rpc_client,
+                &uuid::Uuid::new_v4().to_string(),
+                with_manual_uplink(NetworkConfig::default()),
+                false,
+                Some("99.0.0"),
+            )
+            .await;
+            assert_eq!(result.is_ok(), allowed);
+            if let Err(error) = result {
+                assert!(error.is::<UnsupportedUplinkPolicy>());
+            }
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            // Default automatic selection never requires the new RPC.
+            ensure_manual_uplink_supported_before_run(&mut rpc_client, &NetworkConfig::default())
+                .await
+                .unwrap();
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn manual_uplink_preflight_uses_explicit_host_capability_instead_of_inventory_platform() {
+        for (supported, marker, expected) in [
+            (false, Some(true), true),
+            (true, Some(true), true),
+            (false, Some(false), false),
+            (true, Some(false), false),
+            (false, None, false),
+            (true, None, true),
+        ] {
+            assert_eq!(
+                super::supports_manual_uplink_response(&super::GetNetworkInterfacesResponse {
+                    supported,
+                    supports_manual_uplink_config: marker,
+                    ..Default::default()
+                }),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn client_pause_error_is_exact_and_survives_the_rpc_wire_format() {
+        let paused = super::RpcError::ExecutionError(anyhow::anyhow!(
+            "pre-run hook failed: CLIENT_RUNTIME_PAUSED"
+        ));
+        let wire: easytier::proto::error::Error = (&paused).into();
+        let decoded: super::RpcError = (&wire).into();
+        assert!(super::is_client_runtime_paused_error(&decoded));
+        // RPC serializes anyhow's Debug representation, which can append a
+        // backtrace when the host has RUST_LIB_BACKTRACE enabled.
+        assert!(super::is_client_runtime_paused_error(
+            &super::RpcError::ExecutionError(anyhow::anyhow!(
+                "pre-run hook failed: CLIENT_RUNTIME_PAUSED\n\nStack backtrace:\n  fixture"
+            ))
+        ));
+        for message in [
+            "CLIENT_RUNTIME_PAUSED",
+            "pre-run hook failed: real creation failure",
+            "pre-run hook failed: CLIENT_RUNTIME_PAUSED extra error",
+        ] {
+            assert!(!super::is_client_runtime_paused_error(
+                &super::RpcError::ExecutionError(anyhow::anyhow!(message.to_owned()))
+            ));
+        }
+    }
+
     #[test]
     fn prefer_ipv6_requires_updated_core_without_rebuilding_legacy_runtime() {
         let current = super::NetworkConfig::default();
@@ -659,6 +866,71 @@ mod tests {
     };
 
     use super::*;
+
+    fn with_manual_uplink(mut config: NetworkConfig) -> NetworkConfig {
+        config.uplink = Some(easytier::proto::api::manage::UplinkConfig {
+            mode: "manual".to_owned(),
+            interfaces: vec!["Ethernet 2".to_owned()],
+        });
+        config
+    }
+
+    #[test]
+    fn manual_uplink_requires_runtime_capability_before_overwriting_a_legacy_instance() {
+        let current = config_with_port_forwards(Vec::new());
+        assert!(current.uplink.is_none());
+        let desired = with_manual_uplink(current.clone());
+        let error = prepare_web_source_runtime_reconcile_from_current(&current, desired.clone())
+            .err()
+            .expect("legacy runtime must not be overwritten with an unsupported uplink policy");
+        assert!(error.is::<UnsupportedUplinkPolicy>());
+        assert!(error.to_string().contains("upgrade the target client"));
+        assert!(current.uplink.is_none());
+        // A first Run may have succeeded after an older Core ignored the field.
+        // Its readback must fail explicitly; subsequent plans use the same gate.
+        assert!(
+            ensure_runtime_config_converged(&current, &desired, false)
+                .unwrap_err()
+                .is::<UnsupportedUplinkPolicy>()
+        );
+    }
+
+    #[test]
+    fn automatic_uplink_remains_compatible_with_missing_legacy_metadata() {
+        let current = config_with_port_forwards(Vec::new());
+        let mut desired = current.clone();
+        desired.uplink = Some(easytier::proto::api::manage::UplinkConfig {
+            mode: "auto".to_owned(),
+            interfaces: Vec::new(),
+        });
+        assert!(matches!(
+            prepare_web_source_runtime_reconcile_from_current(&current, desired.clone()).unwrap(),
+            RuntimeReconcileAction::Unchanged(_)
+        ));
+        ensure_runtime_config_converged(&current, &desired, false).unwrap();
+    }
+
+    #[test]
+    fn manual_uplink_uses_actual_metadata_and_converges_when_policy_is_retained() {
+        let mut current = config_with_port_forwards(Vec::new());
+        current.uplink = Some(easytier::proto::api::manage::UplinkConfig {
+            mode: "auto".to_owned(),
+            interfaces: Vec::new(),
+        });
+        let desired = with_manual_uplink(current.clone());
+        assert!(matches!(
+            prepare_web_source_runtime_reconcile_from_current(&current, desired.clone()).unwrap(),
+            RuntimeReconcileAction::Run {
+                overwrite: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            prepare_web_source_runtime_reconcile_from_current(&desired, desired.clone()).unwrap(),
+            RuntimeReconcileAction::Unchanged(_)
+        ));
+        ensure_runtime_config_converged(&desired, &desired, false).unwrap();
+    }
 
     #[test]
     fn extended_config_rejects_every_new_field_before_legacy_runtime_mutation() {

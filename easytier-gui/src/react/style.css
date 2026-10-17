@@ -125,8 +125,9 @@ legend { font-weight: 500; padding: 0 0 10px; }
 .preview-row:hover { text-decoration: none; }
 .status { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; color: var(--muted); }
 .status-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-.status.online,.status.applied,.status.active,.status.bound,.status.running { color: var(--success); }
-.status.pending,.status.waiting_offline,.status.unbound { color: var(--warning); }
+.status.online,.status.applied,.status.active,.status.bound { color: var(--success); }
+.status.running { color: var(--accent-text); }
+.status.pending,.status.waiting_offline,.status.unbound,.status.connecting,.status.disconnecting,.status.authenticating { color: var(--warning); }
 .status.failed,.status.expired { color: var(--danger); }
 .alert { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px; background: transparent; font-size: 13px; color: var(--muted); }
 .alert svg { flex-shrink: 0; width: 17px; height: 17px; margin-top: 2px; }

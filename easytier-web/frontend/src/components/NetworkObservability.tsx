@@ -5,6 +5,7 @@ import { errorDescriptor, useResource, type ErrorDescriptor } from '../lib/hooks
 import { RuntimeDisplay, Utils } from '../lib/shared';
 import { formatDate } from '../lib/i18n';
 import { Alert, Button, Empty, Field, Panel, Status } from './ui';
+import { ManagementStatus } from './ManagementStatus';
 import { NodeMetrics } from './NodeMetrics';
 import { useMetricFormat } from './MetricFormat';
 
@@ -14,7 +15,7 @@ const latency = (value: unknown, microseconds = false) => { const count = Runtim
 const routeAddress = (route: NodeRouteInfo) => route.ipv4_addr?.address ? `${Utils.ipv4ToString({ addr: route.ipv4_addr.address.addr ?? 0 })}/${route.ipv4_addr.network_length ?? '?'}` : route.ipv6_addr?.address ? `${Utils.ipv6ToString(route.ipv6_addr.address)}/${route.ipv6_addr.network_length ?? '?'}` : '—';
 type LocalObservation = { deviceId: string; peers?: NodePeerInfo[]; routes?: NodeRouteInfo[]; errors: Array<{ part: string; error: ErrorDescriptor }> };
 const errorParts = ['connections', 'routes'];
-export function NetworkObservability({ api, networkId, members, gateway }: { api: ApiClient; networkId: string; members: CentralNetworkMember[]; gateway?: NetworkDeployment['gateway'] }) {
+export function NetworkObservability({ api, networkId, members, gateway, managementUnknown = false }: { api: ApiClient; networkId: string; members: CentralNetworkMember[]; gateway?: NetworkDeployment['gateway']; managementUnknown?: boolean }) {
     const { t } = useTranslation('metrics'), metricFormat = useMetricFormat();
     const [selection, setSelection] = useState('');
     const selected = members.find(member => member.device_id === selection) ?? members.find(member => member.online) ?? members[0];
@@ -32,7 +33,7 @@ export function NetworkObservability({ api, networkId, members, gateway }: { api
     return <div className="network-observability stack">
         {resource.error && <Alert tone="warning">{t('network.readFailed', { error: resource.error })}<Button tone="ghost" onClick={resource.refresh}>{t('common:retry')}</Button></Alert>}
         {selected ? <Panel title={t('network.nodeObservation', { name: name(selected) })} className="node-observation-panel" action={<div className="actions">{available && <small className="muted">{resource.updatedAt ? t('network.updated', { time: formatDate(resource.updatedAt, { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }) : t('network.loading')}</small>}<Button icon="refresh" tone="ghost" busy={resource.loading} onClick={resource.refresh}>{t('common:refresh')}</Button></div>}>
-            <div className="node-observation-toolbar"><Field label={t('network.selectNode')}><select aria-label={t('network.selectNode')} value={selected.device_id} onChange={event => setSelection(event.target.value)}>{members.map(member => <option key={member.device_id} value={member.device_id}>{name(member)}{member.online ? '' : t('network.offlineSuffix')}</option>)}</select></Field><Status state={selected.online ? 'online' : 'offline'} /><Status state={selected.running === true ? 'running' : selected.running === false ? 'stopped' : 'unknown'} /></div>
+            <div className="node-observation-toolbar"><Field label={t('network.selectNode')}><select aria-label={t('network.selectNode')} value={selected.device_id} onChange={event => setSelection(event.target.value)}>{members.map(member => <option key={member.device_id} value={member.device_id}>{name(member)}{member.online || managementUnknown ? '' : t('network.offlineSuffix')}</option>)}</select></Field><ManagementStatus online={selected.online} unknown={managementUnknown} /><Status state={managementUnknown ? 'unknown' : selected.running === true ? 'running' : selected.running === false ? 'stopped' : 'unknown'} /></div>
             {selected.running === false && selected.online ? <Empty title={t('network.stopped')} /> : <>
                 <NodeMetrics key={`${networkId}:${selected.device_id}`} api={api} machineId={selected.device_id} instanceId={networkId} online={selected.online} nodeName={name(selected)} />
                 {selected.online && <div className="node-connectivity stack">

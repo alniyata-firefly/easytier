@@ -416,6 +416,65 @@ no_tun = true
         }
     }
 
+    #[cfg(feature = "management")]
+    #[tokio::test]
+    async fn process_save_stop_restart_and_delete_preserve_other_shared_file_instances() {
+        use easytier_core::{
+            config::toml::{ConfigLoader as _, ConfigSource, TomlConfig},
+            management::ProcessManagement,
+        };
+
+        let (_directory, path, _original) = fixture();
+        let before = document(&path);
+        let manager = Arc::new(crate::instance::factory::native_instance_manager());
+        let id = uuid::Uuid::parse_str(FIRST_ID).unwrap();
+        manager
+            .run_network_instance(
+                TomlConfig::new_from_str(&instance_text(FIRST_ID, "alpha", "live")).unwrap(),
+                ConfigFileControl::new(Some(path.clone()), ConfigFilePermission::default()),
+            )
+            .unwrap();
+        let management = ProcessManagement::new(
+            manager.clone(),
+            Arc::new(()),
+            Arc::new(NativeConfigFileStorage),
+        );
+        management
+            .save_network_instance_config(
+                TomlConfig::new_from_str(&instance_text(FIRST_ID, "alpha", "saved-for-next-run"))
+                    .unwrap(),
+                Some(id),
+                Some(ConfigSource::User),
+                true,
+            )
+            .await
+            .unwrap();
+        management.stop_network_instance(id).await.unwrap();
+        assert!(manager.instance_ids().is_empty());
+        let saved = management.saved_network_instance_config(id).await.unwrap();
+        assert_eq!(saved.get_hostname(), "saved-for-next-run");
+        let after_stop = document(&path);
+        assert_eq!(after_stop["host_resources"], before["host_resources"]);
+        assert_eq!(
+            selected_table(&after_stop, SECOND_ID),
+            selected_table(&before, SECOND_ID)
+        );
+        management
+            .run_network_instance(saved, Some(id), false, Some(ConfigSource::User))
+            .await
+            .unwrap();
+        assert!(manager.instance(id).is_some());
+        management.stop_network_instance(id).await.unwrap();
+        management.delete_network_instances(vec![id]).await.unwrap();
+        let after_delete = document(&path);
+        assert!(find_instance_index(&after_delete, id).unwrap().is_none());
+        assert_eq!(
+            selected_table(&after_delete, SECOND_ID),
+            selected_table(&before, SECOND_ID)
+        );
+        assert_eq!(after_delete["host_resources"], before["host_resources"]);
+    }
+
     #[tokio::test]
     async fn concurrent_bundle_updates_from_distinct_adapters_do_not_lose_siblings() {
         let (_directory, path, _) = fixture();

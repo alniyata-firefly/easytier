@@ -9,7 +9,7 @@ mod local_client_lifecycle;
 
 use anyhow::Context;
 #[cfg(target_os = "android")]
-use easytier::instance::factory::subscribe_native_instance_event;
+use easytier::instance::factory::{NativeCoreInstance, subscribe_native_instance_event};
 use easytier::proto::api::config::{
     ConfigPatchAction, ConfigRpc, ConfigRpcClientFactory, VpnPortalClientPatch,
 };
@@ -85,28 +85,47 @@ static WEB_CLIENT: once_cell::sync::Lazy<RwLock<Option<WebClient>>> =
 static LOCAL_CLIENT_LIFECYCLE: local_client_lifecycle::LocalClientLifecycle =
     local_client_lifecycle::LocalClientLifecycle::new();
 
+#[cfg(target_os = "android")]
+async fn stop_current_android_networks() -> Result<(), String> {
+    if let Some(lease) = ANDROID_TUN_LEASES.current() {
+        ANDROID_TUN_LEASES.cancel_matching(lease.instance_id, &lease.request_id);
+    }
+    let manager = INSTANCE_MANAGER.read().await.clone();
+    if let Some(manager) = manager {
+        let _mutation = manager.mutation_lock().lock_owned().await;
+        if let Some(lease) = ANDROID_TUN_LEASES.current() {
+            ANDROID_TUN_LEASES.cancel_matching(lease.instance_id, &lease.request_id);
+            detach_android_tun_locked(&lease).await?;
+        }
+        // Closing the OS interface alone leaves peer sessions and forwarding
+        // alive. Stop every local data-plane instance, retaining GUI configs
+        // and the independent management connection.
+        manager
+            .retain_network_instances(&[])
+            .await
+            .map_err(|error| error.to_string())?;
+        if !manager.instance_ids().is_empty() {
+            return Err("local VPN instances are still stopping".to_owned());
+        }
+    } else if let Some(lease) = ANDROID_TUN_LEASES.current() {
+        ANDROID_TUN_LEASES.cancel_matching(lease.instance_id, &lease.request_id);
+        detach_android_tun_locked(&lease).await?;
+    }
+    if ANDROID_TUN_LEASES.current().is_some() {
+        return Err("Android VPN TUN cleanup is incomplete".to_owned());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn stop_local_client() -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         LOCAL_CLIENT_LIFECYCLE
-            .stop(std::time::Duration::from_secs(15), async {
-                // Disconnect reconciliation locally without modifying the central
-                // membership, credentials, or saved GUI configuration.
-                drop(WEB_CLIENT.write().await.take());
-                let manager = INSTANCE_MANAGER.read().await.clone();
-                if let Some(manager) = manager {
-                    let _mutation = manager.mutation_lock().lock_owned().await;
-                    manager
-                        .retain_network_instances(&[])
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    if !manager.instance_ids().is_empty() {
-                        return Err("local client still has active network instances".to_owned());
-                    }
-                }
-                Ok(())
-            })
+            .stop(
+                std::time::Duration::from_secs(15),
+                stop_current_android_networks(),
+            )
             .await
     }
     #[cfg(not(target_os = "android"))]
@@ -121,6 +140,93 @@ async fn resume_local_client() -> Result<(), String> {
     }
     #[cfg(not(target_os = "android"))]
     Err("local client suspension is only supported on Android".to_owned())
+}
+
+#[tauri::command]
+fn is_local_client_enabled() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        LOCAL_CLIENT_LIFECYCLE.is_enabled()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
+}
+
+async fn validated_local_vpn_status(
+    app: AppHandle,
+) -> Result<Option<tauri_plugin_vpnservice::VpnStatus>, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri_plugin_vpnservice::VpnserviceExt;
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            if LOCAL_CLIENT_LIFECYCLE.is_paused() {
+                return Ok(None);
+            }
+            let Some(manager) = INSTANCE_MANAGER.read().await.clone() else {
+                return Ok(None);
+            };
+            let _mutation = manager.mutation_lock().lock_owned().await;
+            let Some(lease) = ANDROID_TUN_LEASES.current() else {
+                return Ok(None);
+            };
+            let Some(instance) = manager.instance(lease.instance_id) else {
+                return Ok(None);
+            };
+            if LOCAL_CLIENT_LIFECYCLE.is_paused()
+                || lease.is_cancelled()
+                || !lease.matches_instance(&instance)
+                || instance.state() != easytier_core::instance::CoreInstanceState::Running
+            {
+                return Ok(None);
+            }
+            let snapshot = tokio::task::spawn_blocking(move || {
+                app.vpnservice()
+                    .get_vpn_status(tauri_plugin_vpnservice::VoidRequest {})
+            })
+            .await
+            .map_err(|_| "local VPN status query task failed".to_owned())?
+            .map_err(|_| "local VPN status is unavailable".to_owned())?;
+            let valid = snapshot.running
+                && snapshot.established == Some(true)
+                && snapshot.state.as_deref() == Some("established")
+                && snapshot.request_id.as_deref() == Some(lease.request_id.as_str())
+                && snapshot
+                    .instance_id
+                    .as_deref()
+                    .and_then(|id| id.parse::<Uuid>().ok())
+                    == Some(lease.instance_id)
+                && ANDROID_TUN_LEASES.is_current(&lease)
+                && !lease.is_cancelled()
+                && !LOCAL_CLIENT_LIFECYCLE.is_paused()
+                && manager.instance(lease.instance_id).is_some_and(|instance| {
+                    lease.matches_instance(&instance)
+                        && instance.state() == easytier_core::instance::CoreInstanceState::Running
+                });
+            Ok(valid.then_some(snapshot))
+        })
+        .await
+        .map_err(|_| "local VPN status query timed out".to_owned())?
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+async fn is_local_vpn_connected(app: AppHandle) -> Result<bool, String> {
+    Ok(validated_local_vpn_status(app).await?.is_some())
+}
+
+#[tauri::command]
+async fn get_local_vpn_status(
+    app: AppHandle,
+) -> Result<Option<tauri_plugin_vpnservice::VpnStatus>, String> {
+    validated_local_vpn_status(app).await
 }
 
 macro_rules! get_client_manager {
@@ -185,12 +291,14 @@ async fn run_network_instance(
         Err(RemoteClientError::NotFound(_)) => ConfigSource::User,
         Err(error) => return Err(error.to_string()),
     };
+    if source == ConfigSource::Web {
+        return Err("managed network lifecycle is controlled by its controller".to_owned());
+    }
     client_manager
         .pre_run_network_instance_hook(
             &app,
             &toml_config,
             manager::PersistedConfigSource::from_runtime_source(source),
-            false,
         )
         .await?;
     client_manager
@@ -206,13 +314,14 @@ async fn run_network_instance(
 #[tauri::command]
 async fn collect_network_info(
     app: AppHandle,
-    instance_id: String,
+    instance_id: Option<String>,
 ) -> Result<CollectNetworkInfoResponse, String> {
     let instance_id = instance_id
-        .parse()
+        .map(|id| id.parse::<Uuid>())
+        .transpose()
         .map_err(|e: uuid::Error| e.to_string())?;
     get_client_manager!()?
-        .handle_collect_network_info(app, Some(vec![instance_id]))
+        .handle_collect_network_info(app, instance_id.map(|id| vec![id]))
         .await
         .map_err(|e| e.to_string())
 }
@@ -338,6 +447,7 @@ async fn ensure_native_tun_stop_listener(app: &AppHandle) -> Result<(), String> 
         listener.registering = Some(tokio::task::spawn_blocking(move || {
             app.vpnservice()
                 .register_native_stop_listener(|status| {
+                    let system_revoked = status.stop_reason.as_deref() == Some("system_revoked");
                     let Some(instance_id) =
                         status.instance_id.and_then(|id| id.parse::<Uuid>().ok())
                     else {
@@ -350,10 +460,22 @@ async fn ensure_native_tun_stop_listener(app: &AppHandle) -> Result<(), String> 
                     else {
                         return;
                     };
+                    let pause_for_revocation =
+                        system_revoked && LOCAL_CLIENT_LIFECYCLE.pause_for_native_stop();
                     // Cancel synchronously, then leave Android's main thread free.
                     // Cleanup works even when the WebView receives no JS events.
                     tauri::async_runtime::spawn(async move {
-                        if let Err(error) = cleanup_android_tun(lease).await {
+                        let result = if pause_for_revocation {
+                            LOCAL_CLIENT_LIFECYCLE
+                                .stop(
+                                    std::time::Duration::from_secs(15),
+                                    stop_current_android_networks(),
+                                )
+                                .await
+                        } else {
+                            cleanup_android_tun(lease).await
+                        };
+                        if let Err(error) = result {
                             eprintln!("Native VPN TUN cleanup failed: {error}");
                         }
                     });
@@ -383,12 +505,13 @@ async fn ensure_native_tun_stop_listener(app: &AppHandle) -> Result<(), String> 
 #[cfg(target_os = "android")]
 async fn detach_android_tun_locked(
     lease: &Arc<android_tun_lease::AndroidTunLease>,
-    manager: &NativeInstanceManager,
 ) -> Result<(), String> {
     if !ANDROID_TUN_LEASES.is_current(lease) {
         return Ok(());
     }
-    if let Some(instance) = manager.instance(lease.instance_id) {
+    // UUID reuse does not grant ownership of a replacement Core's NIC. Keep a
+    // weak identity for exactly the instance which received this attachment.
+    if let Some(instance) = lease.bound_instance::<NativeCoreInstance>() {
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             easytier::instance::factory::detach_native_tun_fd_confirmed(&instance),
@@ -409,10 +532,9 @@ async fn cleanup_android_tun(lease: Arc<android_tun_lease::AndroidTunLease>) -> 
         let manager = INSTANCE_MANAGER.read().await.clone();
         if let Some(manager) = manager {
             let _mutation = manager.mutation_lock().lock_owned().await;
-            detach_android_tun_locked(&lease, &manager).await
+            detach_android_tun_locked(&lease).await
         } else {
-            ANDROID_TUN_LEASES.finish_if_current(&lease);
-            Ok(())
+            detach_android_tun_locked(&lease).await
         }
     });
     tokio::time::timeout(std::time::Duration::from_secs(10), cleanup)
@@ -488,9 +610,17 @@ async fn set_tun_fd(
         // A replacement must release its predecessor before changing identity.
         if let Some(previous) = ANDROID_TUN_LEASES.current() {
             ANDROID_TUN_LEASES.cancel_matching(previous.instance_id, &previous.request_id);
-            detach_android_tun_locked(&previous, &instance_manager).await?;
+            detach_android_tun_locked(&previous).await?;
         }
+        let instance = instance_manager
+            .instance(target)
+            .ok_or("requested TUN instance is no longer available")?;
         let lease = ANDROID_TUN_LEASES.begin(target, request_id.expect("request id validated"));
+        if !lease.bind_instance(&instance) {
+            ANDROID_TUN_LEASES.cancel_matching(lease.instance_id, &lease.request_id);
+            ANDROID_TUN_LEASES.finish_if_current(&lease);
+            return Err("TUN instance identity is already bound".to_owned());
+        }
         let result: Result<(), String> = async {
             // fcntl safely handles a descriptor closed concurrently by Android.
             let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 1) };
@@ -521,7 +651,10 @@ async fn set_tun_fd(
             {
                 return Err("TUN request is no longer current".to_owned());
             }
-            let instance = instance_manager.instance(target).ok_or("requested TUN instance is no longer available")?;
+            if !instance_manager.instance(target)
+                .is_some_and(|current| Arc::ptr_eq(&instance, &current) && lease.matches_instance(&current)) {
+                return Err("TUN Core instance was replaced".to_owned());
+            }
             tokio::select! {
                 biased;
                 _ = lease.cancelled() => Err("TUN request was canceled".to_owned()),
@@ -533,9 +666,15 @@ async fn set_tun_fd(
                     .map_err(|_| "Core TUN installation failed".to_owned()),
             }
         }.await;
-        if result.is_err() || lease.is_cancelled() || LOCAL_CLIENT_LIFECYCLE.is_paused() {
+        if result.is_err()
+            || lease.is_cancelled()
+            || LOCAL_CLIENT_LIFECYCLE.is_paused()
+            || !instance_manager
+                .instance(target)
+                .is_some_and(|current| lease.matches_instance(&current))
+        {
             ANDROID_TUN_LEASES.cancel_matching(lease.instance_id, &lease.request_id);
-            detach_android_tun_locked(&lease, &instance_manager).await?;
+            detach_android_tun_locked(&lease).await?;
             return Err(result
                 .err()
                 .unwrap_or_else(|| "TUN request was canceled".to_owned()));
@@ -568,6 +707,7 @@ async fn remove_network_instance(app: AppHandle, instance_id: String) -> Result<
         .map_err(|e: uuid::Error| e.to_string())?;
     let client_manager = get_client_manager!()?;
     let _mutation = client_manager.config_mutation.lock().await;
+    ensure_user_owned_config(&client_manager, &app, instance_id).await?;
     client_manager
         .handle_remove_network_instances(app.clone(), vec![instance_id])
         .await
@@ -577,6 +717,23 @@ async fn remove_network_instance(app: AppHandle, instance_id: String) -> Result<
         .await?;
 
     Ok(())
+}
+
+async fn ensure_user_owned_config(
+    client_manager: &manager::GUIClientManager,
+    app: &AppHandle,
+    instance_id: Uuid,
+) -> Result<(), String> {
+    match client_manager
+        .handle_get_network_config_with_source(app.clone(), instance_id)
+        .await
+    {
+        Ok((_, ConfigSource::Web)) => {
+            Err("managed configuration is controlled by its controller".to_owned())
+        }
+        Ok(_) | Err(RemoteClientError::NotFound(_)) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -590,25 +747,34 @@ async fn update_network_config_state(
         .map_err(|e: uuid::Error| e.to_string())?;
     let client_manager = get_client_manager!()?;
     let _mutation = client_manager.config_mutation.lock().await;
+    let (cfg, source) = client_manager
+        .handle_get_network_config_with_source(app.clone(), instance_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if source == ConfigSource::Web {
+        return Err("managed network lifecycle is controlled by its controller".to_owned());
+    }
     if !disabled {
-        let (cfg, source) = client_manager
-            .handle_get_network_config_with_source(app.clone(), instance_id)
-            .await
-            .map_err(|e| e.to_string())?;
         let toml_config = cfg.gen_config().map_err(|e| e.to_string())?;
         client_manager
             .pre_run_network_instance_hook(
                 &app,
                 &toml_config,
                 manager::PersistedConfigSource::from_runtime_source(source),
-                false,
             )
             .await?;
     }
-    client_manager
-        .handle_update_network_state(app.clone(), instance_id, disabled)
-        .await
-        .map_err(|e| e.to_string())?;
+    if disabled {
+        client_manager
+            .handle_stop_network_instance(app.clone(), instance_id)
+            .await
+            .map_err(|e| e.to_string())?;
+    } else {
+        client_manager
+            .handle_update_network_state(app.clone(), instance_id, false)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
 
     if disabled {
         client_manager
@@ -631,10 +797,105 @@ async fn save_network_config(app: AppHandle, cfg: NetworkConfig) -> Result<(), S
         .map_err(|e: uuid::Error| e.to_string())?;
     let client_manager = get_client_manager!()?;
     let _mutation = client_manager.config_mutation.lock().await;
+    ensure_user_owned_config(&client_manager, &app, instance_id).await?;
     client_manager
         .handle_save_network_config(app, instance_id, cfg)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn save_remote_network_config(
+    app: AppHandle,
+    cfg: NetworkConfig,
+) -> Result<NetworkConfig, String> {
+    if INSTANCE_MANAGER.read().await.is_some() {
+        return Err("remote persistence requires service or remote mode".to_owned());
+    }
+    let instance_id = cfg
+        .instance_id()
+        .parse()
+        .map_err(|e: uuid::Error| e.to_string())?;
+    let client_manager = get_client_manager!()?;
+    let _mutation = client_manager.config_mutation.lock().await;
+    client_manager
+        .handle_save_remote_network_config(app, instance_id, cfg)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_saved_remote_config(
+    app: AppHandle,
+    instance_id: String,
+) -> Result<NetworkConfig, String> {
+    if INSTANCE_MANAGER.read().await.is_some() {
+        return Err("remote persistence requires service or remote mode".to_owned());
+    }
+    let instance_id = instance_id
+        .parse()
+        .map_err(|e: uuid::Error| e.to_string())?;
+    get_client_manager!()?
+        .handle_get_saved_remote_network_config(app, instance_id)
+        .await
+        .map(|(config, _)| config)
+        .map_err(remote_persistence_error)
+}
+
+fn remote_persistence_error(error: RemoteClientError<anyhow::Error>) -> String {
+    use easytier::proto::rpc_types::error::Error as RpcError;
+    let unsupported = match &error {
+        RemoteClientError::Other(message) => {
+            message
+                == "remote process does not support reading persisted configuration; upgrade the remote Core"
+        }
+        RemoteClientError::RpcError(RpcError::ExecutionError(error)) => {
+            error.to_string().lines().next()
+                == Some("durable configuration is unsupported for this instance")
+        }
+        _ => false,
+    };
+    if unsupported {
+        "REMOTE_PERSISTENCE_UNSUPPORTED".to_owned()
+    } else {
+        error.to_string()
+    }
+}
+
+#[cfg(test)]
+mod remote_persistence_error_tests {
+    use super::*;
+    use easytier::proto::rpc_types::error::Error as RpcError;
+
+    #[test]
+    fn only_explicit_old_or_pathless_capabilities_allow_live_fallback() {
+        let old = RemoteClientError::Other("remote process does not support reading persisted configuration; upgrade the remote Core".to_owned());
+        assert_eq!(
+            remote_persistence_error(old),
+            "REMOTE_PERSISTENCE_UNSUPPORTED"
+        );
+        let pathless = RemoteClientError::RpcError(RpcError::ExecutionError(anyhow::anyhow!(
+            "durable configuration is unsupported for this instance"
+        )));
+        assert_eq!(
+            remote_persistence_error(pathless),
+            "REMOTE_PERSISTENCE_UNSUPPORTED"
+        );
+        for message in [
+            "persisted instance configuration not found",
+            "persisted configuration is unavailable or read-only",
+            "persisted instance configuration is invalid",
+            "durable read timed out",
+            "unrelated error: durable configuration is unsupported for this instance",
+        ] {
+            let error =
+                RemoteClientError::RpcError(RpcError::ExecutionError(anyhow::anyhow!(message)));
+            assert_ne!(
+                remote_persistence_error(error),
+                "REMOTE_PERSISTENCE_UNSUPPORTED"
+            );
+        }
+    }
 }
 
 #[tauri::command]
@@ -798,7 +1059,7 @@ async fn init_rpc_connection(
     let mut client_url = url.clone();
     let mut local_process_runtime = None;
     if is_normal_mode {
-        let instance_manager = if let Some(im) = instance_manager_guard.take() {
+        let instance_manager = if let Some(im) = instance_manager_guard.as_ref().cloned() {
             im
         } else {
             Arc::new(native_instance_manager())
@@ -862,8 +1123,6 @@ async fn init_rpc_connection(
         local_process_runtime = Some(instance_manager.process_runtime());
         *instance_manager_guard = Some(instance_manager);
         client_url = connect_url.map(|u| u.to_string());
-    } else {
-        *rpc_server_guard = None;
     }
 
     let client_manager = tokio::time::timeout(
@@ -877,6 +1136,7 @@ async fn init_rpc_connection(
     *client_manager_guard = Some(client_manager);
 
     if !is_normal_mode {
+        *rpc_server_guard = None;
         drop(WEB_CLIENT.write().await.take());
         if let Some(instance_manager) = instance_manager_guard.take() {
             instance_manager
@@ -926,10 +1186,6 @@ async fn init_web_client(app: AppHandle, url: Option<String>) -> Result<(), Stri
         *web_client_guard = None;
         return Ok(());
     };
-    #[cfg(target_os = "android")]
-    if LOCAL_CLIENT_LIFECYCLE.is_paused() {
-        return Err("local client is paused".to_owned());
-    }
     let instance_manager = INSTANCE_MANAGER
         .try_read()
         .map_err(|_| "Failed to acquire read lock for instance manager")?
@@ -1072,10 +1328,8 @@ mod manager {
             &self,
             _cfg: &easytier::common::config::TomlConfigLoader,
         ) -> Result<(), String> {
-            // ProcessManagement invokes this under the same mutation lock
-            // used by Stop, including requests already queued before a pause.
             if super::LOCAL_CLIENT_LIFECYCLE.is_paused() {
-                return Err("local client is paused".to_owned());
+                return Err("CLIENT_RUNTIME_PAUSED".to_owned());
             }
             Ok(())
         }
@@ -1083,6 +1337,13 @@ mod manager {
 
     #[async_trait]
     impl WebClientHooks for GuiHooks {
+        fn runtime_control(&self) -> Option<easytier::proto::web::RuntimeControl> {
+            Some(easytier::proto::web::RuntimeControl {
+                paused: cfg!(target_os = "android") && local_runtime_paused(),
+                ..Default::default()
+            })
+        }
+
         async fn pre_run_network_instance(
             &self,
             cfg: &easytier::common::config::TomlConfigLoader,
@@ -1093,7 +1354,6 @@ mod manager {
                     &self.app,
                     cfg,
                     PersistedConfigSource::from_runtime_source(cfg.get_network_config_source()),
-                    true,
                 )
                 .await
         }
@@ -1110,6 +1370,24 @@ mod manager {
             client_manager
                 .post_remote_remove_network_instances_hook(&self.app, ids)
                 .await
+        }
+
+        async fn post_stop_network_instances(&self, _ids: &[uuid::Uuid]) -> Result<(), String> {
+            let client_manager = get_client_manager!()?;
+            client_manager
+                .post_stop_network_instances_hook(&self.app)
+                .await
+        }
+    }
+
+    fn local_runtime_paused() -> bool {
+        #[cfg(target_os = "android")]
+        {
+            super::LOCAL_CLIENT_LIFECYCLE.is_paused()
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            false
         }
     }
 
@@ -1147,11 +1425,6 @@ mod manager {
                 Self::User | Self::Legacy => ConfigSource::User,
                 Self::Web => ConfigSource::Web,
             }
-        }
-
-        #[cfg(any(test, target_os = "android"))]
-        fn is_web_like(self) -> bool {
-            matches!(self, Self::Web)
         }
     }
 
@@ -1373,63 +1646,6 @@ mod manager {
                 .filter_map(|c| c.config.instance_id().parse::<uuid::Uuid>().ok())
         }
 
-        #[cfg(target_os = "android")]
-        pub fn get_enabled_instances_with_web_like_tun_ids(
-            &self,
-        ) -> impl Iterator<Item = uuid::Uuid> + '_ {
-            self.storage
-                .network_configs
-                .iter()
-                .filter(|v| self.storage.enabled_networks.contains(v.key()))
-                .filter(|v| !v.config.no_tun())
-                .filter(|v| v.source.is_web_like())
-                .filter_map(|c| c.config.instance_id().parse::<uuid::Uuid>().ok())
-        }
-
-        #[cfg(target_os = "android")]
-        pub(super) async fn disable_instances_with_tun(
-            &self,
-            app: &AppHandle,
-            web_only: bool,
-            in_native_transaction: bool,
-        ) -> Result<(), easytier_core::management::remote_client::RemoteClientError<anyhow::Error>>
-        {
-            let inst_ids: Vec<uuid::Uuid> = if web_only {
-                self.get_enabled_instances_with_web_like_tun_ids().collect()
-            } else {
-                self.get_enabled_instances_with_tun_ids().collect()
-            };
-            for inst_id in inst_ids {
-                if in_native_transaction {
-                    // ProcessManagement already owns this manager's mutation
-                    // lock while invoking its pre-run hook. Calling the local
-                    // delete RPC here would wait for that same lock.
-                    let manager =
-                        super::INSTANCE_MANAGER
-                            .read()
-                            .await
-                            .clone()
-                            .ok_or_else(|| {
-                                RemoteClientError::Other(
-                                    "local instance manager is unavailable".to_owned(),
-                                )
-                            })?;
-                    manager
-                        .delete_network_instances([inst_id])
-                        .await
-                        .map_err(|error| RemoteClientError::Other(error.to_string()))?;
-                    self.storage
-                        .update_network_config_state(app.clone(), inst_id, true)
-                        .await
-                        .map_err(RemoteClientError::PersistentError)?;
-                } else {
-                    self.handle_update_network_state(app.clone(), inst_id, true)
-                        .await?;
-                }
-            }
-            Ok(())
-        }
-
         pub(super) fn notify_vpn_stop_if_no_tun(&self, app: &AppHandle) -> Result<(), String> {
             let has_tun = self.get_enabled_instances_with_tun_ids().any(|_| true);
             if !has_tun {
@@ -1444,37 +1660,14 @@ mod manager {
             app: &AppHandle,
             cfg: &easytier::common::config::TomlConfigLoader,
             source: PersistedConfigSource,
-            in_native_transaction: bool,
         ) -> Result<(), String> {
             #[cfg(target_os = "android")]
             if super::LOCAL_CLIENT_LIFECYCLE.is_paused() {
-                return Err("local client is paused".to_owned());
+                return Err("CLIENT_RUNTIME_PAUSED".to_owned());
             }
             let instance_id = cfg.get_id();
             app.emit("pre_run_network_instance", instance_id.to_string())
                 .map_err(|e| e.to_string())?;
-
-            #[cfg(target_os = "android")]
-            if !cfg.get_flags().no_tun {
-                match source {
-                    PersistedConfigSource::User | PersistedConfigSource::Legacy => {
-                        self.disable_instances_with_tun(app, false, in_native_transaction)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                    }
-                    PersistedConfigSource::Web => {
-                        self.disable_instances_with_tun(app, true, in_native_transaction)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        if self.get_enabled_instances_with_tun_ids().next().is_some() {
-                            return Err(
-                                "Android only supports one active TUN network; user-managed VPN remains active"
-                                    .to_string(),
-                            );
-                        }
-                    }
-                }
-            }
 
             self.storage
                 .save_config(
@@ -1598,6 +1791,16 @@ mod manager {
             let client = self
                 .get_rpc_client(app.clone())
                 .ok_or_else(|| anyhow::anyhow!("RPC client not found"))?;
+            let running_ids: std::collections::HashSet<Uuid> = client
+                .list_network_instance(
+                    BaseController::default(),
+                    easytier::proto::api::manage::ListNetworkInstanceRequest {},
+                )
+                .await?
+                .inst_ids
+                .into_iter()
+                .map(Into::into)
+                .collect();
             for id in enabled_networks {
                 if let Ok(uuid) = id.parse()
                     && !self.storage.enabled_networks.contains(&uuid)
@@ -1610,8 +1813,14 @@ mod manager {
                     let Some((config, source)) = config else {
                         continue;
                     };
+                    if source == PersistedConfigSource::Web {
+                        if running_ids.contains(&uuid) {
+                            self.storage.enabled_networks.insert(uuid);
+                        }
+                        continue;
+                    }
                     let toml_config = config.gen_config()?;
-                    self.pre_run_network_instance_hook(&app, &toml_config, source, false)
+                    self.pre_run_network_instance_hook(&app, &toml_config, source)
                         .await
                         .map_err(|e| anyhow::anyhow!(e))?;
                     client
@@ -1713,13 +1922,6 @@ mod manager {
                 PersistedConfigSource::Legacy.merge_persisted(PersistedConfigSource::Web),
                 PersistedConfigSource::Web
             );
-        }
-
-        #[test]
-        fn only_web_configs_are_web_like() {
-            assert!(!PersistedConfigSource::Legacy.is_web_like());
-            assert!(!PersistedConfigSource::User.is_web_like());
-            assert!(PersistedConfigSource::Web.is_web_like());
         }
     }
 }
@@ -1946,7 +2148,12 @@ pub fn run_gui() -> std::process::ExitCode {
             update_network_config_state,
             stop_local_client,
             resume_local_client,
+            is_local_client_enabled,
+            is_local_vpn_connected,
+            get_local_vpn_status,
             save_network_config,
+            save_remote_network_config,
+            get_saved_remote_config,
             validate_config,
             get_config,
             load_configs,
@@ -1980,9 +2187,17 @@ pub fn run_gui() -> std::process::ExitCode {
 }
 
 pub fn run_cli() -> std::process::ExitCode {
-    tokio::runtime::Builder::new_current_thread()
+    let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap()
-        .block_on(async { easytier::core::main().await })
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Failed to create EasyTier runtime: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let exit = runtime.block_on(easytier::core::main());
+    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    exit
 }

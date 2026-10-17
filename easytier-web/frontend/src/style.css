@@ -118,7 +118,8 @@ legend { font-weight: 500; padding: 0 0 10px; }
 .preview-row:hover { text-decoration: none; }
 .status { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; color: var(--muted); }
 .status-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-.status.online,.status.applied,.status.active,.status.bound,.status.running { color: var(--success); }
+.status.online,.status.applied,.status.active,.status.bound { color: var(--success); }
+.status.running { color: var(--accent-text); }
 .status.pending,.status.waiting_offline,.status.unbound { color: var(--warning); }
 .status.failed,.status.expired { color: var(--danger); }
 .alert { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px; background: transparent; font-size: 13px; color: var(--muted); }
@@ -351,3 +352,5 @@ progress::-moz-progress-bar { background: #73a8eb; border-radius: 2px; }
 .uplink-picker-state{flex:none}
 .uplink-picker-addresses{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .uplink-picker-empty{margin:12px;color:var(--muted);font-size:13px}
+
+.connection-log-table { max-height: 460px; overflow: auto; }

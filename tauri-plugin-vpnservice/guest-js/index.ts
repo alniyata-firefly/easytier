@@ -31,6 +31,7 @@ export interface VpnStatusResponse {
   established?: boolean;
   fd?: number;
   errorMsg?: string;
+  stopReason?: 'system_revoked';
   ipv4Addr?: string;
   routes?: string[];
   dns?: string;

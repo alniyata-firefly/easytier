@@ -10,6 +10,12 @@ message DeviceOsInfo {
   string distribution = 3;
 }
 
+// Local data-plane intent is independent of config-server authentication.
+// Absence on older clients preserves the controller's existing behavior.
+message RuntimeControl {
+  bool paused = 1;
+}
+
 message HeartbeatRequest {
   common.UUID machine_id = 1;
   common.UUID inst_id = 2;
@@ -25,6 +31,7 @@ message HeartbeatRequest {
   repeated common.UUID failed_network_instances = 10;
   bool support_heartbeat_policy = 11;
   bool support_auth_state = 12;
+  RuntimeControl runtime_control = 13;
 }
 
 enum HeartbeatAuthState {

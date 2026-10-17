@@ -49,6 +49,7 @@ pub(crate) struct RouteObservation {
 
 pub(crate) trait ConnFacts {
     fn peer_id(&self) -> u32;
+    fn is_closed(&self) -> bool;
     fn network_name(&self) -> &str;
     fn remote_static_pubkey(&self) -> &[u8];
     fn is_credential_identity(&self) -> bool;
@@ -57,6 +58,10 @@ pub(crate) trait ConnFacts {
 impl ConnFacts for easytier_proto::core_peer::peer::PeerConnInfo {
     fn peer_id(&self) -> u32 {
         self.peer_id
+    }
+
+    fn is_closed(&self) -> bool {
+        self.is_closed
     }
 
     fn network_name(&self) -> &str {
@@ -77,6 +82,10 @@ impl ConnFacts for easytier_proto::api::instance::PeerConnInfo {
         self.peer_id
     }
 
+    fn is_closed(&self) -> bool {
+        self.is_closed
+    }
+
     fn network_name(&self) -> &str {
         &self.network_name
     }
@@ -94,7 +103,8 @@ pub(crate) fn conn_observation(
     conn: &impl ConnFacts,
     network_name: &str,
 ) -> Option<ConnObservation> {
-    if conn.network_name() != network_name
+    if conn.is_closed()
+        || conn.network_name() != network_name
         || !conn.is_credential_identity()
         || conn.remote_static_pubkey().is_empty()
     {
@@ -405,6 +415,69 @@ mod tests {
         assert!(
             conn_observation(&api_conn("mesh", credential_identity, Vec::new()), "mesh").is_none()
         );
+    }
+
+    #[test]
+    fn closed_connections_never_report_temporary_peers_in_either_runtime_dto() {
+        let (_, public, _) = credential();
+        let identity = easytier_proto::peer_rpc::PeerIdentityType::Credential as i32;
+        let mut api = easytier_proto::api::instance::PeerConnInfo {
+            peer_id: 42,
+            network_name: "mesh".into(),
+            peer_identity_type: identity,
+            noise_remote_static_pubkey: public.clone(),
+            is_closed: true,
+            ..Default::default()
+        };
+        let mut core = easytier_proto::core_peer::peer::PeerConnInfo {
+            peer_id: 42,
+            network_name: "mesh".into(),
+            peer_identity_type: identity,
+            noise_remote_static_pubkey: public,
+            is_closed: true,
+            ..Default::default()
+        };
+        assert!(conn_observation(&api, "mesh").is_none());
+        assert!(conn_observation(&core, "mesh").is_none());
+        api.is_closed = false;
+        core.is_closed = false;
+        assert!(conn_observation(&api, "mesh").is_some());
+        assert!(conn_observation(&core, "mesh").is_some());
+    }
+
+    #[test]
+    fn a_live_lane_keeps_a_peer_online_but_closed_lanes_alone_do_not() {
+        let (_, public, fingerprint) = credential();
+        let connection = |peer_id, is_closed| easytier_proto::api::instance::PeerConnInfo {
+            peer_id,
+            network_name: "mesh".into(),
+            peer_identity_type: easytier_proto::peer_rpc::PeerIdentityType::Credential as i32,
+            noise_remote_static_pubkey: public.clone(),
+            is_closed,
+            ..Default::default()
+        };
+        let conns = [
+            connection(42, true),
+            connection(42, false),
+            connection(99, true),
+        ]
+        .iter()
+        .filter_map(|conn| conn_observation(conn, "mesh"))
+        .collect::<Vec<_>>();
+        let peers = extract_temporary_peers(
+            &conns,
+            &HashMap::new(),
+            &HashMap::from([(
+                fingerprint,
+                CredentialRef {
+                    credential_id: "credential-1".into(),
+                    expiry_unix: 4_102_444_800,
+                },
+            )]),
+        );
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_id, 42);
+        assert_eq!(peers[0].credential_id.as_deref(), Some("credential-1"));
     }
 
     #[test]

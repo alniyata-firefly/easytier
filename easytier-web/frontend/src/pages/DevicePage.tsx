@@ -5,8 +5,12 @@ import type ApiClient from '../lib/api';
 import type { NetworkMeta } from '../../../frontend-lib/src/modules/api';
 import { NetworkTypes, Utils } from '../lib/shared';
 import { errorDescriptor, type ErrorDescriptor, useResource } from '../lib/hooks';
+import { instanceRuntimeState } from '../lib/instance-runtime-state';
 import { devicePath, navigate, networkPath } from '../lib/router';
 import { Alert, Button, Dialog, Empty, Panel, Status, Tabs, useNotice } from '../components/ui';
+import { ConnectionLogs } from '../components/ConnectionLogs';
+import { TunnelEvents } from '../components/TunnelEvents';
+import { ManagementStatus } from '../components/ManagementStatus';
 import { InstanceConfigEditor } from '../components/InstanceConfigEditor';
 import { InstanceAcl, InstanceLogger, InstanceNodeInfo, InstancePeers, InstanceRoutes, InstanceRunningConfig } from '../components/InstanceRuntimePanels';
 import { NodeMetrics } from '../components/NodeMetrics';
@@ -19,9 +23,10 @@ function uuid(value: Utils.UUID | string): string { return typeof value === 'str
 const validId = (value: string) => /^[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}$/i.test(value);
 
 export function DevicePage({ api, deviceId, instanceId, onTitleChange }: { api: ApiClient; deviceId: string; instanceId?: string; onTitleChange?: (label: string, instance?: string) => void }) {
-  const { t } = useTranslation('devices');
+  const { t } = useTranslation(['devices', 'tunnel-events']);
   const remote = useMemo(() => api.get_remote_client(deviceId), [api, deviceId]);
   const devices = useResource(() => api.list_machines().then(rows => rows.map(Utils.buildDeviceInfo)), `device:${deviceId}`, 6000);
+  const runtimeInfos = useResource(() => api.get_node_runtime_infos(deviceId), `instance-runtime:${deviceId}`, 6000);
   const instances = useResource(async () => {
     const [ids, consoleInfo] = await Promise.all([remote.list_network_instance_ids(), api.get_console_info()]);
     const running = new Set((ids.running_inst_ids ?? []).map(uuid));
@@ -44,7 +49,7 @@ export function DevicePage({ api, deviceId, instanceId, onTitleChange }: { api: 
   const actionLock = useRef(false), notice = useNotice();
   const error = failure ? t(failure.key, { ns: failure.ns, ...failure.values }) : '';
   useEffect(() => { setTab('overview'); setAction(undefined); setTarget(undefined); setFailure(undefined); }, [deviceId, instanceId]);
-  const refresh = () => { api.clear_snapshots(); devices.refresh(); instances.refresh(); };
+  const refresh = () => { api.clear_snapshots(); devices.refresh(); instances.refresh(); runtimeInfos.refresh(); };
   const open = (kind: Action, row?: InstanceRow) => {
     setFailure(undefined); setAction(kind);
     setTarget(row ?? { id: NetworkTypes.DEFAULT_NETWORK_CONFIG().instance_id, running: false });
@@ -75,22 +80,25 @@ export function DevicePage({ api, deviceId, instanceId, onTitleChange }: { api: 
     finally { actionLock.current = false; setBusy(false); }
   };
   useEffect(() => { onTitleChange?.(device?.alias || device?.hostname || deviceId, selected?.meta?.instance_name || selected?.meta?.network_name || selectedId); }, [device?.alias, device?.hostname, deviceId, selected?.meta?.instance_name, selected?.meta?.network_name, selectedId, onTitleChange]);
-  const runtimeAvailable = online && !!selected?.running;
-  const tabs = [{ id: 'overview', label: t('tabs.overview') }, { id: 'metrics', label: t('tabs.metrics') }, { id: 'peers', label: t('tabs.peers') }, { id: 'routes', label: t('tabs.routes') }, { id: 'acl', label: t('tabs.acl') }, { id: 'toml', label: t('tabs.toml') }, { id: 'logger', label: t('tabs.logger') }];
+  const runtimeState = (id: string) => instanceRuntimeState(runtimeInfos.data?.[id], !online || !!devices.error || !!instances.error || !!runtimeInfos.error);
+  const selectedRuntimeState = selected ? runtimeState(selected.id) : 'unknown';
+  const runtimeAvailable = selectedRuntimeState === 'running';
+  const tabs = [{ id: 'overview', label: t('tabs.overview') }, { id: 'metrics', label: t('tabs.metrics') }, { id: 'peers', label: t('tabs.peers') }, { id: 'tunnel-events', label: t('tunnel-events:title') }, { id: 'routes', label: t('tabs.routes') }, { id: 'acl', label: t('tabs.acl') }, { id: 'toml', label: t('tabs.toml') }, { id: 'logger', label: t('tabs.logger') }];
   const close = () => { if (!busy) { setAction(undefined); setTarget(undefined); setFailure(undefined); } };
 
   return <div className="page stack">
-    <header className="page-heading"><div className="entity-secondary mono">{deviceId}</div><div className="actions"><Status state={!device || devices.error ? 'unknown' : online ? 'online' : 'offline'}/><Button icon="refresh" tone="ghost" busy={devices.loading || instances.loading} onClick={refresh}>{t('actions.refresh')}</Button><Button icon="plus" disabled={!device || !!instances.error || busy} onClick={() => open('new')}>{t('actions.newInstance')}</Button></div></header>
+    <header className="page-heading"><div className="entity-secondary mono">{deviceId}</div><div className="actions"><ManagementStatus online={device?.online} unknown={!!devices.error}/><Button icon="refresh" tone="ghost" busy={devices.loading || instances.loading} onClick={refresh}>{t('actions.refresh')}</Button><Button icon="plus" disabled={!device || !!instances.error || busy} onClick={() => open('new')}>{t('actions.newInstance')}</Button></div></header>
     {devices.error && <Alert tone="error">{devices.error}</Alert>}
     {instances.error && <Alert tone="error">{t('instance.listFailure', { error: instances.error })}</Alert>}
+    {runtimeInfos.error && <Alert tone="error">{runtimeInfos.error}</Alert>}
     <Panel title={t('instance.title')} action={<span className="muted">{t('instance.count', { count: rows.length, countFormatted: rows.length.toLocaleString(currentLocale()) })}</span>}>
-      {instances.loading && !instances.data && !rows.length ? <p className="loading" role="status">{t('instance.loading')}</p> : rows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>{t('labels.instance')}</th><th>{t('labels.status')}</th><th>{t('labels.management')}</th><th>{t('labels.actions')}</th></tr></thead><tbody>{rows.map(row => <tr key={row.id} className={selectedId === row.id ? 'selected-row' : undefined}><td><a className="entity-name" href={`#${devicePath(deviceId, row.id)}`} aria-current={selectedId === row.id ? 'page' : undefined}>{row.meta?.instance_name || row.meta?.network_name || row.id.slice(0, 8)}</a><div className="entity-secondary mono">{row.id}</div></td><td><Status state={!online || instances.error ? 'unknown' : row.running ? 'running' : 'stopped'}/></td><td>{row.centralName ? <a href={`#${networkPath(row.id)}`}>{t('central.memberLabel', { name: row.centralName })}</a> : !row.meta ? t('instance.checkPermissions') : !editable(row) ? t('instance.readOnly') : t('instance.deviceManaged')}</td><td><div className="actions"><Button tone="ghost" icon="edit" disabled={!editable(row) || busy} aria-label={t('instance.editAria', { name: row.meta?.network_name || row.id })} onClick={() => open('edit', row)}/><Button tone="ghost" icon={row.running ? 'pause' : 'play'} disabled={!canChangeInstanceState(row, row.running) || !online || busy} aria-label={row.running ? t('actions.stopInstance') : t('actions.startInstance')} onClick={() => open(row.running ? 'stop' : 'start', row)}/><Button tone="danger" icon="trash" disabled={!deletable(row) || busy} aria-label={t('actions.deleteInstance')} onClick={() => open('delete', row)}/></div></td></tr>)}</tbody></table></div> : <Empty title={t('instance.none')} action={<Button icon="plus" disabled={!device || !!instances.error} onClick={() => open('new')}>{t('actions.newInstance')}</Button>}/>}
+      {instances.loading && !instances.data && !rows.length ? <p className="loading" role="status">{t('instance.loading')}</p> : rows.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>{t('labels.instance')}</th><th>{t('labels.status')}</th><th>{t('labels.management')}</th><th>{t('labels.actions')}</th></tr></thead><tbody>{rows.map(row => <tr key={row.id} className={selectedId === row.id ? 'selected-row' : undefined}><td><a className="entity-name" href={`#${devicePath(deviceId, row.id)}`} aria-current={selectedId === row.id ? 'page' : undefined}>{row.meta?.instance_name || row.meta?.network_name || row.id.slice(0, 8)}</a><div className="entity-secondary mono">{row.id}</div></td><td><Status state={runtimeState(row.id)} label={runtimeState(row.id) === 'failed' ? t('instance.runtimeFailed') : runtimeState(row.id) === 'unknown' ? t('instance.runtimeUnknown') : undefined}/></td><td>{row.centralName ? <a href={`#${networkPath(row.id)}`}>{t('central.memberLabel', { name: row.centralName })}</a> : !row.meta ? t('instance.checkPermissions') : !editable(row) ? t('instance.readOnly') : t('instance.deviceManaged')}</td><td><div className="actions"><Button tone="ghost" icon="edit" disabled={!editable(row) || busy} aria-label={t('instance.editAria', { name: row.meta?.network_name || row.id })} onClick={() => open('edit', row)}/><Button tone="ghost" icon={row.running ? 'pause' : 'play'} disabled={!canChangeInstanceState(row, row.running) || !online || busy} aria-label={row.running ? t('actions.stopInstance') : t('actions.startInstance')} onClick={() => open(row.running ? 'stop' : 'start', row)}/><Button tone="danger" icon="trash" disabled={!deletable(row) || busy} aria-label={t('actions.deleteInstance')} onClick={() => open('delete', row)}/></div></td></tr>)}</tbody></table></div> : <Empty title={t('instance.none')} action={<Button icon="plus" disabled={!device || !!instances.error} onClick={() => open('new')}>{t('actions.newInstance')}</Button>}/>}
     </Panel>
     {selectedId && !selected && instances.data ? <Empty title={t('instance.missing')}/> : selected ? <>
       <div className="toolbar"><div><h2>{selected.meta?.instance_name || selected.meta?.network_name || t('instance.detail')}</h2><p className="muted small mono">{selected.id}</p></div>{selected.centralName && <a className="button" href={`#${networkPath(selected.id)}`}>{t('central.open')}</a>}</div>
       <Tabs items={tabs} value={tab} onChange={setTab}/>
       <div role="tabpanel" aria-label={tabs.find(item => item.id === tab)?.label}>
-        {!runtimeAvailable ? <Panel><Empty title={online ? t('instance.notRunning') : t('instance.deviceOffline')} action={editable(selected) && online ? <Button icon="play" onClick={() => open('start', selected)}>{t('actions.startInstance')}</Button> : undefined}/></Panel> : <>
+        {tab === 'tunnel-events' ? <TunnelEvents key={selected.id} api={api} deviceId={deviceId} instanceId={selected.id}/> : !runtimeAvailable ? <Panel><Empty title={selectedRuntimeState === 'unknown' ? t('instance.runtimeUnknown') : selectedRuntimeState === 'failed' ? t('instance.runtimeFailed') : t('instance.notRunning')} action={selectedRuntimeState === 'stopped' && editable(selected) && online ? <Button icon="play" onClick={() => open('start', selected)}>{t('actions.startInstance')}</Button> : undefined}/></Panel> : <>
           {tab === 'overview' && <InstanceNodeInfo key={selected.id} api={api} deviceId={deviceId} instanceId={selected.id}/>}
           {tab === 'metrics' && <Panel title={t('tabs.metrics')}><NodeMetrics key={`${deviceId}:${selected.id}`} api={api} machineId={deviceId} instanceId={selected.id} online={online} nodeName={device?.alias || device?.hostname}/></Panel>}
           {tab === 'peers' && <InstancePeers key={selected.id} api={api} deviceId={deviceId} instanceId={selected.id}/>}
@@ -101,6 +109,7 @@ export function DevicePage({ api, deviceId, instanceId, onTitleChange }: { api: 
         </>}
       </div>
     </> : null}
+    <ConnectionLogs key={deviceId} api={api} deviceId={deviceId}/>
     <Dialog open={!!action && !!target} title={action === 'new' ? t('instance.newDialog') : action === 'edit' ? t('instance.editDialog') : action === 'delete' ? t('actions.deleteInstance') : action === 'stop' ? t('actions.stopInstance') : t('actions.startInstance')} onClose={close} wide={action === 'new' || action === 'edit'}>
       {(action === 'new' || action === 'edit') && target ? <InstanceConfigEditor key={`${deviceId}:${target.id}`} remote={remote} instanceId={target.id} isNew={action === 'new'} online={online} supportsUplinkSelection={supportsUplinkSelectionForOs(device?.device_os?.os_type)} onBusyChange={setBusy} checkPermission={() => checkPermission(target, action)} onSaved={mode => { setAction(undefined); setTarget(undefined); refresh(); notice({ ns: 'devices', key: mode === 'run' ? 'notice.configRun' : 'notice.configSaved' }); navigate(devicePath(deviceId, target.id)); }}/> : <>
         {error && <Alert tone="error">{error}</Alert>}

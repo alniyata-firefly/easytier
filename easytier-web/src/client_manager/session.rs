@@ -30,6 +30,7 @@ use super::{
 use crate::FeatureFlags;
 use crate::webhook::SharedWebhookConfig;
 
+mod management_events;
 mod runtime_revision;
 mod webhook_validation;
 
@@ -144,6 +145,7 @@ pub struct SessionData {
     session_identity: Option<HeartbeatIdentity>,
     auth_state: SessionAuthState,
     pending_rebind: bool,
+    management_event_revision: u64,
     webhook_connected_binding_version: Option<u64>,
     webhook_validation_dirty: bool,
     webhook_validation_change_epoch: u64,
@@ -190,6 +192,7 @@ impl SessionData {
             session_identity: None,
             auth_state: SessionAuthState::Init,
             pending_rebind: false,
+            management_event_revision: 0,
             webhook_connected_binding_version: None,
             webhook_validation_dirty: false,
             webhook_validation_change_epoch: 0,
@@ -459,6 +462,14 @@ impl Drop for SessionData {
                     session_epoch = self.session_epoch,
                     "session disconnected"
                 );
+                if self.auth_state.is_authorized() {
+                    management_events::queue_connection(
+                        &storage,
+                        token,
+                        self.session_epoch,
+                        crate::db::ManagementConnectionEventKind::Disconnected,
+                    );
+                }
             }
 
             // Notify the webhook receiver when a node disconnects.
@@ -762,6 +773,7 @@ impl SessionRpcService {
             failed_instance_ids = ?next_instance_ids,
             "heartbeat failed instance set changed"
         );
+        management_events::queue_failures(data, &next_instance_ids);
         Some(Self::mark_webhook_validation_state_changed_locked(data))
     }
 
@@ -770,8 +782,14 @@ impl SessionRpcService {
         update: impl FnOnce(&mut HashSet<String>),
     ) -> Option<Arc<Notify>> {
         let previous_failed_instance_ids = Self::failed_instance_ids_locked(data);
+        let previous_direct_failures = data.direct_run_failed_instance_ids.clone();
         update(&mut data.direct_run_failed_instance_ids);
         let failed_instance_ids = Self::failed_instance_ids_locked(data);
+        if previous_direct_failures != data.direct_run_failed_instance_ids
+            || failed_instance_ids != previous_failed_instance_ids
+        {
+            management_events::queue_failures(data, &failed_instance_ids);
+        }
         (failed_instance_ids != previous_failed_instance_ids)
             .then(|| Self::mark_webhook_validation_state_changed_locked(data))
     }
@@ -833,7 +851,14 @@ impl SessionRpcService {
                     data.webhook_validation_change_epoch =
                         data.webhook_validation_change_epoch.wrapping_add(1);
                     if let Some(token) = data.storage_token.as_ref() {
-                        storage.remove_session_client(token, data.session_epoch);
+                        if storage.remove_session_client(token, data.session_epoch) {
+                            management_events::queue_connection(
+                                storage,
+                                token,
+                                data.session_epoch,
+                                crate::db::ManagementConnectionEventKind::AuthorizationLost,
+                            );
+                        }
                     }
                     return if supports_auth_state {
                         Ok(self.heartbeat_response_with_auth(true, &data))
@@ -942,7 +967,7 @@ impl SessionRpcService {
             }
         };
 
-        let (storage_token, notifier, runtime_req, session_epoch, validation_notify) = {
+        let (storage_token, notifier, runtime_req, session_epoch, validation_notify, is_new) = {
             let mut data = self.data.write().await;
             let is_new_storage_token = data.storage_token.is_none();
             let validation_notify =
@@ -985,11 +1010,15 @@ impl SessionRpcService {
                 runtime_req,
                 data.session_epoch,
                 validation_notify,
+                is_new_storage_token,
             )
         };
 
         let report_time = Self::heartbeat_report_timestamp(&runtime_req);
         storage.update_session_client(storage_token, report_time, true, session_epoch);
+        if is_new {
+            management_events::record_authorized(&self.data).await;
+        }
         let _ = notifier.send(runtime_req);
         if let Some(notify) = validation_notify {
             notify.notify_one();
@@ -1156,6 +1185,7 @@ impl Session {
     pub async fn stop(&self) {
         let disconnect = {
             let mut data = self.data.write().await;
+            let was_authorized = data.auth_state.is_authorized();
             data.auth_state = SessionAuthState::Invalid;
             data.webhook_validation_change_epoch =
                 data.webhook_validation_change_epoch.wrapping_add(1);
@@ -1163,7 +1193,14 @@ impl Session {
                 Storage::try_from(data.storage.clone()),
                 data.storage_token.as_ref(),
             ) {
-                storage.remove_session_client(token, data.session_epoch);
+                if storage.remove_session_client(token, data.session_epoch) && was_authorized {
+                    management_events::queue_connection(
+                        &storage,
+                        token,
+                        data.session_epoch,
+                        crate::db::ManagementConnectionEventKind::Disconnected,
+                    );
+                }
             }
             data.webhook_validation_notify.notify_waiters();
             let token = data.storage_token.clone();

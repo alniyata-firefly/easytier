@@ -1,7 +1,7 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import * as Utils from '../../../easytier-web/frontend-lib/src/modules/utils'
 import { saveEnabledNetworks, saveStoredConfigs } from './storage'
-import { onNetworkInstanceChange, onNetworkInstanceUpdate, prepareVpnService, syncMobileVpnService } from './mobile_vpn'
+import { onNetworkInstanceChange, onNetworkInstanceUpdate, syncMobileVpnService } from './mobile_vpn'
 
 export function normalizeInstanceIdPayload(payload: unknown): string {
   if (typeof payload === 'string') return payload
@@ -22,8 +22,8 @@ export async function listenGlobalEvents(options: { android: boolean; persist: (
     await add('save_configs', payload => { if (options.persist()) saveStoredConfigs(payload); options.changed() })
     await add('save_enabled_networks', payload => { if (options.persist()) saveEnabledNetworks(payload); options.changed() })
     if (options.android) {
-      await add('pre_run_network_instance', payload => prepareVpnService(normalizeInstanceIdPayload(payload)))
-      await add('post_run_network_instance', payload => onNetworkInstanceChange(normalizeInstanceIdPayload(payload)))
+      await add('pre_run_network_instance', () => options.changed())
+      await add('post_run_network_instance', payload => onNetworkInstanceChange(normalizeInstanceIdPayload(payload), { passive: true }))
       await add('vpn_service_stop', () => syncMobileVpnService())
       for (const event of ['dhcp_ip_changed', 'proxy_cidrs_updated', 'event_lagged']) {
         await add(event, payload => onNetworkInstanceUpdate(normalizeInstanceIdPayload(payload)))

@@ -1783,7 +1783,8 @@ virtual_ip = "10.82.0.2/24"
             }
 
             async fn read(&self, _path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
-                Ok(None)
+                // The cancellation test owns an existing file to be removed.
+                Ok(Some(b"recorded configuration".to_vec()))
             }
 
             async fn write(&self, _path: &Path, _contents: &[u8]) -> anyhow::Result<()> {

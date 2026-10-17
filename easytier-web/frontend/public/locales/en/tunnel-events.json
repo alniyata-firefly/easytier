@@ -1,0 +1,38 @@
+{
+  "title": "Recent tunnel events",
+  "refresh": "Refresh",
+  "loading": "Loading tunnel connection events",
+  "unavailable": "Current instance events are unavailable. Check the device and instance status.",
+  "empty": "No tunnel connection events in the current memory window",
+  "columns": {
+    "time": "Time",
+    "event": "Event",
+    "peer": "Peer ID",
+    "protocol": "Protocol",
+    "local": "Local endpoint",
+    "remote": "Remote endpoint",
+    "reason": "Failure reason"
+  },
+  "events": {
+    "Connecting": "Establishing tunnel",
+    "ConnectError": "Tunnel connection failed",
+    "ConnectionAccepted": "Transport connection accepted",
+    "ConnectionError": "Transport connection error",
+    "PeerAdded": "Peer connected",
+    "PeerRemoved": "Peer disconnected",
+    "PeerConnAdded": "Peer tunnel established",
+    "PeerConnRemoved": "Peer tunnel disconnected"
+  },
+  "reasons": {
+    "timeout": "Connection timed out",
+    "refused": "Connection refused by peer",
+    "unreachable": "Network or host unreachable",
+    "name_resolution": "Endpoint name resolution failed",
+    "reset": "Connection reset",
+    "closed": "Connection closed early",
+    "permission": "Network operation denied by system",
+    "authentication": "Connection authentication or handshake failed",
+    "cancelled": "Connection request canceled",
+    "unknown": "Connection failed; unclassified reason"
+  }
+}

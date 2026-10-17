@@ -58,7 +58,7 @@
     "emptyTitle": "还没有网络",
     "emptyDetail": "创建一个网络，再选择已经注册的设备加入。",
     "noMatches": "没有匹配的网络",
-    "online": "{{online}} / {{total}} 在线",
+    "online": "{{online}} / {{total}} 在线成员",
     "manage": "管理",
     "gatewayUnavailable": "网关状态读取失败，可使用指定节点或独立网络。",
     "created": "网络已创建，请添加设备。"

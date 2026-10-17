@@ -23,6 +23,107 @@ beforeEach(() => {
   vi.stubGlobal('localStorage', { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => { store.set(key, value) } })
 })
 describe('offline local network configuration management', () => {
+  it('refuses data-plane starts while Android is globally paused even with RPC and management online', async () => {
+    const client = new GUIRemoteClient({ offline: () => false, changed: mock.changed, runtimeAllowed: () => false })
+    await expect(client.run_network(config(), true)).rejects.toThrow('client_not_running')
+    await expect(client.update_network_instance_state(userId, false)).rejects.toThrow('client_not_running')
+    expect(mock.invoke).not.toHaveBeenCalled()
+    expect(mock.prepareVpnService).not.toHaveBeenCalled()
+  })
+
+  it('rejects local lifecycle changes for an explicitly managed source without confusing file permissions', async () => {
+    mock.invoke.mockImplementation(async command => {
+      if (command === 'get_network_metas') return { metas: { [managedId]: { network_name: 'Managed', config_permission: 0, source: 'ConfigSourceWeb' } } }
+      throw new Error('unexpected mutation')
+    })
+    const client = new GUIRemoteClient({ offline: () => false, changed: mock.changed })
+    await expect(client.update_network_instance_state(managedId, true)).rejects.toThrow('managed_lifecycle_owned_by_controller')
+    await expect(client.update_network_instance_state(managedId, false)).rejects.toThrow('managed_lifecycle_owned_by_controller')
+    expect(mock.invoke.mock.calls.every(([command]) => command === 'get_network_metas')).toBe(true)
+    expect(mock.prepareVpnService).not.toHaveBeenCalled()
+  })
+
+  it('saves to the real remote persistence API and reads durable desired configuration after reconnecting', async () => {
+    const live = { ...config(), mtu: 1280 }, desired = { ...config(), mtu: 1340 }
+    let disk = live
+    mock.invoke.mockImplementation(async (command, args) => {
+      if (command === 'save_remote_network_config') { disk = structuredClone(args.cfg); return disk }
+      if (command === 'get_saved_remote_config') return structuredClone(disk)
+      if (command === 'get_config') return structuredClone(live)
+      if (command === 'get_network_metas') return { metas: { [userId]: { network_name: 'User', config_permission: 0, source: 1 } } }
+      if (command === 'run_network_instance') return undefined
+      throw new Error('unexpected command')
+    })
+    const options = { offline: () => false, changed: mock.changed, remotePersistence: () => true }
+    await new GUIRemoteClient(options).save_config(desired)
+    const reconnected = new GUIRemoteClient(options)
+    expect((await reconnected.get_network_config(userId)).mtu).toBe(1340)
+    await reconnected.update_network_instance_state(userId, false)
+    expect(mock.invoke).toHaveBeenCalledWith('run_network_instance', { cfg: expect.objectContaining({ mtu: 1340 }), save: true })
+    expect(mock.invoke.mock.calls.some(([command]) => command === 'save_network_config')).toBe(false)
+    expect(live.mtu).toBe(1280)
+  })
+
+  it('does not report a rejected remote save as success or replace a confirmed save with old live data', async () => {
+    const client = new GUIRemoteClient({ offline: () => false, changed: mock.changed, remotePersistence: () => true })
+    mock.invoke.mockRejectedValueOnce(new Error('remote file is read-only'))
+    await expect(client.save_config(config())).rejects.toThrow('remote file is read-only')
+    mock.invoke.mockImplementation(async command => {
+      if (command === 'save_remote_network_config') return { ...config(), mtu: 1340 }
+      if (command === 'get_network_metas') return { metas: { [userId]: { network_name: 'User', config_permission: 0, source: 1 } } }
+      if (command === 'get_saved_remote_config') throw new Error('durable read unavailable')
+      throw new Error('old live must not be started')
+    })
+    await client.save_config({ ...config(), mtu: 1340 })
+    await expect(client.get_network_config(userId)).rejects.toThrow('durable read unavailable')
+    await expect(client.update_network_instance_state(userId, false)).rejects.toThrow('durable read unavailable')
+    expect(mock.invoke.mock.calls.some(([command]) => command === 'run_network_instance')).toBe(false)
+  })
+
+  it('does not fall back to live state after reconnecting when durable reads time out', async () => {
+    mock.invoke.mockImplementation(async command => {
+      if (command === 'get_saved_remote_config') throw new Error('Timeout: deadline has elapsed')
+      if (command === 'get_network_metas') return { metas: { [userId]: { network_name: 'User', config_permission: 0, source: 1 } } }
+      throw new Error('must not read or start old live configuration')
+    })
+    const client = new GUIRemoteClient({ offline: () => false, changed: mock.changed, remotePersistence: () => true })
+    await expect(client.get_network_config(userId)).rejects.toThrow('Timeout: deadline has elapsed')
+    await expect(client.update_network_instance_state(userId, false)).rejects.toThrow('Timeout: deadline has elapsed')
+    expect(mock.invoke.mock.calls.every(([command]) => command === 'get_saved_remote_config' || command === 'get_network_metas')).toBe(true)
+  })
+
+  it('retains explicit edit-and-run compatibility for an old or pathless Core without claiming durable save support', async () => {
+    mock.invoke.mockImplementation(async command => {
+      if (command === 'get_saved_remote_config') throw 'REMOTE_PERSISTENCE_UNSUPPORTED'
+      if (command === 'get_config') return config()
+      if (command === 'get_network_metas') return { metas: { [userId]: { network_name: 'User', config_permission: 0, source: 1 } } }
+      if (command === 'update_network_config_state') return undefined
+      if (command === 'save_remote_network_config') throw new Error('durable save unsupported')
+      throw new Error('unexpected command')
+    })
+    const client = new GUIRemoteClient({ offline: () => false, changed: mock.changed, remotePersistence: () => true })
+    expect((await client.get_network_config(userId)).instance_id).toBe(userId)
+    await client.update_network_instance_state(userId, false)
+    expect(mock.invoke).toHaveBeenCalledWith('update_network_config_state', { instanceId: userId, disabled: false })
+    await expect(client.save_config(config())).rejects.toThrow('durable save unsupported')
+  })
+
+  it('observes all real Core runtimes and rejects a late result from an obsolete destination', async () => {
+    let current = true
+    let finish!: (result: unknown) => void
+    mock.invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const client = new GUIRemoteClient({ offline: () => false, changed: mock.changed, current: () => current })
+    const stale = client.get_network_infos()
+    current = false
+    finish({ info: { map: { [userId]: { running: true } } } })
+    await expect(stale).rejects.toThrow('configuration_context_changed')
+    current = true
+    mock.invoke.mockResolvedValueOnce({ info: { map: { [userId]: { running: true }, [managedId]: { running: false, error_msg: 'failed' } } } })
+    const runtimes = await client.get_network_infos()
+    expect(runtimes[userId]).toMatchObject({ running: true, peers: [] })
+    expect(runtimes[managedId]).toMatchObject({ running: false, error_msg: 'failed' })
+    expect(mock.invoke.mock.calls.every(([command, args]) => command === 'collect_network_info' && Object.keys(args).length === 0)).toBe(true)
+  })
   it('validates and saves a disabled local draft without Core, foreground service or enabled-state restoration', async () => {
     const client = createClient(), draft = config()
     saveEnabledNetworks([userId, managedId])

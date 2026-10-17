@@ -36,6 +36,14 @@ function wire(input: Parameters<typeof RuntimePb.fromJson>[0]): NetworkInstanceR
 }
 
 describe('GUI runtime protobuf JSON boundary', () => {
+  it('excludes closed connection snapshots from both peer and route-pair UI details', () => {
+    const peer = { peer_id: 6, conns: [{ conn_id: 'closed', is_closed: true }, { conn_id: 'open' }] }
+    const input = wire({ peers: [peer], peer_route_pairs: [{ route: { peer_id: 6 }, peer }] })
+    const output = normalizeGuiRuntime(input)!
+    expect(output.peers[0].conns.map(conn => conn.conn_id)).toEqual(['open'])
+    expect(output.peer_route_pairs[0].peer?.conns.map(conn => conn.conn_id)).toEqual(['open'])
+    expect(input.peers[0].conns).toHaveLength(2)
+  })
   it('decodes actual protobuf enum-name JSON so NAT labels display names instead of ordinals', () => {
     const input = wire({ my_node_info: { stun_info: { udp_nat_type: 'FullCone', tcp_nat_type: 'Symmetric' } } })
     expect(input.my_node_info.stun_info.udp_nat_type).toBe('FullCone')

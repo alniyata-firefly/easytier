@@ -7,6 +7,11 @@
   "add": "Add",
   "refresh": "Refresh",
   "retry": "Retry",
+  "managementStatus": {
+    "online": "Management online",
+    "offline": "Management offline",
+    "unknown": "Management status unknown"
+  },
   "copy": "Copy",
   "close": "Close",
   "closeDialog": "Close dialog",

@@ -3,6 +3,7 @@ pub(crate) mod captcha;
 mod central_network;
 mod device_access_tokens;
 mod device_rebind_requests;
+mod management_connection_events;
 mod network;
 pub(crate) mod observability;
 pub(crate) mod oidc;
@@ -376,6 +377,7 @@ impl RestfulServer {
             .merge(rpc::router())
             .merge(device_access_tokens::router())
             .merge(device_rebind_requests::router())
+            .merge(management_connection_events::router())
             .merge(observability::router())
             .merge(server_resources::router())
             .route_layer(login_required!(Backend))

@@ -39,6 +39,11 @@ jobs:
       - name: Verify member status and network settings in Chromium
         working-directory: easytier-web/frontend
         run: node --test --test-concurrency=1 tests/network-member-runtime-browser.test.mjs tests/network-transport-browser.test.mjs tests/network-settings-restore-browser.test.mjs tests/advanced-node-browser.test.mjs tests/device-rebind-browser.test.mjs
+      - name: Verify connection history, actual runtime state and mobile configuration boundaries
+        working-directory: easytier-web/frontend
+        run: |
+          pnpm test:browser:connections
+          node --test --test-concurrency=1 tests/mobile-uplink-browser.test.mjs
       - name: Verify the desktop React application in Chromium
         env:
           ET_GUI_QA_URL: http://127.0.0.1:1420
@@ -66,6 +71,39 @@ jobs:
         run: pnpm --dir easytier-gui exec node --test --test-concurrency=1 tests/local-config-offline-browser.test.mjs
       - name: Verify management authentication independently of local client state
         run: pnpm --dir easytier-gui exec node --test --test-concurrency=1 tests/management-auth-browser.test.mjs
+  runtime:
+    name: Focused Rust runtime and controller regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install native unit-test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential cmake clang mold pkg-config libssl-dev
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: '35.1'
+          repo-token: ${{ github.token }}
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: '1.95'
+          cache: false
+          rustflags: ''
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: focused-runtime-rust195-test-debug0
+          cache-targets: true
+      - name: Test shutdown, persistence, local pause, authentication and connection events
+        run: python3 ci/check_runtime.py
   workflow:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

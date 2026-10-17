@@ -36,6 +36,11 @@ use std::{
 use strum::VariantArray;
 
 use crate::tunnel::IpScheme;
+#[path = "core_shutdown.rs"]
+mod shutdown;
+
+#[cfg(target_os = "windows")]
+static WINDOWS_SERVICE_FAILED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "jemalloc-prof")]
 use jemalloc_ctl::{Access as _, AsName as _, epoch, stats};
 
@@ -1423,61 +1428,116 @@ fn win_service_set_work_dir(service_name: &std::ffi::OsString) -> anyhow::Result
 
 #[cfg(target_os = "windows")]
 fn win_service_event_loop(
-    stop_notify: std::sync::Arc<tokio::sync::Notify>,
+    stop: tokio_util::sync::CancellationToken,
     cli: Cli,
     status_handle: windows_service::service_control_handler::ServiceStatusHandle,
 ) {
-    use std::time::Duration;
+    use std::{cell::Cell, time::Duration};
     use tokio::runtime::Runtime;
+    use windows_service::service::ServiceState;
+
+    let status_failed = Cell::new(false);
+    let report = |state, checkpoint, failed| {
+        if let Err(error) = win_service_report_status(&status_handle, state, checkpoint, failed) {
+            status_failed.set(true);
+            log::error!(%error, "Failed to report Windows service state");
+        }
+    };
+    let rt = match Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            log::error!(%error, "Failed to create Windows service runtime");
+            report(ServiceState::Stopped, 0, true);
+            WINDOWS_SERVICE_FAILED.store(true, std::sync::atomic::Ordering::Release);
+            return;
+        }
+    };
+    let phase = Cell::new(shutdown::Phase::Starting);
+    let checkpoint = Cell::new(1u32);
+    let result = rt.block_on(async {
+        let operation = run_main_with_shutdown(cli, stop, |next| {
+            phase.set(next);
+            checkpoint.set(1);
+            let state = match next {
+                shutdown::Phase::Starting => ServiceState::StartPending,
+                shutdown::Phase::Running => ServiceState::Running,
+                shutdown::Phase::Stopping => ServiceState::StopPending,
+            };
+            report(state, checkpoint.get(), false);
+        });
+        shutdown::with_progress(
+            operation,
+            || {
+                if phase.get() != shutdown::Phase::Running {
+                    checkpoint.set(checkpoint.get().saturating_add(1));
+                    let state = match phase.get() {
+                        shutdown::Phase::Stopping => ServiceState::StopPending,
+                        _ => ServiceState::StartPending,
+                    };
+                    report(state, checkpoint.get(), false);
+                }
+            },
+            Duration::from_secs(2),
+        )
+        .await
+    });
+    // Cleanup has either finished or exhausted its deadline. Bound the runtime
+    // teardown too; do not leave SCM waiting for detached blocking work forever.
+    rt.shutdown_timeout(Duration::from_secs(2));
+    if let Err(error) = &result {
+        log::error!(%error, "Windows service stopped with an error");
+    }
+    report(ServiceState::Stopped, 0, result.is_err());
+    WINDOWS_SERVICE_FAILED.store(
+        result.is_err() || status_failed.get(),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn win_service_report_status(
+    handle: &windows_service::service_control_handler::ServiceStatusHandle,
+    state: windows_service::service::ServiceState,
+    checkpoint: u32,
+    failed: bool,
+) -> anyhow::Result<()> {
+    handle.set_service_status(win_service_status(state, checkpoint, failed))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn win_service_status(
+    state: windows_service::service::ServiceState,
+    checkpoint: u32,
+    failed: bool,
+) -> windows_service::service::ServiceStatus {
     use windows_service::service::*;
 
-    let normal_status = ServiceStatus {
+    let pending = matches!(
+        state,
+        ServiceState::StartPending | ServiceState::StopPending
+    );
+    ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
+        current_state: state,
+        controls_accepted: if state == ServiceState::Running {
+            ServiceControlAccept::STOP
+        } else {
+            ServiceControlAccept::empty()
+        },
+        exit_code: if failed {
+            ServiceExitCode::ServiceSpecific(1)
+        } else {
+            ServiceExitCode::Win32(0)
+        },
+        checkpoint: if pending { checkpoint.max(1) } else { 0 },
+        wait_hint: if pending {
+            shutdown::SHUTDOWN_TIMEOUT
+        } else {
+            std::time::Duration::ZERO
+        },
         process_id: None,
-    };
-    let error_status = ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Stopped,
-        controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::ServiceSpecific(1u32),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    };
-
-    std::thread::spawn(move || {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async move {
-            tokio::select! {
-                res = run_main(cli) => {
-                    match res {
-                        Ok(_) => {
-                            status_handle.set_service_status(normal_status).unwrap();
-                            std::process::exit(0);
-                        }
-                        Err(error) => {
-                            status_handle.set_service_status(error_status).unwrap();
-                            log::error!(?error);
-                            // exit with non-zero code so the SCM treats this as
-                            // a non-crash failure and applies the configured
-                            // failure actions; staying alive would leave a
-                            // zombie process until the SCM force-kills it.
-                            std::process::exit(1);
-                        }
-                    }
-                },
-                _ = stop_notify.notified() => {
-                    _ = status_handle.set_service_status(normal_status);
-                    std::process::exit(0);
-                }
-            }
-        });
-    });
+    }
 }
 
 fn parse_cli() -> Cli {
@@ -1497,44 +1557,44 @@ fn parse_cli() -> Cli {
 
 #[cfg(target_os = "windows")]
 fn win_service_main(arg: Vec<std::ffi::OsString>) {
-    use std::{sync::Arc, time::Duration};
-    use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
     use windows_service::{service::*, service_control_handler::*};
 
     _ = win_service_set_work_dir(&arg[0]);
 
     let cli = parse_cli();
 
-    let stop_notify_send = Arc::new(Notify::new());
-    let stop_notify_recv = Arc::clone(&stop_notify_send);
+    let stop = CancellationToken::new();
+    let stop_request = stop.clone();
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             ServiceControl::Stop => {
-                stop_notify_send.notify_one();
+                stop_request.cancel();
                 ServiceControlHandlerResult::NoError
             }
             _ => ServiceControlHandlerResult::NotImplemented,
         }
     };
     let status_handle = register(String::new(), event_handler).expect("register service fail");
-    let next_status = ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    };
-    status_handle
-        .set_service_status(next_status)
-        .expect("set service status fail");
-
-    win_service_event_loop(stop_notify_recv, cli, status_handle);
+    if let Err(error) =
+        win_service_report_status(&status_handle, ServiceState::StartPending, 1, false)
+    {
+        log::error!(%error, "Failed to report Windows service startup");
+    }
+    win_service_event_loop(stop, cli, status_handle);
 }
 
 async fn run_main(cli: Cli) -> anyhow::Result<()> {
+    run_main_with_shutdown(cli, tokio_util::sync::CancellationToken::new(), |_| {}).await
+}
+
+async fn run_main_with_shutdown(
+    cli: Cli,
+    stop: tokio_util::sync::CancellationToken,
+    mut phase: impl FnMut(shutdown::Phase),
+) -> anyhow::Result<()> {
+    phase(shutdown::Phase::Starting);
     defer!(dump_profile(0););
     log::init(&cli.logging_options, true)?;
 
@@ -1553,73 +1613,6 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     );
 
     let manager = Arc::new(native_cli_instance_manager().with_config_path(cli.config_dir.clone()));
-
-    let _rpc_server = ApiRpcServer::new(
-        cli.rpc_portal_options.rpc_portal,
-        cli.rpc_portal_options.rpc_portal_whitelist,
-        manager.clone(),
-    )?
-    .serve()
-    .await?;
-
-    let _web_client = if let Some(config_server_url_s) = cli.config_server.as_ref() {
-        let wc = web_client::run_web_client(
-            config_server_url_s,
-            crate::common::MachineIdOptions {
-                explicit_machine_id: cli.machine_id.clone(),
-                state_dir: None,
-            },
-            cli.network_options.hostname.clone(),
-            cli.network_options.secure_mode.unwrap_or(false),
-            manager.clone(),
-            None,
-        )
-        .await
-        .inspect(|_| {
-            log::info!("Web client started successfully...");
-
-            log::info!("Project documentation: https://github.com/alniyata-firefly/easytier#readme");
-        })?;
-
-        Some(wc)
-    } else {
-        None
-    };
-
-    let _daemon_guard = if cli.daemon {
-        Some(manager.register_daemon())
-    } else {
-        None
-    };
-
-    for (cfg, control, _) in startup.instances {
-        log::info!(
-            "\
-            Starting easytier from config file {:?}({:?}) with config:\n\
-            ############### TOML ###############\n\
-            {}\n\
-            -----------------------------------\n\
-            ",
-            control.path,
-            control.permission,
-            cfg.dump_redacted()
-        );
-        manager.run_network_instance(cfg, control)?;
-    }
-
-    if let Some(cfg) = cli_config {
-        log::info!(
-            "\
-            Starting easytier from cli with config:\n\
-            ############### TOML ###############\n\
-            {}\n\
-            -----------------------------------\n\
-            ",
-            cfg.dump_redacted()
-        );
-        manager.run_network_instance(cfg, ConfigFileControl::STATIC_CONFIG)?;
-    }
-
     #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     #[cfg(unix)]
@@ -1627,24 +1620,110 @@ async fn run_main(cli: Cli) -> anyhow::Result<()> {
     #[cfg(not(unix))]
     let sigterm = std::future::pending::<()>();
 
-    tokio::select! {
-        _ = manager.wait() => {
-            let infos = manager.collect_network_infos().await?;
-            if infos
-                .into_values()
-                .filter_map(|info| info.error_msg).next().is_some() {
-                return Err(anyhow::anyhow!("some instances stopped with errors"));
-            }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            log::info!("ctrl-c received, exiting...");
-        }
+    let gate = Arc::new(shutdown::MutationGate::default());
+    let mut rpc_server = None;
+    let mut web_client = None;
+    let mut daemon_guard = None;
+    let run_result = tokio::select! {
+        result = async {
+            rpc_server = Some(ApiRpcServer::new_with_hooks(
+                cli.rpc_portal_options.rpc_portal,
+                cli.rpc_portal_options.rpc_portal_whitelist,
+                manager.clone(),
+                gate.clone(),
+            )?.serve().await?);
 
+            if let Some(config_server_url) = cli.config_server.as_ref() {
+                web_client = Some(web_client::run_web_client(
+                    config_server_url,
+                    crate::common::MachineIdOptions {
+                        explicit_machine_id: cli.machine_id.clone(),
+                        state_dir: None,
+                    },
+                    cli.network_options.hostname.clone(),
+                    cli.network_options.secure_mode.unwrap_or(false),
+                    manager.clone(),
+                    Some(gate.clone()),
+                ).await?);
+                log::info!("Web client started successfully...");
+                log::info!("Project documentation: https://github.com/alniyata-firefly/easytier#readme");
+            }
+            if cli.daemon {
+                daemon_guard = Some(manager.register_daemon());
+            }
+            for (cfg, control, _) in startup.instances {
+                log::info!(
+                    "\
+                    Starting easytier from config file {:?}({:?}) with config:\n\
+                    ############### TOML ###############\n\
+                    {}\n\
+                    -----------------------------------\n\
+                    ",
+                    control.path,
+                    control.permission,
+                    cfg.dump_redacted()
+                );
+                manager.run_network_instance(cfg, control)?;
+            }
+            if let Some(cfg) = cli_config {
+                log::info!(
+                    "\
+                    Starting easytier from cli with config:\n\
+                    ############### TOML ###############\n\
+                    {}\n\
+                    -----------------------------------\n\
+                    ",
+                    cfg.dump_redacted()
+                );
+                manager.run_network_instance(cfg, ConfigFileControl::STATIC_CONFIG)?;
+            }
+            phase(shutdown::Phase::Running);
+            manager.wait().await;
+            let infos = manager.collect_network_infos().await?;
+            anyhow::ensure!(
+                !infos.into_values().any(|info| info.error_msg.is_some()),
+                "some instances stopped with errors"
+            );
+            Ok::<(), anyhow::Error>(())
+        } => result,
+        signal = tokio::signal::ctrl_c() => {
+            log::info!("ctrl-c received, exiting...");
+            signal.map_err(anyhow::Error::from)
+        },
         _ = sigterm, if cfg!(unix) => {
             log::warn!("terminate signal received, exiting...");
+            Ok(())
+        },
+        _ = stop.cancelled() => {
+            log::info!("service stop requested, exiting...");
+            Ok(())
         }
+    };
+    phase(shutdown::Phase::Stopping);
+    let shutdown_result = shutdown::complete(
+        || {
+            gate.close();
+            drop(web_client);
+            drop(rpc_server);
+            drop(daemon_guard);
+        },
+        async {
+            let _mutation = manager.mutation_lock().lock_owned().await;
+            // Stop only instances owned by this manager. This runtime operation
+            // neither deletes TOML files nor sends removals to another process.
+            manager.retain_network_instances(&[]).await?;
+            Ok(())
+        },
+        shutdown::SHUTDOWN_TIMEOUT,
+    )
+    .await;
+    match (run_result, shutdown_result) {
+        (Err(error), Err(shutdown_error)) => {
+            Err(error.context(format!("shutdown also failed: {shutdown_error:#}")))
+        }
+        (_, Err(error)) => Err(error),
+        (result, Ok(())) => result,
     }
-    Ok(())
 }
 
 fn memory_monitor(_force_dump: Arc<AtomicBool>) {
@@ -1698,7 +1777,13 @@ pub async fn main() -> ExitCode {
 
     #[cfg(target_os = "windows")]
     match windows_service::service_dispatcher::start(String::new(), ffi_service_main) {
-        Ok(_) => std::thread::park(),
+        Ok(_) => {
+            return if WINDOWS_SERVICE_FAILED.load(std::sync::atomic::Ordering::Acquire) {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            };
+        }
         Err(e) => {
             let should_panic = if let windows_service::Error::Winapi(ref io_error) = e {
                 io_error.raw_os_error() != Some(0x427) // ERROR_FAILED_SERVICE_CONTROLLER_CONNECT
@@ -1930,6 +2015,30 @@ mod tests {
     use clap::FromArgMatches as _;
 
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn service_shutdown_reports_pending_progress_and_a_terminal_state() {
+        use windows_service::service::*;
+
+        let pending = win_service_status(ServiceState::StopPending, 7, false);
+        assert_eq!(pending.current_state, ServiceState::StopPending);
+        assert_eq!(pending.checkpoint, 7);
+        assert_eq!(pending.wait_hint, shutdown::SHUTDOWN_TIMEOUT);
+        assert!(pending.controls_accepted.is_empty());
+
+        let stopped = win_service_status(ServiceState::Stopped, 7, false);
+        assert_eq!(stopped.current_state, ServiceState::Stopped);
+        assert_eq!(stopped.checkpoint, 0);
+        assert_eq!(stopped.wait_hint, std::time::Duration::ZERO);
+        assert_eq!(stopped.exit_code, ServiceExitCode::Win32(0));
+
+        let failed = win_service_status(ServiceState::Stopped, 0, true);
+        assert_eq!(failed.exit_code, ServiceExitCode::ServiceSpecific(1));
+        let running = win_service_status(ServiceState::Running, 5, false);
+        assert_eq!(running.checkpoint, 0);
+        assert_eq!(running.controls_accepted, ServiceControlAccept::STOP);
+    }
 
     fn startup_cli(args: &[&str]) -> Cli {
         let matches = Cli::command()

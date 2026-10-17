@@ -9,7 +9,7 @@ use easytier_proto::{
     rpc_types::controller::BaseController,
     web::{
         DeviceOsInfo, GetFeatureRequest, GetFeatureResponse, HeartbeatAuthState, HeartbeatRequest,
-        HeartbeatResponse, WebServerServiceClientFactory,
+        HeartbeatResponse, RuntimeControl, WebServerServiceClientFactory,
     },
 };
 use tokio::{sync::Mutex, task::JoinSet};
@@ -263,6 +263,10 @@ pub(crate) trait WebClientBackend: Send + Sync + 'static {
 
     fn failed_instance_ids(&self) -> Vec<uuid::Uuid>;
 
+    fn runtime_control(&self) -> Option<RuntimeControl> {
+        None
+    }
+
     fn instance_state_generation(&self) -> usize {
         0
     }
@@ -314,6 +318,10 @@ where
 
     fn failed_instance_ids(&self) -> Vec<uuid::Uuid> {
         self.instances.failed_instance_ids()
+    }
+
+    fn runtime_control(&self) -> Option<RuntimeControl> {
+        self.hooks.runtime_control()
     }
 
     fn instance_state_generation(&self) -> usize {
@@ -548,6 +556,7 @@ fn build_heartbeat_request(
     runtime_id: uuid::Uuid,
     running_network_instances: Vec<uuid::Uuid>,
     failed_network_instances: Vec<uuid::Uuid>,
+    runtime_control: Option<RuntimeControl>,
 ) -> HeartbeatRequest {
     HeartbeatRequest {
         machine_id: Some(config.machine_id.into()),
@@ -568,6 +577,7 @@ fn build_heartbeat_request(
             .collect(),
         support_heartbeat_policy: true,
         support_auth_state: true,
+        runtime_control,
     }
 }
 
@@ -641,6 +651,7 @@ impl WebClientSession {
                     controller.runtime_id,
                     running_network_instances,
                     failed_network_instances,
+                    controller.backend.runtime_control(),
                 );
 
                 match client
@@ -973,6 +984,7 @@ mod tests {
             runtime_id,
             vec![registered],
             vec![failed],
+            Some(RuntimeControl { paused: true }),
         );
 
         assert_eq!(request.inst_id.map(uuid::Uuid::from), Some(runtime_id));
@@ -993,6 +1005,10 @@ mod tests {
             vec![failed]
         );
         assert!(request.support_heartbeat_policy);
+        assert_eq!(
+            request.runtime_control,
+            Some(RuntimeControl { paused: true })
+        );
     }
 
     #[test]

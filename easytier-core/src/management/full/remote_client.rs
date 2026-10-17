@@ -8,7 +8,8 @@ use easytier_proto::{
         CollectNetworkInfoRequest, CollectNetworkInfoResponse, DeleteNetworkInstanceRequest,
         GetNetworkInstanceConfigRequest, GetNetworkInterfacesRequest, GetNetworkInterfacesResponse,
         ListNetworkInstanceMetaRequest, ListNetworkInstanceRequest, NetworkConfig, NetworkMeta,
-        RunNetworkInstanceRequest, ValidateConfigRequest, ValidateConfigResponse, WebClientService,
+        RunNetworkInstanceRequest, SaveNetworkInstanceConfigRequest, StopNetworkInstanceRequest,
+        ValidateConfigRequest, ValidateConfigResponse, WebClientService,
     },
     rpc_types::controller::BaseController,
 };
@@ -110,6 +111,7 @@ where
                     BaseController::default(),
                     GetNetworkInstanceConfigRequest {
                         inst_id: Some(inst_id.into()),
+                        prefer_persisted: false,
                     },
                 )
                 .await?;
@@ -247,7 +249,7 @@ where
         let running_inst_ids = ret.inst_ids.clone().into_iter().collect();
 
         // collect networks that are disabled
-        let disabled_inst_ids = self
+        let mut disabled_inst_ids = self
             .get_storage()
             .list_network_configs(identify, ListNetworkProps::All)
             .await
@@ -258,6 +260,11 @@ where
             })
             .filter(|id| !ret.inst_ids.contains(id))
             .collect::<Vec<_>>();
+        for id in ret.configured_inst_ids {
+            if !ret.inst_ids.contains(&id) && !disabled_inst_ids.contains(&id) {
+                disabled_inst_ids.push(id);
+            }
+        }
 
         Ok(ListNetworkInstanceIdsJsonResp {
             running_inst_ids,
@@ -276,21 +283,72 @@ where
         let client = self
             .get_rpc_client(identify.clone())
             .ok_or(RemoteClientError::ClientNotFound)?;
+        client
+            .delete_network_instance(
+                BaseController::default(),
+                DeleteNetworkInstanceRequest {
+                    inst_ids: inst_ids.iter().copied().map(Into::into).collect(),
+                },
+            )
+            .await?;
+
         self.get_storage()
             .delete_network_configs(identify, &inst_ids)
             .await
             .map_err(RemoteClientError::PersistentError)?;
 
-        client
-            .delete_network_instance(
+        Ok(())
+    }
+
+    /// GUI stop is distinct from removing a configuration. Older nodes must
+    /// fail this RPC explicitly, rather than silently deleting their files.
+    async fn handle_stop_network_instance(
+        &self,
+        identify: T,
+        inst_id: uuid::Uuid,
+    ) -> Result<(), RemoteClientError<E>> {
+        let client = self
+            .get_rpc_client(identify.clone())
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        let (config, source) = self
+            .handle_get_network_config_with_source(identify.clone(), inst_id)
+            .await?;
+        if source == ConfigSource::Web {
+            return Err(RemoteClientError::Other(
+                "managed network lifecycle is controlled by its controller".into(),
+            ));
+        }
+        let response = client
+            .stop_network_instance(
                 BaseController::default(),
-                DeleteNetworkInstanceRequest {
-                    inst_ids: inst_ids.into_iter().map(|id| id.into()).collect(),
+                StopNetworkInstanceRequest {
+                    inst_id: Some(inst_id.into()),
                 },
             )
             .await?;
-
-        Ok(())
+        if !response.stopped {
+            return Err(RemoteClientError::Other(
+                "remote stop was not acknowledged".into(),
+            ));
+        }
+        // Existing saved desired settings may intentionally differ from live.
+        // Do not replace them with a stale runtime snapshot while stopping.
+        if self
+            .get_storage()
+            .get_network_config(identify.clone(), &inst_id.to_string())
+            .await
+            .map_err(RemoteClientError::PersistentError)?
+            .is_none()
+        {
+            self.get_storage()
+                .insert_or_update_user_network_config(identify.clone(), inst_id, config, source)
+                .await
+                .map_err(RemoteClientError::PersistentError)?;
+        }
+        self.get_storage()
+            .update_network_config_state(identify, inst_id, true)
+            .await
+            .map_err(RemoteClientError::PersistentError)
     }
 
     async fn handle_update_network_state(
@@ -406,6 +464,96 @@ where
             .await
     }
 
+    /// A remote/service save must be acknowledged by that process's durable
+    /// storage before updating this controller's mirror. It never runs an
+    /// Instance or changes the caller's saved enabled/disabled intent.
+    async fn handle_save_remote_network_config(
+        &self,
+        identify: T,
+        inst_id: uuid::Uuid,
+        config: NetworkConfig,
+    ) -> Result<NetworkConfig, RemoteClientError<E>> {
+        self.handle_save_remote_network_config_with_source(
+            identify,
+            inst_id,
+            config,
+            ConfigSource::User,
+        )
+        .await
+    }
+
+    async fn handle_save_remote_network_config_with_source(
+        &self,
+        identify: T,
+        inst_id: uuid::Uuid,
+        config: NetworkConfig,
+        source: ConfigSource,
+    ) -> Result<NetworkConfig, RemoteClientError<E>> {
+        let client = self
+            .get_rpc_client(identify.clone())
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        let response = client
+            .save_network_instance_config(
+                BaseController::default(),
+                SaveNetworkInstanceConfigRequest {
+                    inst_id: Some(inst_id.into()),
+                    config: Some(config),
+                    source: config_source_to_rpc(source),
+                },
+            )
+            .await?;
+        let saved_id = response
+            .inst_id
+            .map(uuid::Uuid::from)
+            .ok_or_else(|| RemoteClientError::Other("remote save omitted instance id".into()))?;
+        if saved_id != inst_id {
+            return Err(RemoteClientError::Other(
+                "remote save instance id mismatch".into(),
+            ));
+        }
+        let saved = response.config.ok_or_else(|| {
+            RemoteClientError::Other("remote save omitted persisted configuration".into())
+        })?;
+        let source = config_source_from_rpc(response.source)
+            .ok_or_else(|| RemoteClientError::Other("remote save omitted config source".into()))?;
+        self.get_storage()
+            .insert_or_update_user_network_config(identify, saved_id, saved.clone(), source)
+            .await
+            .map_err(RemoteClientError::PersistentError)?;
+        Ok(saved)
+    }
+
+    async fn handle_get_saved_remote_network_config(
+        &self,
+        identify: T,
+        inst_id: uuid::Uuid,
+    ) -> Result<(NetworkConfig, ConfigSource), RemoteClientError<E>> {
+        let rpc = self
+            .get_rpc_client(identify)
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        let response = rpc
+            .get_network_instance_config(
+                BaseController::default(),
+                GetNetworkInstanceConfigRequest {
+                    inst_id: Some(inst_id.into()),
+                    prefer_persisted: true,
+                },
+            )
+            .await?;
+        if !response.persisted {
+            return Err(RemoteClientError::Other(
+                "remote process does not support reading persisted configuration; upgrade the remote Core".into(),
+            ));
+        }
+        let config = response.config.ok_or_else(|| {
+            RemoteClientError::Other("remote persisted configuration is missing".into())
+        })?;
+        let source = config_source_from_rpc(response.source).ok_or_else(|| {
+            RemoteClientError::Other("remote persisted configuration source is missing".into())
+        })?;
+        Ok((config, source))
+    }
+
     async fn handle_save_network_config_with_source(
         &self,
         identify: T,
@@ -445,6 +593,7 @@ where
                     BaseController::default(),
                     GetNetworkInstanceConfigRequest {
                         inst_id: Some(inst_id.into()),
+                        prefer_persisted: false,
                     },
                 )
                 .await
@@ -611,7 +760,7 @@ mod tests {
             _: (),
             _: ListNetworkProps,
         ) -> anyhow::Result<Vec<SavedConfig>> {
-            unreachable!()
+            Ok(self.lock().unwrap().iter().cloned().collect())
         }
     }
 
@@ -763,5 +912,192 @@ mod tests {
 
         assert!(matches!(result, Err(RemoteClientError::ClientNotFound)));
         assert!(manager.storage.lock().unwrap().is_none());
+    }
+
+    #[derive(Clone)]
+    struct PersistenceHandler {
+        config: NetworkConfig,
+        modern: bool,
+        calls: std::sync::Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl easytier_proto::rpc_types::handler::Handler for PersistenceHandler {
+        type Descriptor = easytier_proto::api::manage::WebClientServiceDescriptor;
+        type Controller = BaseController;
+
+        async fn call(
+            &self,
+            _: Self::Controller,
+            method: <Self::Descriptor as easytier_proto::rpc_types::descriptor::ServiceDescriptor>::Method,
+            _: bytes::Bytes,
+        ) -> easytier_proto::rpc_types::error::Result<bytes::Bytes> {
+            use easytier_proto::api::manage::{
+                GetNetworkInstanceConfigResponse, ListNetworkInstanceResponse,
+                SaveNetworkInstanceConfigResponse, WebClientServiceMethodDescriptor as Method,
+            };
+            use prost::Message as _;
+            let data = match method {
+                Method::GetNetworkInstanceConfig => {
+                    self.calls.lock().unwrap().push("read");
+                    GetNetworkInstanceConfigResponse {
+                        config: Some(self.config.clone()),
+                        source: config_source_to_rpc(ConfigSource::User),
+                        persisted: self.modern,
+                    }
+                    .encode_to_vec()
+                }
+                Method::ListNetworkInstance => ListNetworkInstanceResponse {
+                    inst_ids: Vec::new(),
+                    configured_inst_ids: vec![self.config.instance_id.clone().unwrap().into()],
+                }
+                .encode_to_vec(),
+                Method::SaveNetworkInstanceConfig => {
+                    self.calls.lock().unwrap().push("save");
+                    if !self.modern {
+                        return Err(easytier_proto::rpc_types::error::Error::InvalidMethodIndex(
+                            10,
+                            "WebClientService".into(),
+                        ));
+                    }
+                    SaveNetworkInstanceConfigResponse {
+                        inst_id: Some(self.config.instance_id.clone().unwrap().into()),
+                        config: Some(self.config.clone()),
+                        source: config_source_to_rpc(ConfigSource::User),
+                    }
+                    .encode_to_vec()
+                }
+                Method::StopNetworkInstance => {
+                    self.calls.lock().unwrap().push("stop");
+                    return Err(easytier_proto::rpc_types::error::Error::InvalidMethodIndex(
+                        11,
+                        "WebClientService".into(),
+                    ));
+                }
+                Method::DeleteNetworkInstance => {
+                    panic!("stop must never fall back to destructive Delete")
+                }
+                Method::RunNetworkInstance => panic!("save must never start an Instance"),
+                _ => panic!("unexpected persistence test RPC"),
+            };
+            Ok(data.into())
+        }
+    }
+
+    struct PersistenceManager {
+        storage: Mutex<Option<SavedConfig>>,
+        handler: PersistenceHandler,
+    }
+
+    #[async_trait]
+    impl RemoteClientManager<(), SavedConfig, anyhow::Error> for PersistenceManager {
+        fn get_rpc_client(
+            &self,
+            _: (),
+        ) -> Option<Box<dyn WebClientService<Controller = BaseController> + Send>> {
+            Some(Box::new(
+                easytier_proto::api::manage::WebClientServiceClient::new(self.handler.clone()),
+            ))
+        }
+        fn get_storage(&self) -> &impl Storage<(), SavedConfig, anyhow::Error> {
+            &self.storage
+        }
+        fn get_config_rpc_client(
+            &self,
+            _: (),
+        ) -> Option<Box<dyn ConfigRpc<Controller = BaseController> + Send>> {
+            None
+        }
+    }
+
+    fn persistence_manager(modern: bool) -> PersistenceManager {
+        PersistenceManager {
+            storage: Mutex::new(None),
+            handler: PersistenceHandler {
+                config: saved_config(),
+                modern,
+                calls: std::sync::Arc::new(Mutex::new(Vec::new())),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_save_requires_remote_ack_before_local_mirror_and_returns_canonical_config() {
+        for modern in [false, true] {
+            let manager = persistence_manager(modern);
+            let id = manager
+                .handler
+                .config
+                .instance_id
+                .as_ref()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let mut input = manager.handler.config.clone();
+            input.hostname = Some("before-remote-normalization".into());
+            let result = manager
+                .handle_save_remote_network_config((), id, input)
+                .await;
+            if modern {
+                assert_eq!(result.unwrap(), manager.handler.config);
+                assert_eq!(
+                    manager.storage.lock().unwrap().as_ref().unwrap().0,
+                    manager.handler.config
+                );
+            } else {
+                assert!(matches!(result, Err(RemoteClientError::RpcError(_))));
+                assert!(manager.storage.lock().unwrap().is_none());
+            }
+            assert_eq!(*manager.handler.calls.lock().unwrap(), vec!["save"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_stop_does_not_delete_or_modify_saved_desired() {
+        let manager = persistence_manager(false);
+        let desired = saved_config();
+        *manager.storage.lock().unwrap() = Some(SavedConfig(desired.clone(), ConfigSource::User));
+        let id = manager
+            .handler
+            .config
+            .instance_id
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(matches!(
+            manager.handle_stop_network_instance((), id).await,
+            Err(RemoteClientError::RpcError(_))
+        ));
+        assert_eq!(*manager.handler.calls.lock().unwrap(), vec!["read", "stop"]);
+        assert_eq!(manager.storage.lock().unwrap().as_ref().unwrap().0, desired);
+    }
+
+    #[tokio::test]
+    async fn legacy_live_read_is_not_accepted_as_a_persisted_configuration() {
+        let manager = persistence_manager(false);
+        let id = manager
+            .handler
+            .config
+            .instance_id
+            .as_ref()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(matches!(
+            manager.handle_get_saved_remote_network_config((), id).await,
+            Err(RemoteClientError::Other(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn configured_remote_ids_are_visible_without_a_gui_storage_mirror() {
+        let manager = persistence_manager(true);
+        let ids = manager.handle_list_network_instance_ids(()).await.unwrap();
+        assert!(ids.running_inst_ids.is_empty());
+        assert_eq!(
+            ids.disabled_inst_ids,
+            vec![manager.handler.config.instance_id.clone().unwrap().into()]
+        );
     }
 }

@@ -29,8 +29,11 @@ for (const scenario of [
   await page.addInitScript(installMockTauri, { platform: 'windows' });
   await page.addInitScript(fixture => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
-    window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => command === 'collect_network_info'
-      ? { info: { map: { [args.instanceId]: fixture } } } : invoke(command, args);
+    window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
+      const response = await invoke(command, args);
+      return command === 'collect_network_info'
+        ? { info: { map: Object.fromEntries(Object.keys(response.info.map).map(id => [id, fixture])) } } : response;
+    };
   }, scenario.fixture);
   try {
     await page.goto(base);

@@ -55,6 +55,21 @@ export interface Summary {
     device_count: number;
 }
 
+export interface ManagementConnectionEvent {
+    id: number;
+    device_id: string;
+    event: 'authorized' | 'disconnected' | 'authentication_rejected' | 'pending_approval' | 'configuration_apply_failed';
+    reason: string;
+    occurred_at: number;
+    peer_ip?: string | null;
+    instance_id?: string | null;
+}
+
+export interface ManagementConnectionEventPage {
+    events: ManagementConnectionEvent[];
+    next_before_id: number | null;
+}
+
 export interface ListNetworkInstanceIdResponse {
     running_inst_ids: Array<Utils.UUID>,
     disabled_inst_ids: Array<Utils.UUID>,
@@ -431,6 +446,18 @@ export class ApiClient {
             const response = await this.client.get<any, Record<string, Array<any>>>('/machines');
             return response.machines;
         });
+    }
+
+    public async list_management_connection_events(options: { device_id?: string; before_id?: number; limit?: number } = {}): Promise<ManagementConnectionEventPage> {
+        return this.client.get<any, ManagementConnectionEventPage>('/management-connection-events', { params: options });
+    }
+
+    public async get_node_runtime_infos(machine_id: string): Promise<Record<string, NetworkTypes.NetworkInstanceRunningInfo>> {
+        const response = await this.client.get<any, Api.CollectNetworkInfoResponse>(`/machines/${encodeURIComponent(machine_id)}/networks/info`);
+        return Object.fromEntries(Object.entries(response.info?.map ?? {}).flatMap(([id, info]) => {
+            const runtime = RuntimeDisplay.normalizeNetworkRuntime(info);
+            return runtime ? [[id, { ...runtime, running: runtime.running ?? false }]] : [];
+        }));
     }
 
     public async delete_machine(machine_id: string, block = false): Promise<undefined> {

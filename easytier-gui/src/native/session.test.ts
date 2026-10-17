@@ -6,8 +6,13 @@ const fixture = vi.hoisted(() => ({
   running: true, status: 'NotInstalled',
   managementState: 'authorized',
   paused: false,
+  nativeEnabled: true, vpnConnected: false,
+  vpnError: undefined as string | undefined,
   stopLocalClient: vi.fn(), resumeLocalClient: vi.fn(), suspendMobileVpnService: vi.fn(), resumeMobileVpnService: vi.fn(),
   consumePendingMobileVpnTileAction: vi.fn(), syncMobileVpnService: vi.fn(),
+  initMobileManagementService: vi.fn(), observeMobileVpnService: vi.fn(),
+  executeVpnTileAction: vi.fn(),
+  waitForMobileVpnInstance: vi.fn(),
   tileHandler: undefined as undefined | ((action: 'start' | 'stop') => Promise<void>),
   initRpcConnection: vi.fn(), sendConfigs: vi.fn(), initWebClient: vi.fn(), saveMode: vi.fn(),
   getServiceStatus: vi.fn(), initService: vi.fn(), setServiceStatus: vi.fn(),
@@ -23,6 +28,7 @@ vi.mock('./backend', () => ({
   getWebClientStatus: async () => fixture.managementState,
   listNetworkInstanceIds: async () => ({ running_inst_ids: [], disabled_inst_ids: [] }),
   stopLocalClient: fixture.stopLocalClient, resumeLocalClient: fixture.resumeLocalClient,
+  isLocalClientEnabled: async () => fixture.nativeEnabled,
 }))
 vi.mock('./storage', () => ({
   loadMode: () => fixture.mode, saveMode: fixture.saveMode, loadStoredConfigs: () => fixture.configs,
@@ -36,12 +42,17 @@ vi.mock('./mobile_vpn', () => ({
   consumePendingMobileVpnTileAction: fixture.consumePendingMobileVpnTileAction,
   setMobileVpnTileActionHandler: (handler?: typeof fixture.tileHandler) => { fixture.tileHandler = handler },
   syncMobileVpnService: fixture.syncMobileVpnService,
+  initMobileManagementService: fixture.initMobileManagementService, observeMobileVpnService: fixture.observeMobileVpnService,
   suspendMobileVpnService: fixture.suspendMobileVpnService, resumeMobileVpnService: fixture.resumeMobileVpnService,
+  isMobileVpnConnected: async () => fixture.vpnConnected,
+  getMobileVpnError: () => fixture.vpnError,
+  waitForMobileVpnInstance: fixture.waitForMobileVpnInstance,
 }))
-vi.mock('./mobile_vpn_tile', () => ({ executeVpnTileAction: vi.fn() }))
+vi.mock('./mobile_vpn_tile', () => ({ executeVpnTileAction: fixture.executeVpnTileAction }))
 
 beforeEach(() => {
   vi.useFakeTimers()
+  vi.clearAllTimers()
   vi.resetModules()
   vi.clearAllMocks()
   fixture.platform = 'windows'
@@ -52,14 +63,23 @@ beforeEach(() => {
   fixture.running = true
   fixture.managementState = 'authorized'
   fixture.paused = false
+  fixture.nativeEnabled = true
+  fixture.vpnConnected = false
+  fixture.vpnError = undefined
   fixture.tileHandler = undefined
-  fixture.stopLocalClient.mockReset().mockResolvedValue(undefined)
-  fixture.resumeLocalClient.mockReset().mockResolvedValue(undefined)
+  fixture.stopLocalClient.mockReset().mockImplementation(async () => { fixture.nativeEnabled = false })
+  fixture.resumeLocalClient.mockReset().mockImplementation(async () => { fixture.nativeEnabled = true })
   fixture.suspendMobileVpnService.mockReset().mockResolvedValue(undefined)
   fixture.consumePendingMobileVpnTileAction.mockReset().mockResolvedValue(false)
   fixture.syncMobileVpnService.mockReset().mockResolvedValue(undefined)
+  fixture.initMobileManagementService.mockReset().mockResolvedValue(undefined)
+  fixture.observeMobileVpnService.mockReset().mockImplementation(async () => fixture.vpnConnected)
+  fixture.executeVpnTileAction.mockReset().mockImplementation(async (action, _client, options) => {
+    await options.syncVpnService('fixture-network')
+    return { action, instanceId: 'fixture-network', changed: false }
+  })
   fixture.listen.mockResolvedValue(fixture.cleanup)
-  fixture.initRpcConnection.mockResolvedValue(undefined)
+  fixture.initRpcConnection.mockImplementation(async () => { fixture.running = true })
   fixture.sendConfigs.mockResolvedValue(undefined)
   fixture.initWebClient.mockResolvedValue(undefined)
   fixture.isClientRunning.mockImplementation(async () => fixture.running)
@@ -69,164 +89,329 @@ beforeEach(() => {
 })
 
 describe('native client lifecycle boundaries', () => {
-  it('keeps local Core readiness separate from management authentication and approval', async () => {
+  it('connects management on Android App launch while saved VPN intent cannot start the VPN', async () => {
     fixture.platform = 'android'
+    fixture.nativeEnabled = false
+    fixture.running = false
+    fixture.paused = false
     fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
-    fixture.managementState = 'authenticating'
+    fixture.configs = [{ config: { instance_id: 'user-id' }, source: 'user' }]
+    fixture.enabled = ['user-id']
     const { NativeSession } = await import('./session')
     const session = new NativeSession()
     await session.initialize()
-    await vi.advanceTimersByTimeAsync(2000)
-    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: false, managementState: 'authenticating' })
-    fixture.managementState = 'pending_approval'
-    await vi.advanceTimersByTimeAsync(2000)
-    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: false, managementState: 'pending_approval' })
-    fixture.managementState = 'rejected'
-    await vi.advanceTimersByTimeAsync(2000)
-    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: false, managementState: 'rejected' })
-    fixture.managementState = 'authorized'
-    await vi.advanceTimersByTimeAsync(2000)
-    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, managementState: 'authorized' })
-    await session.stopLocalClient()
-    expect(session.getSnapshot()).toMatchObject({ connected: false, managementConnected: false, managementState: 'disconnected', clientPaused: true })
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(fixture.initRpcConnection).toHaveBeenCalledOnce()
+    expect(fixture.initWebClient).toHaveBeenCalledWith('udp://example.invalid:22020/fixture-token')
+    expect(fixture.initMobileManagementService).toHaveBeenCalledOnce()
+    expect(fixture.sendConfigs).toHaveBeenCalledWith([], false, true)
+    expect(fixture.resumeLocalClient).not.toHaveBeenCalled()
+    expect(fixture.resumeMobileVpnService).not.toHaveBeenCalled()
+    expect(fixture.syncMobileVpnService).not.toHaveBeenCalled()
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, clientPaused: true, vpnConnected: false })
     session.dispose()
   })
 
-  it('does not infer authorization for an older server without an explicit auth response', async () => {
+  it('keeps management authentication, rejection and pending approval independent of VPN state', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = false
     fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
-    fixture.managementState = 'unknown'
     const { NativeSession } = await import('./session')
     const session = new NativeSession()
     await session.initialize()
-    await vi.advanceTimersByTimeAsync(4000)
-    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: false, managementState: 'unknown' })
-    await session.applyMode({ mode: 'normal' })
-    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: false, managementState: 'disconnected' })
+    for (const state of ['authenticating', 'pending_approval', 'rejected', 'authorized']) {
+      fixture.managementState = state
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: state === 'authorized', managementState: state, clientPaused: true, vpnConnected: false })
+    }
+    expect(fixture.resumeLocalClient).not.toHaveBeenCalled()
     session.dispose()
   })
 
-  it('pauses the whole Android client without forgetting management credentials or enabled instances', async () => {
+  it('connects and disconnects VPN without reinitializing management or forgetting configurations', async () => {
     fixture.platform = 'android'
+    fixture.nativeEnabled = false
     fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
-    fixture.configs = [{ config: { instance_id: 'local-id' }, source: 'user' }, { config: { instance_id: 'web-id' }, source: 'web' }]
     fixture.enabled = ['local-id', 'web-id']
     const { NativeSession } = await import('./session')
     const session = new NativeSession()
     await session.initialize()
-    const rpcCalls = fixture.initRpcConnection.mock.calls.length
-    await session.stopLocalClient()
-    expect(fixture.stopLocalClient).toHaveBeenCalledOnce()
-    expect(fixture.suspendMobileVpnService).toHaveBeenCalledOnce()
-    expect(session.getSnapshot()).toMatchObject({ clientPaused: true, connected: false, managementConnected: false, errorCode: undefined })
-    expect(fixture.paused).toBe(true)
-    expect(fixture.enabled).toEqual(['local-id', 'web-id'])
-    expect(session.getSnapshot().mode.config_server_url).toBe('udp://example.invalid:22020/fixture-token')
-    await vi.advanceTimersByTimeAsync(60000)
-    expect(fixture.initRpcConnection).toHaveBeenCalledTimes(rpcCalls)
-    await session.startLocalClient()
-    expect(fixture.resumeLocalClient).toHaveBeenCalledOnce()
-    expect(fixture.initWebClient).toHaveBeenLastCalledWith('udp://example.invalid:22020/fixture-token')
-    expect(fixture.sendConfigs).toHaveBeenLastCalledWith(['local-id'], false)
-    expect(session.getSnapshot()).toMatchObject({ clientPaused: false, connected: true, errorCode: undefined })
-    expect(fixture.paused).toBe(false)
-    session.dispose()
-  })
-
-  it('keeps Android paused across a WebView/session reload until Start is explicit', async () => {
-    fixture.platform = 'android'
-    fixture.paused = true
-    const { NativeSession } = await import('./session')
-    const session = new NativeSession()
-    await session.initialize()
-    expect(fixture.stopLocalClient).toHaveBeenCalledOnce()
-    expect(fixture.initRpcConnection).not.toHaveBeenCalled()
-    expect(fixture.initWebClient).not.toHaveBeenCalled()
-    expect(session.getSnapshot().clientPaused).toBe(true)
-    await session.applyMode({ mode: 'normal', config_server_url: 'udp://updated.invalid:22020/new-fixture-token' })
-    expect(fixture.initWebClient).not.toHaveBeenCalled()
-    await session.reconnect()
-    expect(fixture.initWebClient).toHaveBeenLastCalledWith('udp://updated.invalid:22020/new-fixture-token')
-    session.dispose()
-  })
-
-  it('rolls back an explicit Android start when strict VPN synchronization fails', async () => {
-    fixture.platform = 'android'
-    fixture.paused = true
-    const { NativeSession } = await import('./session')
-    const session = new NativeSession()
-    await session.initialize()
-    fixture.syncMobileVpnService.mockRejectedValueOnce(new Error('vpn_start_failed'))
-    await expect(session.startLocalClient()).rejects.toThrow('client_start_failed')
-    expect(fixture.syncMobileVpnService).toHaveBeenLastCalledWith({ strict: true })
-    expect(fixture.resumeLocalClient).toHaveBeenCalledOnce()
-    expect(fixture.stopLocalClient).toHaveBeenCalledTimes(2)
-    expect(session.getSnapshot()).toMatchObject({ clientPaused: true, connected: false, managementConnected: false, errorCode: 'client_start_failed', busy: false })
-    expect(fixture.paused).toBe(true)
-    session.dispose()
-  })
-
-  it('stops Android locally even when RPC and the management server are unreachable', async () => {
-    fixture.platform = 'android'
-    fixture.mode = { mode: 'normal', config_server_url: 'udp://offline.invalid:22020/retained-token' }
-    const { NativeSession } = await import('./session')
-    const session = new NativeSession()
-    await session.initialize()
+    await vi.advanceTimersByTimeAsync(2000)
     const rpcCalls = fixture.initRpcConnection.mock.calls.length
     const managementCalls = fixture.initWebClient.mock.calls.length
-    fixture.running = false
-    fixture.initRpcConnection.mockRejectedValue(new Error('fixture offline RPC'))
-    fixture.initWebClient.mockRejectedValue(new Error('fixture offline management'))
+    fixture.syncMobileVpnService.mockImplementationOnce(async () => { fixture.vpnConnected = true })
+    await session.startLocalClient()
+    expect(fixture.syncMobileVpnService).toHaveBeenLastCalledWith({ strict: true, preferredInstanceId: 'fixture-network' })
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, clientPaused: false, vpnConnected: true })
     await session.stopLocalClient()
-    expect(fixture.stopLocalClient).toHaveBeenCalledOnce()
-    expect(fixture.suspendMobileVpnService).toHaveBeenCalledOnce()
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, managementState: 'authorized', clientPaused: true, vpnConnected: false })
     expect(fixture.initRpcConnection).toHaveBeenCalledTimes(rpcCalls)
     expect(fixture.initWebClient).toHaveBeenCalledTimes(managementCalls)
-    expect(session.getSnapshot()).toMatchObject({ clientPaused: true, errorCode: undefined })
-    expect(session.getSnapshot().mode.config_server_url).toBe('udp://offline.invalid:22020/retained-token')
+    expect(fixture.enabled).toEqual(['local-id', 'web-id'])
+    expect(session.getSnapshot().mode.config_server_url).toBe('udp://example.invalid:22020/fixture-token')
     session.dispose()
   })
 
-  it('reports incomplete Core stop and leaves Android paused with a working retry', async () => {
+  it('allows management settings changes and reconnection while VPN remains disconnected', async () => {
     fixture.platform = 'android'
+    fixture.nativeEnabled = false
     const { NativeSession } = await import('./session')
     const session = new NativeSession()
     await session.initialize()
-    fixture.stopLocalClient.mockRejectedValueOnce(new Error('fixture native stop still running'))
-    await expect(session.stopLocalClient()).rejects.toThrow('client_stop_failed')
-    expect(fixture.suspendMobileVpnService).toHaveBeenCalledOnce()
-    expect(session.getSnapshot()).toMatchObject({ clientPaused: true, connected: false, errorCode: 'client_stop_failed', busy: false })
-    await session.stopLocalClient()
-    expect(session.getSnapshot().errorCode).toBeUndefined()
-    await session.startLocalClient()
-    expect(session.getSnapshot().clientPaused).toBe(false)
+    await session.applyMode({ mode: 'normal', config_server_url: 'udp://updated.invalid:22020/fixture-token' })
+    expect(fixture.initWebClient).toHaveBeenLastCalledWith('udp://updated.invalid:22020/fixture-token')
+    await session.reconnect()
+    expect(fixture.resumeLocalClient).not.toHaveBeenCalled()
+    expect(fixture.resumeMobileVpnService).not.toHaveBeenCalled()
+    expect(fixture.syncMobileVpnService).not.toHaveBeenCalled()
+    expect(session.getSnapshot()).toMatchObject({ connected: true, clientPaused: true, vpnConnected: false })
     session.dispose()
   })
 
-  it('still stops Core when the Android VPN service cannot confirm release', async () => {
+  it('reattaches to a live Android VPN without reconnecting management or rebuilding TUN', async () => {
     fixture.platform = 'android'
+    fixture.nativeEnabled = true
+    fixture.vpnConnected = true
+    fixture.paused = true
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
     const { NativeSession } = await import('./session')
     const session = new NativeSession()
     await session.initialize()
-    fixture.suspendMobileVpnService.mockRejectedValueOnce(new Error('fixture service failure'))
-    await expect(session.stopLocalClient()).rejects.toThrow('client_stop_failed')
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, clientPaused: false, vpnConnected: true })
+    expect(fixture.observeMobileVpnService).toHaveBeenCalled()
+    for (const action of [fixture.resumeLocalClient, fixture.stopLocalClient, fixture.suspendMobileVpnService,
+      fixture.initRpcConnection, fixture.sendConfigs, fixture.initWebClient, fixture.syncMobileVpnService]) expect(action).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('retains a live VPN status if the management connection loses authorization', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = true
+    fixture.vpnConnected = true
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    fixture.managementState = 'disconnected'
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(session.getSnapshot()).toMatchObject({ vpnConnected: true, managementConnected: false, managementState: 'disconnected' })
+    expect(fixture.stopLocalClient).not.toHaveBeenCalled()
+    expect(fixture.suspendMobileVpnService).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('resumes an unfinished warm VPN connection without reinitializing management', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = true
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    expect(fixture.syncMobileVpnService).toHaveBeenCalledOnce()
+    expect(fixture.initRpcConnection).not.toHaveBeenCalled()
+    expect(fixture.initWebClient).not.toHaveBeenCalled()
+    expect(session.getSnapshot()).toMatchObject({ connected: true, clientPaused: false, vpnConnected: false, vpnTransition: 'connecting' })
+    fixture.vpnConnected = true
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(session.getSnapshot()).toMatchObject({ vpnConnected: true, vpnTransition: undefined })
+    session.dispose()
+  })
+
+  it('continues waiting for controller configuration after a warm remount with no Core running yet', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = true
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    expect(fixture.waitForMobileVpnInstance).toHaveBeenCalledOnce()
+    expect(fixture.waitForMobileVpnInstance.mock.calls[0]).toEqual([])
+    expect(fixture.initWebClient).not.toHaveBeenCalled()
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, clientPaused: false, vpnTransition: 'connecting' })
+    session.dispose()
+  })
+
+  it('retains management when an unfinished warm VPN connection cannot resume', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = true
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
+    fixture.syncMobileVpnService.mockRejectedValueOnce(new Error('fixture native start failed'))
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, clientPaused: true, errorCode: 'client_start_failed' })
+    expect(fixture.initWebClient).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('adopts system VPN revocation without disconnecting management or restarting the VPN', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = true
+    fixture.vpnConnected = true
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    fixture.nativeEnabled = false
+    fixture.vpnError = 'vpn_permission_revoked'
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, clientPaused: true, vpnConnected: false, errorCode: 'vpn_permission_revoked' })
     expect(fixture.stopLocalClient).toHaveBeenCalledOnce()
-    expect(session.getSnapshot().errorCode).toBe('client_stop_failed')
+    expect(fixture.syncMobileVpnService).not.toHaveBeenCalled()
+    expect(fixture.resumeLocalClient).not.toHaveBeenCalled()
     session.dispose()
   })
 
-  it('routes the Android quick-settings Stop through the same client lifecycle', async () => {
+  it('does not warm-resume a VPN revoked before the old WebView could attach Core', async () => {
     fixture.platform = 'android'
-    fixture.consumePendingMobileVpnTileAction.mockImplementationOnce(async () => {
-      await fixture.tileHandler?.('stop')
-      return true
+    fixture.nativeEnabled = true
+    fixture.running = false
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
+    fixture.observeMobileVpnService.mockImplementationOnce(async () => {
+      fixture.vpnError = 'vpn_permission_revoked'
+      return false
     })
     const { NativeSession } = await import('./session')
     const session = new NativeSession()
     await session.initialize()
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, clientPaused: true, vpnConnected: false, errorCode: 'vpn_permission_revoked' })
     expect(fixture.stopLocalClient).toHaveBeenCalledOnce()
-    expect(session.getSnapshot().clientPaused).toBe(true)
-    await fixture.tileHandler?.('start')
-    expect(session.getSnapshot().clientPaused).toBe(false)
+    expect(fixture.syncMobileVpnService).not.toHaveBeenCalled()
+    expect(fixture.initWebClient).toHaveBeenCalledOnce()
+    session.dispose()
+  })
+
+  it('disconnects a failed background VPN reconciliation while retaining management', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = false
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    await session.startLocalClient()
+    fixture.vpnError = 'vpn_tun_fd_failed'
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, clientPaused: true, vpnConnected: false, vpnTransition: undefined, errorCode: 'client_start_failed' })
+    session.dispose()
+  })
+
+  it('ends a VPN connection that never acquires an address instead of remaining pending forever', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = false
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    await session.startLocalClient()
+    expect(session.getSnapshot()).toMatchObject({ clientPaused: false, vpnTransition: 'connecting' })
+    await vi.advanceTimersByTimeAsync(152000)
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, clientPaused: true, vpnConnected: false, vpnTransition: undefined, errorCode: 'vpn_connection_timeout' })
+    expect(fixture.stopLocalClient).toHaveBeenCalledOnce()
+    session.dispose()
+  })
+
+  it('retries failed management RPC while VPN stays disconnected', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = false
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    fixture.running = false
+    fixture.initRpcConnection.mockRejectedValueOnce(new Error('fixture failed control RPC'))
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(session.getSnapshot()).toMatchObject({ connected: true, clientPaused: true, vpnConnected: false })
+    expect(fixture.resumeLocalClient).not.toHaveBeenCalled()
+    expect(fixture.resumeMobileVpnService).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('disconnects VPN while the controller is unreachable without using controller RPC', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = true
+    fixture.vpnConnected = true
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    fixture.running = false
+    fixture.initRpcConnection.mockRejectedValue(new Error('fixture offline RPC'))
+    const managementCalls = fixture.initWebClient.mock.calls.length
+    await session.stopLocalClient()
+    expect(fixture.stopLocalClient).toHaveBeenCalledOnce()
+    expect(fixture.suspendMobileVpnService).toHaveBeenCalledOnce()
+    expect(fixture.initWebClient).toHaveBeenCalledTimes(managementCalls)
+    expect(session.getSnapshot()).toMatchObject({ clientPaused: true, vpnConnected: false, errorCode: undefined })
+    session.dispose()
+  })
+
+  it('keeps management online and supports retry when native VPN cleanup is incomplete', async () => {
+    fixture.platform = 'android'
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    fixture.stopLocalClient.mockRejectedValueOnce(new Error('fixture pending detach'))
+    await expect(session.stopLocalClient()).rejects.toThrow('client_stop_failed')
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, clientPaused: true, vpnStopIncomplete: true, errorCode: 'client_stop_failed' })
+    await session.reconnect()
+    expect(session.getSnapshot().vpnStopIncomplete).toBe(true)
+    await session.stopLocalClient()
+    expect(session.getSnapshot()).toMatchObject({ connected: true, vpnStopIncomplete: false, errorCode: undefined })
+    session.dispose()
+  })
+
+  it('rolls back failed VPN startup while retaining the management connection', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = false
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    await vi.advanceTimersByTimeAsync(2000)
+    fixture.syncMobileVpnService.mockRejectedValueOnce(new Error('fixture permission denied'))
+    await expect(session.startLocalClient()).rejects.toThrow('client_start_failed')
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, clientPaused: true, vpnConnected: false, errorCode: 'client_start_failed' })
+    session.dispose()
+  })
+
+  it('waits for current managed configuration after Connect without starting a cached managed Core', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = false
+    fixture.mode = { mode: 'normal', config_server_url: 'udp://example.invalid:22020/fixture-token' }
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    await vi.advanceTimersByTimeAsync(2000)
+    fixture.executeVpnTileAction.mockResolvedValueOnce({ action: 'start', changed: false })
+    await session.startLocalClient()
+    expect(fixture.waitForMobileVpnInstance).toHaveBeenCalledWith(undefined)
+    expect(session.getSnapshot()).toMatchObject({ connected: true, managementConnected: true, clientPaused: false, vpnConnected: false, vpnTransition: 'connecting' })
+    session.dispose()
+  })
+
+  it('reports no available VPN when neither local configuration nor a controller is configured', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = false
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    fixture.executeVpnTileAction.mockResolvedValueOnce({ action: 'start', changed: false })
+    await expect(session.startLocalClient()).rejects.toThrow('vpn_no_network')
+    expect(session.getSnapshot()).toMatchObject({ connected: true, clientPaused: true, vpnConnected: false })
+    session.dispose()
+  })
+
+  it('routes explicit Android Tile Connect through VPN lifecycle after management starts', async () => {
+    fixture.platform = 'android'
+    fixture.nativeEnabled = false
+    fixture.running = false
+    fixture.consumePendingMobileVpnTileAction.mockImplementationOnce(async () => { await fixture.tileHandler?.('start'); return true })
+    const { NativeSession } = await import('./session')
+    const session = new NativeSession()
+    await session.initialize()
+    expect(fixture.resumeLocalClient).toHaveBeenCalledOnce()
+    expect(fixture.initWebClient).toHaveBeenCalledOnce()
+    expect(session.getSnapshot()).toMatchObject({ connected: true, clientPaused: false })
     session.dispose()
   })
 
@@ -245,7 +430,7 @@ describe('native client lifecycle boundaries', () => {
     const { NativeSession } = await import('./session')
     const session = new NativeSession()
     await session.initialize()
-    expect(fixture.sendConfigs).toHaveBeenCalledWith(['user-id'], true)
+    expect(fixture.sendConfigs).toHaveBeenCalledWith(['user-id'], true, true)
     expect(session.getSnapshot().connected).toBe(true)
     session.dispose()
   })
@@ -257,7 +442,7 @@ describe('native client lifecycle boundaries', () => {
     const { NativeSession } = await import('./session')
     const session = new NativeSession()
     await session.initialize()
-    expect(fixture.sendConfigs).toHaveBeenCalledWith([], true)
+    expect(fixture.sendConfigs).toHaveBeenCalledWith([], true, false)
     expect(fixture.initWebClient).not.toHaveBeenCalled()
     session.dispose()
   })
@@ -300,9 +485,12 @@ describe('native client lifecycle boundaries', () => {
   it('does not reconnect a service after an explicit stop', async () => {
     fixture.mode = { mode: 'service', config_dir: 'fixture/config', file_log_dir: 'fixture/logs', file_log_level: 'warn', rpc_portal: '127.0.0.1:15888', installed_core_version: 'fixture-version' }
     fixture.status = 'Running'
+    fixture.configs = [{ config: { instance_id: 'local-id' }, source: 'user' }]
+    fixture.enabled = ['local-id']
     const { NativeSession } = await import('./session')
     const session = new NativeSession()
     await session.initialize()
+    expect(fixture.sendConfigs).toHaveBeenCalledWith([], true, false)
     await session.stopService()
     const connections = fixture.initRpcConnection.mock.calls.length
     await vi.advanceTimersByTimeAsync(60000)

@@ -5,6 +5,18 @@ vi.mock('./storage', () => ({ saveEnabledNetworks: fixture.saveEnabled, saveStor
 vi.mock('./mobile_vpn', () => ({ onNetworkInstanceChange: vi.fn(), onNetworkInstanceUpdate: vi.fn(), prepareVpnService: vi.fn(), syncMobileVpnService: vi.fn() }))
 beforeEach(() => { fixture.callbacks.clear(); vi.clearAllMocks() })
 describe('native persistence events', () => {
+  it('does not let managed network notifications request VPN permission or select another TUN owner', async () => {
+    const { listenGlobalEvents } = await import('./events')
+    const mobile = await import('./mobile_vpn')
+    const changed = vi.fn()
+    const cleanup = await listenGlobalEvents({ android: true, persist: () => true, changed, error: vi.fn() })
+    fixture.callbacks.get('pre_run_network_instance')!({ payload: 'managed-instance' })
+    fixture.callbacks.get('post_run_network_instance')!({ payload: 'managed-instance' })
+    await vi.waitFor(() => expect(mobile.onNetworkInstanceChange).toHaveBeenCalledWith('managed-instance', { passive: true }))
+    expect(mobile.prepareVpnService).not.toHaveBeenCalled()
+    expect(changed).toHaveBeenCalledOnce()
+    cleanup()
+  })
   it('listens to enabled-network updates and respects the current local/remote persistence boundary', async () => {
     const { listenGlobalEvents } = await import('./events')
     let local = true

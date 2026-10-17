@@ -7,6 +7,15 @@ vi.mock('../../../easytier-web/frontend-lib/src/types/network', () => ({
 vi.mock('./storage', () => ({ loadStoredConfigs: () => mock.configs }))
 
 describe('Tauri native command payload contract', () => {
+  it('observes native Android lifecycle and committed VPN state without a start command', async () => {
+    const backend = await import('./backend')
+    await backend.isLocalClientEnabled()
+    expect(mock.invoke).toHaveBeenLastCalledWith('is_local_client_enabled')
+    await backend.isLocalVpnConnected()
+    expect(mock.invoke).toHaveBeenLastCalledWith('is_local_vpn_connected')
+    await backend.getLocalVpnStatus()
+    expect(mock.invoke).toHaveBeenLastCalledWith('get_local_vpn_status')
+  })
   it('reads the local persisted management identity without a token or a running instance', async () => {
     const backend = await import('./backend')
     await backend.getManagementDeviceId()
@@ -22,8 +31,20 @@ describe('Tauri native command payload contract', () => {
     expect(mock.invoke).toHaveBeenLastCalledWith('parse_network_config', { cfg: config })
     await backend.saveNetworkConfig(config)
     expect(mock.invoke).toHaveBeenLastCalledWith('save_network_config', { cfg: config })
+    await backend.saveRemoteNetworkConfig(config)
+    expect(mock.invoke).toHaveBeenLastCalledWith('save_remote_network_config', { cfg: config })
+    await backend.getSavedRemoteConfig('fixture')
+    expect(mock.invoke).toHaveBeenLastCalledWith('get_saved_remote_config', { instanceId: 'fixture' })
     await backend.generateNetworkConfig('fixture-toml')
     expect(mock.invoke).toHaveBeenLastCalledWith('generate_network_config', { tomlConfig: 'fixture-toml' })
+  })
+
+  it('queries all runtime instances in one observation without narrowing to the selected network', async () => {
+    const backend = await import('./backend')
+    await backend.collectNetworkInfo()
+    expect(mock.invoke).toHaveBeenLastCalledWith('collect_network_info', {})
+    await backend.collectNetworkInfo('fixture')
+    expect(mock.invoke).toHaveBeenLastCalledWith('collect_network_info', { instanceId: 'fixture' })
   })
 
   it('preserves central configuration source and the enabled list in load_configs', async () => {
@@ -32,6 +53,13 @@ describe('Tauri native command payload contract', () => {
     expect(mock.invoke).toHaveBeenLastCalledWith('load_configs', { configs: [{ config: { instance_id: 'fixture' }, source: 'web' }], enabledNetworks: ['fixture'] })
     await backend.updateNetworkConfigState('fixture', false)
     expect(mock.invoke).toHaveBeenLastCalledWith('update_network_config_state', { instanceId: 'fixture', disabled: false })
+  })
+
+  it('does not import local GUI configurations into a remote or service Core', async () => {
+    const backend = await import('./backend')
+    await backend.sendConfigs([], true, false)
+    expect(mock.invoke).toHaveBeenLastCalledWith('load_configs', { configs: [], enabledNetworks: [] })
+    expect(mock.configs).toHaveLength(1)
   })
 
   it('binds a TUN descriptor to the requested instance instead of choosing another network', async () => {

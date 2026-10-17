@@ -6,9 +6,9 @@
   "connectDevice": "Connect device",
   "summary": "Network summary",
   "registered": "Registered devices",
-  "online": "Online devices",
+  "online": "Management online",
   "centralNetworks": "Central networks",
-  "instances": "Running instances",
+  "instances": "Instances",
   "observe": "Observe network",
   "emptyNetworks": "No central networks yet",
   "createDetail": "Create a network, then add registered devices.",
@@ -22,7 +22,7 @@
   "emptyDevices": "No devices yet",
   "registerDetail": "Issue a management token and register the client.",
   "loadingNetworks": "Loading networks…",
-  "networkOnline": "{{online}} / {{total}} online",
+  "networkOnline": "{{online}} / {{total}} members online",
   "external": {
     "title": "Managed by an external system",
     "detail": "View the current instances on the devices page."

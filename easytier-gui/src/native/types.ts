@@ -43,6 +43,9 @@ export interface SessionSnapshot {
   managementConnected: boolean
   managementState: ManagementConnectionState
   clientPaused: boolean
+  vpnConnected: boolean
+  vpnTransition?: 'connecting' | 'disconnecting'
+  vpnStopIncomplete?: boolean
   serviceStatus: ServiceStatus
   busy: boolean
   errorCode?: string

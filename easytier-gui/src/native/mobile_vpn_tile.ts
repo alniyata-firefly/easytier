@@ -6,11 +6,12 @@ export interface VpnTileActionResult {
   action: VpnTileAction
   instanceId?: string
   changed: boolean
+  pending?: boolean
 }
 
 export interface VpnTileActionOptions {
   lastInstanceId?: string | null
-  syncVpnService: () => Promise<void>
+  syncVpnService: (instanceId?: string) => Promise<void>
 }
 
 export async function executeVpnTileAction(
@@ -30,13 +31,24 @@ export async function executeVpnTileAction(
       return [instanceId, config] as const
     })),
   )
-  const candidates = candidateIds.filter(instanceId => !candidateConfigs.get(instanceId)?.no_tun)
+  const metas = candidateIds.length ? (await api.get_network_metas(candidateIds)).metas : {}
+  const isManaged = (id: string) => metas[id]?.source === 2 || metas[id]?.source === 'ConfigSourceWeb'
+  const candidates = candidateIds.filter(instanceId => !candidateConfigs.get(instanceId)?.no_tun
+    // Only an actual Core instance may select a managed TUN. Cached membership
+    // can be obsolete while disconnected; let a fresh controller Run select it.
+    && (!isManaged(instanceId) || runningIds.includes(instanceId)))
   const instanceId = options.lastInstanceId && candidates.includes(options.lastInstanceId)
     ? options.lastInstanceId
     : candidates[0]
 
   if (!instanceId) {
     return { action, changed: false }
+  }
+
+  if (isManaged(instanceId)) {
+    // The controller owns managed instances. Cached configuration must not
+    // revive a removed membership or overwrite a newer desired revision.
+    if (action === 'stop') throw new Error('managed_lifecycle_owned_by_controller')
   }
 
   let changed = false
@@ -49,6 +61,6 @@ export async function executeVpnTileAction(
     changed = true
   }
 
-  await options.syncVpnService()
+  await options.syncVpnService(action === 'start' ? instanceId : undefined)
   return { action, instanceId, changed }
 }

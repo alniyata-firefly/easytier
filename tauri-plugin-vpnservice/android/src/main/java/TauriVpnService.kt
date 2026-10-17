@@ -43,12 +43,14 @@ class TauriVpnService : VpnService() {
         private var instanceId: String? = null
         private var establishedFd: Int? = null
         private var errorMsg: String? = null
+        private var stopReason: String? = null
 
         fun beginStart(request: String, instance: String): Boolean {
             if (state != "stopped" || self != null) return false
             requestId = request
             instanceId = instance
             errorMsg = null
+            stopReason = null
             establishedFd = null
             state = "starting"
             return true
@@ -79,6 +81,7 @@ class TauriVpnService : VpnService() {
             it.put("established", state == "established" && establishedFd != null)
             it.put("fd", if (state == "established") establishedFd else null)
             it.put("errorMsg", errorMsg)
+            it.put("stopReason", stopReason)
             it.put("ipv4Addr", ipv4Addr)
             it.put("routes", JSONArray(routes.toList()))
             it.put("dns", dns)
@@ -87,12 +90,13 @@ class TauriVpnService : VpnService() {
         private const val NOTIFICATION_CHANNEL_ID = "easytier_vpn_channel"
         private const val NOTIFICATION_ID = 1356
 
+        // This preference controls management keepalive; Rust owns the VPN/TUN switch.
         private const val CLIENT_PREFERENCES = "easytier_client_lifecycle"
         private const val CLIENT_ENABLED = "enabled"
 
         fun isClientEnabled(context: Context): Boolean =
             context.getSharedPreferences(CLIENT_PREFERENCES, Context.MODE_PRIVATE)
-                .getBoolean(CLIENT_ENABLED, true)
+                .getBoolean(CLIENT_ENABLED, false)
 
         fun clientForegroundPolicy(context: Context): ClientForegroundPolicy =
             ClientForegroundPolicy(
@@ -102,6 +106,7 @@ class TauriVpnService : VpnService() {
                         .edit().putBoolean(CLIENT_ENABLED, enabled).apply()
                 },
                 updateService = { enabled -> updateMainForegroundService(context, enabled) },
+                readVpnRunning = { self?.foregroundActive == true },
             )
 
         private fun updateMainForegroundService(context: Context, enabled: Boolean) {
@@ -124,6 +129,7 @@ class TauriVpnService : VpnService() {
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
+    private var foregroundActive = false
     private var ownedRequestId: String? = null
     private var ownedInstanceId: String? = null
 
@@ -131,10 +137,10 @@ class TauriVpnService : VpnService() {
         val request = intent?.getStringExtra(REQUEST_ID)
         val instance = intent?.getStringExtra(INSTANCE_ID)
         if (request == null || instance == null || request != requestId || instance != instanceId
-            || state != "starting" || !isClientEnabled(this)) {
+            || state != "starting") {
             // Reject cancelled/old intents. Do not revoke a newer established
             // owner merely because an old queued intent was delivered late.
-            if (state == "stopped" || state == "stopping" || (request == requestId && !isClientEnabled(this))) {
+            if (state == "stopped" || state == "stopping") {
                 state = "stopping"
                 stopSelf()
             }
@@ -162,6 +168,7 @@ class TauriVpnService : VpnService() {
             state = "stopping"
             closeTunnel()
             stopForeground(STOP_FOREGROUND_REMOVE)
+            foregroundActive = false
             stopSelf()
             return START_NOT_STICKY
         }
@@ -176,6 +183,7 @@ class TauriVpnService : VpnService() {
     override fun onDestroy() {
         closeTunnel()
         stopForeground(STOP_FOREGROUND_REMOVE)
+        foregroundActive = false
         if (self === this) {
             self = null
             establishedFd = null
@@ -205,11 +213,22 @@ class TauriVpnService : VpnService() {
     private fun revokeOnMain() {
         // Called by Android, never manually by the plugin. Keep self until
         // onDestroy so getVpnStatus cannot acknowledge an incomplete stop.
-        if (self === this) state = "stopping"
+        val revokedCurrent = self === this
+        if (revokedCurrent) {
+            state = "stopping"
+            stopReason = "system_revoked"
+        }
         closeTunnel()
         stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
-        super.onRevoke()
+        foregroundActive = false
+        try {
+            // Publish before onDestroy so an in-flight route update cannot
+            // recreate a VPN whose permission Android has just revoked.
+            if (revokedCurrent) triggerCallback("vpn_service_stop", statusSnapshot())
+        } finally {
+            stopSelf()
+            super.onRevoke()
+        }
     }
 
     private fun closeTunnel() {
@@ -266,6 +285,7 @@ class TauriVpnService : VpnService() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
+        foregroundActive = true
         // A TUN-backed network is now protected by this foreground service, so the
         // no-TUN keepalive service is redundant and would show a second notification.
         clientForegroundPolicy(this).onVpnChanged(true)

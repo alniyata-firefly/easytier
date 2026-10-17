@@ -23,7 +23,20 @@ pub static malloc_conf: &[u8] = b"dirty_decay_ms:1000,muzzy_decay_ms:1000,retain
 
 rust_i18n::i18n!("locales", fallback = "en");
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> std::process::ExitCode {
-    core::main().await
+fn main() -> std::process::ExitCode {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Failed to create EasyTier runtime: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let exit = runtime.block_on(core::main());
+    // Core has already completed its bounded graceful shutdown. Runtime::drop
+    // would otherwise wait indefinitely for unrelated blocking host work.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    exit
 }

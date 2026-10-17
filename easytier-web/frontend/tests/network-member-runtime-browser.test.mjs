@@ -29,7 +29,8 @@ test('member runtime queries stay separate from connection, instance and deploym
             if(scenario==='offline'||scenario==='offline-errors'){member.online=false;member.deployment.state='waiting_offline';}
             if(scenario==='errors'||scenario==='offline-errors'){member.error_msg='Fixture instance startup failed';member.deployment.state='failed';member.deployment.last_error='Fixture publication failed';}
             if(scenario==='recovered'||scenario==='legacy'){member.running=true;member.runtime_virtual_ipv4='10.80.0.2/24';if(scenario==='legacy')delete member.runtime_query_error;else member.runtime_query_error=null;}
-            return <main data-scenario={scenario}><NetworkMembers api={mockApi} network={networkDummy} members={[member]} temporaryPeers={[]} loading={false} onChanged={()=>{}} onObserve={()=>{}}/></main>;
+            if(scenario==='query-failed')member.running=true;
+            return <main data-scenario={scenario}><NetworkMembers api={mockApi} network={networkDummy} members={[member]} temporaryPeers={[]} loading={false} managementUnknown={scenario==='query-failed'} onChanged={()=>{}} onObserve={()=>{}}/></main>;
         }
         i18nReady.then(async()=>{await i18n.changeLanguage(new URLSearchParams(location.search).get('lang')||'zh-CN');createRoot(document.getElementById('root')).render(<React.Suspense fallback="Loading"><NoticeProvider><Fixture/></NoticeProvider></React.Suspense>);});`;
     const outfile = join(directory, 'fixture.js');
@@ -53,6 +54,7 @@ test('member runtime queries stay separate from connection, instance and deploym
     const proof = { scope: 'Real React NetworkMembers and Chromium with mocked API/member fixtures; no native Core, production or physical Android test', cases: [] };
     for (const language of ['zh-CN', 'en']) {
         const labels = JSON.parse(await readFile(join(frontend, `public/locales/${language}/networks.json`))).members;
+        const managementLabels = JSON.parse(await readFile(join(frontend, `public/locales/${language}/common.json`))).managementStatus;
         const page = await browser.newPage();
         page.setDefaultTimeout(7000);
         const errors = [], failedRequests = [];
@@ -81,7 +83,7 @@ test('member runtime queries stay separate from connection, instance and deploym
 
         await scenario('offline');
         assert.equal(await queryNotice.count(), 0);
-        assert.ok((await row.textContent()).includes(labels.deviceOffline));
+        assert.ok((await row.textContent()).includes(managementLabels.offline));
         assert.equal(await row.locator('.status.waiting_offline').count(), 1);
         proof.cases.push({ language, scenario: 'offline with stale timeout', result: 'offline shown and stale query notice absent' });
 
@@ -98,6 +100,14 @@ test('member runtime queries stay separate from connection, instance and deploym
         assert.equal(await row.locator('.error-text').count(), 2);
         assert.equal(await row.locator('.status.failed').count(), 1);
         proof.cases.push({ language, scenario: 'offline real failures', result: 'real errors retained; stale query notice absent' });
+
+        await scenario('query-failed');
+        assert.ok((await row.textContent()).includes(managementLabels.unknown));
+        assert.ok((await row.textContent()).includes(labels.runningUnknown));
+        assert.equal(await row.locator('.status.unknown').count(), 1);
+        assert.equal(await row.locator('.status.applied').count(), 0);
+        assert.ok((await row.textContent()).includes('fixture-'));
+        proof.cases.push({ language, scenario: 'failed member refresh with retained data', result: 'management, runtime and deployment state unknown; revision history retained' });
 
         await scenario('recovered');
         assert.equal(await queryNotice.count(), 0);

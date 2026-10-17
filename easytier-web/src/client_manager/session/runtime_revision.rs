@@ -193,8 +193,10 @@ enum RoundStatus<T> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ConfigActionResult {
     Success,
+    DeferredByClient,
     Failed,
     UnsupportedIpv6Preference,
+    UnsupportedUplinkPolicy,
     UnsupportedExtendedConfig,
     StopRound,
 }
@@ -266,7 +268,9 @@ struct ReconcileOutcome {
     has_failed: bool,
     managed_revision_failed: bool,
     unsupported_ipv6_preference: bool,
+    unsupported_uplink_policy: bool,
     unsupported_extended_config: bool,
+    deferred_by_client: bool,
 }
 
 #[derive(Default)]
@@ -284,7 +288,9 @@ impl ReconcileOutcome {
         self.has_failed |= other.has_failed;
         self.managed_revision_failed |= other.managed_revision_failed;
         self.unsupported_ipv6_preference |= other.unsupported_ipv6_preference;
+        self.unsupported_uplink_policy |= other.unsupported_uplink_policy;
         self.unsupported_extended_config |= other.unsupported_extended_config;
+        self.deferred_by_client |= other.deferred_by_client;
     }
 }
 
@@ -309,6 +315,29 @@ struct ReconcileRound {
 struct ReconcileRoundContext<'a> {
     session_data: &'a std::sync::Weak<RwLock<SessionData>>,
     round: &'a ReconcileRound,
+}
+
+fn client_runtime_paused(req: &HeartbeatRequest) -> bool {
+    req.runtime_control
+        .as_ref()
+        .is_some_and(|control| control.paused)
+}
+
+async fn client_runtime_is_paused(
+    session_data: &std::sync::Weak<RwLock<SessionData>>,
+    round: &ReconcileRound,
+) -> bool {
+    if client_runtime_paused(&round.req) {
+        return true;
+    }
+    let Some(session) = session_data.upgrade() else {
+        return false;
+    };
+    let data = session.read().await;
+    // A paused heartbeat can arrive while an older round is doing RPC/DB IO.
+    // Do not dispatch another mutation from that stale runtime snapshot.
+    SessionRpcService::runtime_heartbeat_is_current_locked(&data, &round.req)
+        && data.req.as_ref().is_some_and(client_runtime_paused)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -947,6 +976,11 @@ async fn reconcile_desired_runtime_configs(
         if is_running && !should_reconcile_running_web_config {
             continue;
         }
+        if client_runtime_is_paused(session_data, round).await {
+            cache.runtime_configs.forget(&config.network_instance_id);
+            outcome.deferred_by_client = true;
+            continue;
+        }
 
         let desired_config = match serde_json::from_str::<NetworkConfig>(&config.network_config) {
             Ok(cfg) => cfg,
@@ -1008,10 +1042,14 @@ async fn reconcile_desired_runtime_configs(
                         "Failed to cache runtime config after run: {:?}",
                         e
                     );
-                    if e.is::<runtime_reconcile::UnsupportedExtendedConfig>() {
+                    if client_runtime_is_paused(session_data, round).await {
+                        ConfigActionResult::DeferredByClient
+                    } else if e.is::<runtime_reconcile::UnsupportedExtendedConfig>() {
                         ConfigActionResult::UnsupportedExtendedConfig
                     } else if e.is::<runtime_reconcile::UnsupportedIpv6Preference>() {
                         ConfigActionResult::UnsupportedIpv6Preference
+                    } else if e.is::<runtime_reconcile::UnsupportedUplinkPolicy>() {
+                        ConfigActionResult::UnsupportedUplinkPolicy
                     } else {
                         ConfigActionResult::Failed
                     }
@@ -1025,6 +1063,10 @@ async fn reconcile_desired_runtime_configs(
 
         match action_result {
             ConfigActionResult::Success => {}
+            ConfigActionResult::DeferredByClient => {
+                cache.runtime_configs.forget(&config.network_instance_id);
+                outcome.deferred_by_client = true;
+            }
             ConfigActionResult::Failed => {
                 if source == PersistedConfigSource::Web {
                     cache.runtime_configs.forget(&config.network_instance_id);
@@ -1034,6 +1076,11 @@ async fn reconcile_desired_runtime_configs(
             ConfigActionResult::UnsupportedIpv6Preference => {
                 cache.runtime_configs.forget(&config.network_instance_id);
                 outcome.unsupported_ipv6_preference = true;
+                outcome.record_failure(true);
+            }
+            ConfigActionResult::UnsupportedUplinkPolicy => {
+                cache.runtime_configs.forget(&config.network_instance_id);
+                outcome.unsupported_uplink_policy = true;
                 outcome.record_failure(true);
             }
             ConfigActionResult::UnsupportedExtendedConfig => {
@@ -1073,6 +1120,9 @@ async fn reconcile_running_web_config(
         );
         return ConfigActionResult::StopRound;
     }
+    if client_runtime_is_paused(session_data, round).await {
+        return ConfigActionResult::DeferredByClient;
+    }
 
     let operation_started_at = std::time::Instant::now();
     let ret = async {
@@ -1093,6 +1143,9 @@ async fn reconcile_running_web_config(
         if !SessionRpcService::runtime_heartbeat_is_current(session_data, &round.req).await {
             anyhow::bail!("webhook session is no longer current before runtime reconcile apply");
         }
+        if client_runtime_is_paused(session_data, round).await {
+            return Ok::<bool, anyhow::Error>(false);
+        }
         if !matches!(
             action,
             runtime_reconcile::RuntimeReconcileAction::Unchanged(_)
@@ -1109,7 +1162,7 @@ async fn reconcile_running_web_config(
         )
         .await?;
         runtime_config_cache.remember(&config.network_instance_id, observed_config);
-        Ok::<(), anyhow::Error>(())
+        Ok::<bool, anyhow::Error>(true)
     }
     .await;
     tracing::info!(
@@ -1121,8 +1174,18 @@ async fn reconcile_running_web_config(
         ret
     );
 
-    if ret.is_ok() {
+    if matches!(ret, Ok(true)) {
         ConfigActionResult::Success
+    } else if matches!(ret, Ok(false))
+        || ret.as_ref().is_err_and(|error| {
+            error
+                .downcast_ref::<easytier::proto::rpc_types::error::Error>()
+                .is_some_and(runtime_reconcile::is_client_runtime_paused_error)
+        })
+        || client_runtime_is_paused(session_data, round).await
+    {
+        runtime_config_cache.forget(&config.network_instance_id);
+        ConfigActionResult::DeferredByClient
     } else {
         runtime_config_cache.forget(&config.network_instance_id);
         if ret
@@ -1130,9 +1193,13 @@ async fn reconcile_running_web_config(
             .is_err_and(|error| error.is::<runtime_reconcile::UnsupportedExtendedConfig>())
         {
             ConfigActionResult::UnsupportedExtendedConfig
-        } else if ret.is_err_and(|error| error.is::<runtime_reconcile::UnsupportedIpv6Preference>())
+        } else if ret
+            .as_ref()
+            .is_err_and(|error| error.is::<runtime_reconcile::UnsupportedIpv6Preference>())
         {
             ConfigActionResult::UnsupportedIpv6Preference
+        } else if ret.is_err_and(|error| error.is::<runtime_reconcile::UnsupportedUplinkPolicy>()) {
+            ConfigActionResult::UnsupportedUplinkPolicy
         } else {
             ConfigActionResult::Failed
         }
@@ -1155,6 +1222,9 @@ async fn run_missing_network_config(
         );
         return ConfigActionResult::StopRound;
     }
+    if client_runtime_is_paused(session_data, round).await {
+        return ConfigActionResult::DeferredByClient;
+    }
 
     let source = PersistedConfigSource::from_db(&config.source);
     if runtime_reconcile::ensure_extended_config_supported(
@@ -1165,6 +1235,18 @@ async fn run_missing_network_config(
     .is_err()
     {
         return ConfigActionResult::UnsupportedExtendedConfig;
+    }
+    let uplink_capability =
+        runtime_reconcile::ensure_manual_uplink_supported_before_run(rpc_client, &desired_config)
+            .await;
+    if !SessionRpcService::runtime_heartbeat_is_current(session_data, &round.req).await {
+        return ConfigActionResult::StopRound;
+    }
+    if client_runtime_is_paused(session_data, round).await {
+        return ConfigActionResult::DeferredByClient;
+    }
+    if uplink_capability.is_err() {
+        return ConfigActionResult::UnsupportedUplinkPolicy;
     }
     if source == PersistedConfigSource::Web
         && !begin_managed_runtime_mutation(session_data, round, mutation_fence).await
@@ -1200,6 +1282,12 @@ async fn run_missing_network_config(
 
     let action_result = if ret.is_ok() {
         ConfigActionResult::Success
+    } else if ret
+        .as_ref()
+        .is_err_and(runtime_reconcile::is_client_runtime_paused_error)
+        || client_runtime_is_paused(session_data, round).await
+    {
+        ConfigActionResult::DeferredByClient
     } else {
         ConfigActionResult::Failed
     };
@@ -1284,6 +1372,8 @@ async fn mark_config_revision_applied_if_current(
                         runtime_reconcile::UnsupportedExtendedConfig.to_string()
                     } else if outcome.unsupported_ipv6_preference {
                         runtime_reconcile::UnsupportedIpv6Preference.to_string()
+                    } else if outcome.unsupported_uplink_policy {
+                        runtime_reconcile::UnsupportedUplinkPolicy.to_string()
                     } else {
                         "One or more managed network operations failed; retry pending".to_owned()
                     }
@@ -1292,6 +1382,7 @@ async fn mark_config_revision_applied_if_current(
         }
     }
     if outcome.managed_revision_failed
+        || outcome.deferred_by_client
         || (!round.should_apply_runtime_revision && !mutation_fence.started)
     {
         return RoundStatus::Ready(());
@@ -1312,6 +1403,14 @@ async fn mark_config_revision_applied_if_current(
     let notify = {
         let mut data = data.write().await;
         if !SessionRpcService::runtime_heartbeat_is_current_locked(&data, &round.req) {
+            return RoundStatus::Ready(());
+        }
+        if !round.local_configs.is_empty()
+            && (client_runtime_paused(&round.req)
+                || data.req.as_ref().is_some_and(client_runtime_paused))
+        {
+            // Pause may have arrived after the final readback completed. Do
+            // not commit a running revision against a now-suspended client.
             return RoundStatus::Ready(());
         }
         record_applied_config_revision(
@@ -1364,6 +1463,109 @@ mod tests {
     use easytier::proto::api::manage::{NetworkingMethod, PortForwardConfig};
 
     use super::*;
+
+    #[tokio::test]
+    async fn local_pause_defers_runtime_revision_without_revoking_management_or_changing_desired() {
+        use easytier::proto::web::RuntimeControl;
+
+        let db = crate::db::Db::memory_db().await;
+        let owner = db.auto_create_user("local-pause-owner").await.unwrap().id;
+        let storage = crate::client_manager::storage::Storage::new(db.clone());
+        let machine_id = uuid::Uuid::new_v4();
+        let req = HeartbeatRequest {
+            user_token: "local-pause-fixture-token".into(),
+            machine_id: Some(machine_id.into()),
+            ..Default::default()
+        };
+        assert!(!client_runtime_paused(&req));
+        let client_url: url::Url = "ring://local-pause-fixture".parse().unwrap();
+        let mut data = SessionData::new(
+            storage.weak_ref(),
+            client_url.clone(),
+            None,
+            std::sync::Arc::new(crate::FeatureFlags::default()),
+            std::sync::Arc::new(crate::webhook::WebhookConfig::new(
+                None, None, None, None, None,
+            )),
+        );
+        let token = crate::client_manager::storage::StorageToken {
+            token: req.user_token.clone(),
+            client_url,
+            machine_id,
+            user_id: owner,
+        };
+        storage.update_session_client(token.clone(), 1, true, 0);
+        data.storage_token = Some(token);
+        data.req = Some(req.clone());
+        data.auth_state = super::super::SessionAuthState::Authorized;
+        {
+            let mut runtime = data.managed_runtime();
+            runtime.applied_config_revision = Some("applied-before-local-pause".into());
+            runtime.applied_config_revision_known = true;
+        }
+        db.set_managed_config_revision((owner, machine_id), "current-controller-desired")
+            .await
+            .unwrap();
+        let session = std::sync::Arc::new(RwLock::new(data));
+        let weak = std::sync::Arc::downgrade(&session);
+        let mut round = ReconcileRound {
+            req,
+            machine_id,
+            user_id: owner,
+            present_inst_ids: HashSet::new(),
+            running_inst_ids: HashSet::new(),
+            local_configs: Vec::new(),
+            delete_instance_ids: HashSet::new(),
+            target_config_revision: Some("current-controller-desired".into()),
+            should_apply_runtime_revision: true,
+            scope: ReconcileScope::Full,
+            runtime_config_epoch: 0,
+            runtime_config_cache_epoch: 0,
+        };
+        assert!(!client_runtime_is_paused(&weak, &round).await);
+        // The next heartbeat must fence a round dispatched before the pause.
+        session.write().await.req.as_mut().unwrap().runtime_control =
+            Some(RuntimeControl { paused: true });
+        assert!(client_runtime_is_paused(&weak, &round).await);
+        let mut outcome = ReconcileOutcome::default();
+        outcome.merge(ReconcileOutcome {
+            deferred_by_client: true,
+            ..Default::default()
+        });
+        assert!(!outcome.has_failed);
+        assert!(matches!(
+            mark_config_revision_applied_if_current(
+                &weak,
+                &storage,
+                &round,
+                &outcome,
+                &RuntimeMutationFence::default(),
+            )
+            .await,
+            RoundStatus::Ready(())
+        ));
+        let data = session.read().await;
+        assert!(data.auth_state.is_authorized());
+        assert!(data.storage_token.is_some());
+        assert_eq!(
+            data.managed_runtime().applied_config_revision.as_deref(),
+            Some("applied-before-local-pause")
+        );
+        assert!(data.managed_runtime().last_reconciliation_error.is_none());
+        drop(data);
+        assert_eq!(
+            db.get_managed_config_revision((owner, machine_id))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("current-controller-desired")
+        );
+        // Conversely, an older paused round waits for a fresh active heartbeat.
+        round.req.runtime_control = Some(RuntimeControl { paused: true });
+        session.write().await.req.as_mut().unwrap().runtime_control =
+            Some(RuntimeControl { paused: false });
+        assert!(client_runtime_is_paused(&weak, &round).await);
+    }
 
     #[tokio::test]
     async fn credential_mutation_fences_old_runtime_rounds_before_session_stop() {

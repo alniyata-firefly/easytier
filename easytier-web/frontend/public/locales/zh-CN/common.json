@@ -7,6 +7,11 @@
   "add": "添加",
   "refresh": "刷新",
   "retry": "重试",
+  "managementStatus": {
+    "online": "管理在线",
+    "offline": "管理离线",
+    "unknown": "管理状态未知"
+  },
   "copy": "复制",
   "close": "关闭",
   "closeDialog": "关闭弹窗",

@@ -62,6 +62,12 @@ pub trait InstanceFactory: Send + Sync + 'static {
     > {
         Box::pin(async { Ok(crate::host_inventory::NetworkInterfaceInventory::default()) })
     }
+
+    /// Whether this Host understands manual uplink configuration, including
+    /// Hosts which intentionally retain but do not apply it (for example Android).
+    fn supports_manual_uplink_config(&self) -> bool {
+        false
+    }
 }
 
 /// Error returned while constructing or registering an instance.
@@ -263,6 +269,12 @@ pub struct InstanceManager<F: InstanceFactory> {
     factory: F,
     instances: Mutex<HashMap<Uuid, Arc<F::Instance>>>,
     config_controls: DashMap<Uuid, ConfigFileControl>,
+    #[cfg(feature = "web-client")]
+    retained_config_controls: DashMap<Uuid, ConfigFileControl>,
+    #[cfg(feature = "web-client")]
+    explicitly_stopped_instances: DashMap<Uuid, ()>,
+    #[cfg(feature = "web-client")]
+    pending_config_saves: DashMap<Uuid, ()>,
     notifier: Arc<tokio::sync::Notify>,
     config_dir: Option<PathBuf>,
     daemon_guard: Arc<()>,
@@ -273,6 +285,10 @@ pub struct InstanceManager<F: InstanceFactory> {
 }
 
 impl<F: InstanceFactory> InstanceManager<F> {
+    pub fn supports_manual_uplink_config(&self) -> bool {
+        self.factory.supports_manual_uplink_config()
+    }
+
     pub async fn network_interfaces(
         &self,
         namespace: Option<String>,
@@ -285,6 +301,12 @@ impl<F: InstanceFactory> InstanceManager<F> {
             factory,
             instances: Mutex::new(HashMap::new()),
             config_controls: DashMap::new(),
+            #[cfg(feature = "web-client")]
+            retained_config_controls: DashMap::new(),
+            #[cfg(feature = "web-client")]
+            explicitly_stopped_instances: DashMap::new(),
+            #[cfg(feature = "web-client")]
+            pending_config_saves: DashMap::new(),
             notifier: Arc::new(tokio::sync::Notify::new()),
             config_dir: None,
             daemon_guard: Arc::new(()),
@@ -355,6 +377,74 @@ impl<F: InstanceFactory> InstanceManager<F> {
         self.mutation_lock.clone()
     }
 
+    /// Call while holding mutation_lock, after durable save or full apply.
+    #[cfg(feature = "web-client")]
+    pub(crate) fn set_config_save_pending(&self, instance_id: Uuid, pending: bool) {
+        if pending {
+            self.pending_config_saves.insert(instance_id, ());
+        } else {
+            self.pending_config_saves.remove(&instance_id);
+        }
+    }
+
+    #[cfg(feature = "web-client")]
+    pub(crate) fn has_pending_config_save(&self, instance_id: Uuid) -> bool {
+        self.pending_config_saves.contains_key(&instance_id)
+    }
+
+    #[cfg(feature = "web-client")]
+    pub(crate) fn retained_config_control(&self, instance_id: Uuid) -> Option<ConfigFileControl> {
+        self.retained_config_controls
+            .get(&instance_id)
+            .map(|value| value.clone())
+    }
+
+    #[cfg(feature = "web-client")]
+    pub(crate) fn retain_config_control(&self, instance_id: Uuid, control: ConfigFileControl) {
+        if control.path.is_some() {
+            self.retained_config_controls.insert(instance_id, control);
+        }
+    }
+
+    #[cfg(feature = "web-client")]
+    pub(crate) fn forget_config_control(&self, instance_id: Uuid) {
+        self.retained_config_controls.remove(&instance_id);
+        self.pending_config_saves.remove(&instance_id);
+    }
+
+    #[cfg(feature = "web-client")]
+    pub(crate) fn retain_stopped_instance(&self, instance_id: Uuid) {
+        self.explicitly_stopped_instances.insert(instance_id, ());
+    }
+
+    #[cfg(feature = "web-client")]
+    pub(crate) fn is_explicitly_stopped(&self, instance_id: Uuid) -> bool {
+        self.explicitly_stopped_instances.contains_key(&instance_id)
+    }
+
+    #[cfg(feature = "web-client")]
+    pub(crate) fn release_stopped_instance(&self, instance_id: Uuid) {
+        if self
+            .explicitly_stopped_instances
+            .remove(&instance_id)
+            .is_some()
+        {
+            self.notifier.notify_one();
+        }
+    }
+
+    #[cfg(feature = "web-client")]
+    pub(crate) fn configured_instance_ids(&self) -> Vec<Uuid> {
+        self.config_controls
+            .iter()
+            .chain(self.retained_config_controls.iter())
+            .filter(|control| control.path.is_some())
+            .map(|control| *control.key())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     pub fn config_dir(&self) -> Option<&PathBuf> {
         self.config_dir.as_ref()
     }
@@ -402,6 +492,8 @@ where
         let instance = self.create(config, ()).map_err(anyhow::Error::new)?;
         let instance_id = instance.instance_id();
         self.config_controls.insert(instance_id, control);
+        #[cfg(feature = "web-client")]
+        self.release_stopped_instance(instance_id);
         let notifier = self.notifier.clone();
         let instance_state_changes = self.instance_state_changes.clone();
         runtime.spawn(async move {
@@ -512,7 +604,14 @@ where
                 .any(|instance| instance.state() != crate::instance::CoreInstanceState::Stopped);
             let daemon_running = Arc::strong_count(&self.daemon_guard) > 1;
             let instance_stopping = self.active_stops.load(Ordering::Acquire) != 0;
-            if !instance_running && !instance_stopping && !daemon_running {
+            // A user-requested remote stop retains its management endpoint,
+            // including a non-daemon CLI. Natural exit/failure never sets it.
+            #[cfg(feature = "web-client")]
+            let explicit_stop_retained = !self.explicitly_stopped_instances.is_empty();
+            #[cfg(not(feature = "web-client"))]
+            let explicit_stop_retained = false;
+            if !instance_running && !instance_stopping && !daemon_running && !explicit_stop_retained
+            {
                 return;
             }
             self.notifier.notified().await;
@@ -721,6 +820,7 @@ mod tests {
         let inventory = manager.network_interfaces(None).await.unwrap();
         assert!(!inventory.supported);
         assert!(inventory.interfaces.is_empty());
+        assert!(!manager.supports_manual_uplink_config());
     }
 
     #[test]

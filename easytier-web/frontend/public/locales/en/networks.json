@@ -58,7 +58,7 @@
     "emptyTitle": "No networks yet",
     "emptyDetail": "Create a network, then add registered devices.",
     "noMatches": "No matching networks",
-    "online": "{{online}} / {{total}} online",
+    "online": "{{online}} / {{total}} members online",
     "manage": "Manage",
     "gatewayUnavailable": "Could not load gateway status. You can use specified peers or a standalone network.",
     "created": "Network created. Add devices to it."

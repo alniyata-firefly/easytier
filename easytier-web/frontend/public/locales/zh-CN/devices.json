@@ -54,12 +54,12 @@
     "nameHint": "留空使用设备上报的主机名。",
     "blockAgain": "同时阻止此设备再次接入",
     "summary": "已登记 {{registered}} 台，在线 {{online}} 台",
-    "runningCount": "{{countFormatted}} 个运行实例",
+    "runningCount": "{{countFormatted}} 个实例",
     "editNameAria": "修改 {{name}} 名称",
     "deleteAria": "删除 {{name}}",
     "deleteHint": "删除 {{name}} 将停止它的中央网络实例，并清除登记记录和管理令牌。",
-    "runningCount_one": "{{countFormatted}} 个运行实例",
-    "runningCount_other": "{{countFormatted}} 个运行实例",
+    "runningCount_one": "{{countFormatted}} 个实例",
+    "runningCount_other": "{{countFormatted}} 个实例",
     "title": "设备"
   },
   "instance": {
@@ -74,6 +74,8 @@
     "chooseOther": "请选择列表中的其他实例。",
     "detail": "实例详情",
     "notRunning": "实例尚未运行",
+    "runtimeUnknown": "实例运行状态未知",
+    "runtimeFailed": "实例运行失败",
     "deviceOffline": "设备已离线",
     "runtimeHint": "实例运行并且设备在线时，可查看连接、路由和运行指标。",
     "offlineHint": "设备已离线，当前仅显示登记及保存的信息。运行状态和指标在重新连接后刷新。",
@@ -302,5 +304,38 @@
     "rejected": "身份变更已拒绝。",
     "conflict": "此请求已失效或目标设备存在冲突，请刷新并重新核对设备。",
     "noLongerPending": "此请求已不在待审批列表中，请关闭弹窗后刷新。"
+  },
+  "connectionLogs": {
+    "title": "连接日志",
+    "device": "设备",
+    "allDevices": "全部设备",
+    "latest": "最新记录",
+    "loading": "正在读取连接日志",
+    "time": "时间",
+    "event": "事件",
+    "reason": "原因",
+    "source": "接入 IP",
+    "instance": "实例",
+    "empty": "暂无连接日志",
+    "newer": "较新记录",
+    "older": "较早记录",
+    "events": {
+      "authorized": "管理认证通过",
+      "disconnected": "管理连接断开",
+      "authentication_rejected": "管理认证拒绝",
+      "pending_approval": "等待设备审批",
+      "configuration_apply_failed": "配置应用失败",
+      "unknown": "其他事件"
+    },
+    "reasons": {
+      "authorization_granted": "认证通过",
+      "connection_closed": "连接关闭",
+      "authorization_lost": "管理授权失效",
+      "device_identity_mismatch": "设备身份不匹配",
+      "device_rebind_required": "设备变更待审批",
+      "node_reported_failure": "节点报告运行失败",
+      "configuration_rpc_failed": "配置应用请求失败",
+      "unknown": "其他原因"
+    }
   }
 }

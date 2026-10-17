@@ -14,8 +14,13 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
   const context = await browser.newContext({ viewport: { width: scenario.width, height: scenario.height } }), page = await context.newPage();
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(installMockTauri, { platform: scenario.platform });
+  if (scenario.platform === 'android') await page.addInitScript(() => localStorage.setItem('app_mode', JSON.stringify({
+    mode: 'normal', config_server_url: `udp://example.invalid:22020/${'A'.repeat(43)}`,
+  })));
   try {
-    await page.goto(base); await page.getByRole('heading', { name: 'Local lab', exact: true }).waitFor();
+    await page.goto(base);
+    if (scenario.platform === 'android') await page.getByRole('button', { name: '连接', exact: true }).click();
+    await page.getByRole('heading', { name: 'Local lab', exact: true }).waitFor();
     const chart = page.getByRole('img', { name: '实时流量', exact: true }); await chart.waitFor();
     await page.waitForFunction(() => Array.from(document.querySelectorAll('.traffic-chart path[data-direction]')).every(path => path.getAttribute('d')?.includes('L')));
     assert.equal(await chart.locator('path[data-direction]').count(), 2);
@@ -27,58 +32,74 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
     await page.getByRole('button', { name: 'Managed lab', exact: false }).click();
     assert.equal(await page.getByRole('button', { name: '编辑网络', exact: true }).isEnabled(), false);
     assert.equal(await page.getByRole('button', { name: '删除', exact: true }).isEnabled(), false);
+    assert.equal(await page.getByRole('button', { name: '启动', exact: true }).count(), 0, 'the controller owns managed network starts');
+    assert.equal(await page.getByRole('button', { name: '停止', exact: true }).count(), 0, 'the controller owns managed network stops');
     if (scenario.platform === 'android') {
       await page.waitForFunction(() => window.__MOCK_TUN_BINDING__?.requestId);
       const originalBinding = await page.evaluate(() => window.__MOCK_TUN_BINDING__);
       const callsBeforeStop = await page.evaluate(() => window.__MOCK_CALLS__.length);
-      await page.getByRole('button', { name: '停止客户端', exact: true }).click();
-      await page.getByRole('button', { name: '启动客户端', exact: true }).waitFor();
+      await page.getByRole('button', { name: '断开', exact: true }).click();
+      await page.getByRole('button', { name: '连接', exact: true }).waitFor();
       await page.waitForFunction(() => window.__MOCK_NATIVE_VPN__?.state === 'stopped'
         && !document.querySelector('.page-heading button[aria-busy="true"]'));
-      assert.equal(await page.locator('.traffic-chart').count(), 0);
+      assert.equal(await page.locator('.traffic-chart').count(), 0, 'global Disconnect removes all Core runtime state');
       assert.equal(await page.getByRole('alert').count(), 0);
       assert.equal(await page.evaluate(() => window.__MOCK_TUN_BINDING__), undefined);
+      assert.deepEqual(await page.evaluate(async () => (await window.__TAURI_INTERNALS__.invoke('list_network_instance_ids')).running_inst_ids), []);
+      assert.equal(await page.evaluate(() => window.__MOCK_RPC_READY__ && window.__MOCK_MANAGEMENT_CONNECTED__), true);
       const stopCalls = await page.evaluate(offset => window.__MOCK_CALLS__.slice(offset), callsBeforeStop);
       assert.ok(stopCalls.some(call => call.command === 'stop_local_client'));
-      assert.ok(stopCalls.some(call => call.command === 'plugin:vpnservice|set_client_enabled' && call.args.enabled === false));
+      assert.ok(!stopCalls.some(call => call.command === 'plugin:vpnservice|set_client_enabled' && call.args.enabled === false));
       assert.ok(stopCalls.some(call => call.command === 'clear_tun_fd' && call.args.instanceId === originalBinding.instanceId && call.args.requestId === originalBinding.requestId));
       assert.ok(!stopCalls.some(call => ['update_network_config_state', 'remove_network_instance', 'save_network_config', 'run_network_instance', 'init_web_client'].includes(call.command)));
-      const beforeOfflineSave = await page.evaluate(() => window.__MOCK_CALLS__.length);
+      const beforeDisconnectedSave = await page.evaluate(() => window.__MOCK_CALLS__.length);
+      await page.getByRole('button', { name: 'Local lab', exact: false }).click();
+      assert.equal(await page.getByRole('button', { name: '启动', exact: true }).isEnabled(), false, 'paused global runtime cannot be bypassed with a per-network button');
+      assert.equal(await page.locator('.client-topbar .status').textContent(), 'VPN 未连接');
       await page.getByRole('button', { name: '新建网络', exact: true }).click();
-      const offlineEditor = page.getByRole('dialog', { name: '编辑网络', exact: true });
-      await offlineEditor.getByRole('textbox', { name: '网络名称', exact: true }).fill('Saved while stopped');
-      assert.equal(await offlineEditor.getByRole('button', { name: '保存并启动', exact: true }).isDisabled(), true);
-      await offlineEditor.getByRole('button', { name: '保存', exact: true }).click();
-      await offlineEditor.waitFor({ state: 'hidden' });
-      await page.getByRole('button', { name: /Saved while stopped/ }).waitFor();
-      const offlineId = await page.evaluate(() => JSON.parse(localStorage.getItem('networkList')).find(row => row.config.network_name === 'Saved while stopped').config.instance_id);
-      assert.equal(await page.evaluate(id => JSON.parse(localStorage.getItem('enabled_networks')).includes(id), offlineId), false);
-      const offlineCommands = await page.evaluate(offset => window.__MOCK_CALLS__.slice(offset).map(call => call.command), beforeOfflineSave);
-      for (const command of ['save_network_config', 'validate_config', 'run_network_instance', 'update_network_config_state', 'resume_local_client', 'init_web_client', 'plugin:vpnservice|prepare_vpn'])
-        assert.equal(offlineCommands.includes(command), false, command);
-      await page.getByRole('button', { name: 'Managed lab', exact: false }).click();
-      await page.getByRole('button', { name: '启动客户端', exact: true }).click();
-      await page.getByRole('button', { name: '停止客户端', exact: true }).waitFor();
-      await page.getByRole('heading', { name: 'Managed lab', exact: true }).waitFor();
+      const disconnectedEditor = page.getByRole('dialog', { name: '编辑网络', exact: true });
+      await disconnectedEditor.getByRole('textbox', { name: '网络名称', exact: true }).fill('Saved without VPN');
+      await disconnectedEditor.getByRole('tab', { name: '节点参数', exact: true }).click();
+      await disconnectedEditor.getByRole('checkbox', { name: labels.fields.no_tun, exact: true }).check();
+      assert.equal(await disconnectedEditor.getByRole('button', { name: '保存并启动', exact: true }).isEnabled(), false);
+      await disconnectedEditor.getByRole('button', { name: '保存', exact: true }).click();
+      await disconnectedEditor.waitFor({ state: 'hidden' });
+      await page.getByRole('button', { name: /Saved without VPN/ }).waitFor();
+      const savedId = await page.evaluate(() => JSON.parse(localStorage.getItem('networkList')).find(row => row.config.network_name === 'Saved without VPN').config.instance_id);
+      await page.getByRole('button', { name: '启动', exact: true }).waitFor();
+      assert.equal(await page.getByRole('button', { name: '启动', exact: true }).isEnabled(), false);
+      assert.equal(await page.evaluate(id => JSON.parse(localStorage.getItem('enabled_networks')).includes(id), savedId), false);
+      const savedCommands = await page.evaluate(offset => window.__MOCK_CALLS__.slice(offset).map(call => call.command), beforeDisconnectedSave);
+      for (const command of ['save_network_config', 'validate_config']) assert.ok(savedCommands.includes(command), command);
+      for (const command of ['run_network_instance', 'update_network_config_state', 'resume_local_client', 'init_web_client', 'plugin:vpnservice|prepare_vpn', 'plugin:vpnservice|start_vpn'])
+        assert.equal(savedCommands.includes(command), false, command);
+      await page.getByRole('button', { name: 'Local lab', exact: false }).click();
+      const beforeConnect = await page.evaluate(() => window.__MOCK_CALLS__.length);
+      await page.getByRole('button', { name: '连接', exact: true }).click();
+      await page.getByRole('button', { name: '断开', exact: true }).waitFor();
+      await page.getByRole('heading', { name: 'Local lab', exact: true }).waitFor();
       await page.waitForFunction(() => window.__MOCK_TUN_BINDING__?.requestId
         && !document.querySelector('.page-heading button[aria-busy="true"]'));
       assert.equal(await page.evaluate(() => window.__MOCK_TUN_BINDING__.instanceId), originalBinding.instanceId);
       assert.equal(await page.getByRole('alert').count(), 0);
-      const restored = await page.evaluate(() => window.__MOCK_CALLS__.findLast(call => call.command === 'load_configs').args);
-      assert.ok(restored.configs.some(row => row.config.instance_id === offlineId));
-      assert.equal(restored.enabledNetworks.includes(offlineId), false);
-      assert.equal(restored.enabledNetworks.includes('22222222-2222-4222-8222-222222222222'), false);
-      await page.getByRole('button', { name: /Saved while stopped/ }).click();
+      const resumedCommands = await page.evaluate(offset => window.__MOCK_CALLS__.slice(offset).map(call => call.command), beforeConnect);
+      for (const command of ['init_rpc_connection', 'load_configs', 'init_web_client']) assert.equal(resumedCommands.includes(command), false, command);
+      await page.getByRole('button', { name: /Saved without VPN/ }).click();
       await page.getByRole('button', { name: '启动', exact: true }).waitFor();
+      assert.equal(await page.getByRole('button', { name: '启动', exact: true }).isEnabled(), true);
+      await page.getByRole('button', { name: '启动', exact: true }).click();
+      await page.getByRole('button', { name: '停止', exact: true }).click();
+      await page.getByRole('button', { name: '启动', exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => window.__MOCK_TUN_BINDING__.instanceId), originalBinding.instanceId, 'a no-TUN Core cannot steal the selected VPN');
       await page.getByRole('button', { name: 'Managed lab', exact: false }).click();
       let requestId = await page.evaluate(() => window.__MOCK_NATIVE_VPN__.requestId);
       for (let cycle = 0; cycle < 2; cycle++) {
-        await page.getByRole('button', { name: '停止客户端', exact: true }).click();
+        await page.getByRole('button', { name: '断开', exact: true }).click();
         await page.waitForFunction(() => window.__MOCK_NATIVE_VPN__?.state === 'stopped'
           && !document.querySelector('.page-heading button[aria-busy="true"]'));
         assert.equal(await page.evaluate(() => window.__MOCK_TUN_BINDING__), undefined);
         assert.equal(await page.getByRole('alert').count(), 0);
-        await page.getByRole('button', { name: '启动客户端', exact: true }).click();
+        await page.getByRole('button', { name: '连接', exact: true }).click();
         await page.waitForFunction(() => window.__MOCK_TUN_BINDING__?.requestId
           && !document.querySelector('.page-heading button[aria-busy="true"]'));
         const next = await page.evaluate(() => ({ native: window.__MOCK_NATIVE_VPN__, binding: window.__MOCK_TUN_BINDING__ }));
@@ -91,22 +112,30 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
       }
       assert.ok(await page.evaluate(() => window.__MOCK_CALLS__.some(call => call.command === 'resume_local_client')));
     } else {
+      await page.getByRole('button', { name: 'Local lab', exact: false }).click();
       await page.getByRole('button', { name: '停止', exact: true }).click();
       await page.getByRole('button', { name: '启动', exact: true }).waitFor();
       assert.equal(await page.locator('.traffic-chart').count(), 0);
       await page.getByRole('button', { name: '启动', exact: true }).click();
       await page.getByRole('button', { name: '停止', exact: true }).waitFor();
-      const sourceCalls = await page.evaluate(() => window.__MOCK_CALLS__.filter(call => call.args.instanceId === '22222222-2222-4222-8222-222222222222'));
+      const sourceCalls = await page.evaluate(() => window.__MOCK_CALLS__.filter(call => call.args.instanceId === '11111111-1111-4111-8111-111111111111'));
       assert.ok(sourceCalls.some(call => call.command === 'update_network_config_state' && call.args.disabled));
       assert.ok(sourceCalls.some(call => call.command === 'update_network_config_state' && !call.args.disabled));
       assert.ok(!sourceCalls.some(call => ['run_network_instance', 'save_network_config', 'remove_network_instance'].includes(call.command)));
     }
+    assert.equal(await page.evaluate(() => window.__MOCK_CALLS__.some(call => ['update_network_config_state', 'run_network_instance'].includes(call.command)
+      && (call.args.instanceId || call.args.cfg?.instance_id) === '22222222-2222-4222-8222-222222222222')), false, 'GUI must not replay cached managed lifecycle configuration');
     await page.getByRole('button', { name: 'Local lab', exact: false }).click();
     await page.getByRole('button', { name: '编辑网络', exact: true }).click();
     const editor = page.getByRole('dialog', { name: '编辑网络' }); await editor.waitFor();
     await editor.getByRole('tab', { name: '节点参数' }).click();
     const flags = ['latency_first','use_smoltcp','disable_ipv6','prefer_ipv6','ipv6_public_addr_auto','enable_kcp_proxy','disable_kcp_input','enable_quic_proxy','disable_quic_input','disable_p2p','p2p_only','lazy_p2p','bind_device','no_tun','enable_exit_node','relay_all_peer_rpc','need_p2p','multi_thread','proxy_forward_by_system','disable_encryption','disable_tcp_hole_punching','disable_udp_hole_punching','enable_udp_broadcast_relay','disable_upnp','disable_sym_hole_punching','enable_magic_dns','enable_private_mode'];
     for (const flag of flags) assert.equal(await editor.getByRole('checkbox', { name: labels.fields[flag], exact: true }).count(), scenario.platform === 'android' && flag === 'bind_device' ? 0 : 1, flag);
+    if (scenario.platform === 'android') {
+      assert.equal(await editor.getByRole('combobox', { name: labels.fields.uplink_mode, exact: true }).count(), 0);
+      assert.equal(await editor.getByRole('combobox', { name: labels.fields.uplink_interfaces, exact: true }).count(), 0);
+      assert.equal(await editor.getByText(labels.uplink.manual, { exact: true }).count(), 0);
+    }
     await editor.getByRole('checkbox', { name: labels.fields.prefer_ipv6, exact: true }).check();
     const mtu = editor.getByRole('textbox', { name: labels.fields.mtu, exact: true }); await mtu.fill('1280'); await mtu.focus();
     assert.equal(await mtu.evaluate(el => getComputedStyle(el).fontWeight), '400');
@@ -118,6 +147,9 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
     assert.equal(saved.prefer_ipv6, true); assert.equal(saved.mtu, 1280); assert.equal(saved.instance_recv_bps_limit, '9007199254740993');
     const validation = await page.evaluate(() => window.__MOCK_CALLS__.findLast(call => call.command === 'validate_config').args);
     assert.ok(validation.config); assert.equal(validation.cfg, undefined);
+    if (scenario.platform === 'android') {
+      for (const config of [saved, validation.config]) { assert.equal(config.bind_device, false); assert.equal(Object.hasOwn(config, 'uplink'), false); }
+    }
     await page.getByRole('button', { name: '导出配置', exact: true }).click();
     const exported = page.getByRole('dialog', { name: '导出配置' }); await exported.waitFor();
     await exported.getByRole('button', { name: '复制', exact: true }).click();
@@ -129,6 +161,30 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
     await portal.getByRole('button', { name: '复制', exact: true }).click();
     assert.match(await page.evaluate(() => window.__MOCK_CLIPBOARD__), /Endpoint = 192\.0\.2\.10:22022/);
     await portal.getByRole('button', { name: '关闭弹窗' }).click();
+    if (scenario.platform === 'android') {
+      await page.evaluate(() => { window.__MOCK_IMPORTED_CONFIG__ = { ...window.__MOCK_CONFIGS__['11111111-1111-4111-8111-111111111111'],
+        network_name: 'Imported desktop config', bind_device: true, uplink: { mode: 'manual', interfaces: ['legacy-eth0'] } }; });
+      await page.getByRole('button', { name: '导入配置', exact: true }).click();
+      const importer = page.getByRole('dialog', { name: '导入 TOML 配置', exact: true });
+      await importer.getByRole('textbox', { name: 'TOML', exact: true }).fill('network_name = "Imported desktop config"');
+      await importer.getByRole('button', { name: '确定', exact: true }).click();
+      const importedEditor = page.getByRole('dialog', { name: '编辑网络', exact: true });
+      await importedEditor.getByRole('tab', { name: '节点参数', exact: true }).click();
+      assert.equal(await importedEditor.getByRole('combobox', { name: labels.fields.uplink_mode, exact: true }).count(), 0);
+      assert.equal(await importedEditor.getByRole('checkbox', { name: labels.fields.bind_device, exact: true }).count(), 0);
+      await importedEditor.getByRole('button', { name: '保存', exact: true }).click();
+      await importedEditor.waitFor({ state: 'hidden' });
+      const imported = await page.evaluate(() => ({
+        input: window.__MOCK_IMPORTED_CONFIG__,
+        saved: window.__MOCK_CALLS__.findLast(call => call.command === 'save_network_config').args.cfg,
+        validated: window.__MOCK_CALLS__.findLast(call => call.command === 'validate_config').args.config,
+      }));
+      assert.equal(imported.input.bind_device, true, 'native parse fixture must retain desktop-only fields before actual GUI normalization');
+      assert.deepEqual(imported.input.uplink, { mode: 'manual', interfaces: ['legacy-eth0'] });
+      for (const config of [imported.saved, imported.validated]) {
+        assert.equal(config.network_name, 'Imported desktop config'); assert.equal(config.bind_device, false); assert.equal(Object.hasOwn(config, 'uplink'), false);
+      }
+    }
     await page.getByRole('button', { name: '设置', exact: true }).click();
     await page.getByRole('button', { name: '连接管理服务器', exact: true }).click();
     const management = page.getByRole('dialog', { name: '管理服务器', exact: true });
@@ -136,7 +192,7 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
     await management.getByLabel('管理令牌', { exact: true }).fill('discard-this-draft');
     await management.getByRole('button', { name: '取消', exact: true }).click();
     await page.getByRole('button', { name: '连接管理服务器', exact: true }).click();
-    assert.equal(await management.getByLabel('管理令牌', { exact: true }).inputValue(), '');
+    assert.equal(await management.getByLabel('管理令牌', { exact: true }).inputValue(), scenario.platform === 'android' ? 'A'.repeat(43) : '');
     await management.getByRole('textbox', { name: '服务器地址' }).fill('udp://192.0.2.1:22020');
     await management.getByLabel('管理令牌', { exact: true }).fill('mock-token-for-tests');
     await management.getByRole('button', { name: '保存', exact: true }).click(); await management.waitFor({ state: 'hidden' });
@@ -151,6 +207,7 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
       await modes.getByRole('button', { name: '保存', exact: true }).click(); await modes.waitFor({ state: 'hidden' });
       const installed = await page.evaluate(() => window.__MOCK_CALLS__.findLast(call => call.command === 'init_service' && call.args.opts).args.opts);
       assert.equal(installed.config_server, 'udp://192.0.2.1:22020/mock-token-for-tests');
+      assert.deepEqual(await page.evaluate(() => window.__MOCK_CALLS__.findLast(call => call.command === 'load_configs').args), { configs: [], enabledNetworks: [] }, 'service mode cannot import local GUI configurations');
       await page.getByText('管理服务器认证状态未知', { exact: true }).first().waitFor();
       await page.getByRole('button', { name: '网络', exact: true }).click();
       await page.evaluate(() => { window.__MOCK_HOLD_META__ = true; });
@@ -163,6 +220,7 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
       await modes.getByRole('button', { name: '保存', exact: true }).click(); await modes.waitFor({ state: 'hidden' });
       await page.getByRole('button', { name: '网络', exact: true }).click();
       await page.getByRole('heading', { name: 'Remote core only', exact: true }).waitFor();
+      assert.deepEqual(await page.evaluate(() => window.__MOCK_CALLS__.findLast(call => call.command === 'load_configs').args), { configs: [], enabledNetworks: [] }, 'remote mode cannot import local GUI configurations');
       await page.evaluate(() => window.__MOCK_RELEASE_META__());
       await page.waitForTimeout(300);
       assert.equal(await page.getByRole('heading', { name: 'Local lab', exact: true }).count(), 0);
@@ -187,5 +245,80 @@ for (const scenario of [{ name: 'desktop', width: 1280, height: 800, platform: '
     await page.getByRole('heading', { name: 'Networks', exact: true }).waitFor();
     assert.equal(await page.evaluate(() => document.documentElement.lang), 'en');
     assert.deepEqual(errors, []);
+  } finally { await context.close(); await browser.close(); }
+});
+
+for (const scenario of [
+  { name: 'Windows local', platform: 'windows', mode: { mode: 'normal' }, heading: 'Local lab' },
+  { name: 'Windows service', platform: 'windows', mode: { mode: 'service', config_dir: '/mock/config', rpc_portal: '127.0.0.1:15999', file_log_level: 'info', file_log_dir: '/mock/logs' }, heading: 'Service core only' },
+  { name: 'Windows remote', platform: 'windows', mode: { mode: 'remote', remote_rpc_address: 'tcp://192.0.2.44:15999' }, heading: 'Remote core only' },
+  { name: 'macOS local', platform: 'macos', mode: { mode: 'normal' }, heading: 'Local lab' },
+]) test(`${scenario.name} connection status requires actual peer tunnels`, { timeout: 45000 }, async testContext => {
+  const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || undefined, headless: true, args: ['--no-sandbox'] });
+  const context = await browser.newContext(), page = await context.newPage();
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  page.setDefaultTimeout(10000);
+  await page.addInitScript(installMockTauri, { platform: scenario.platform });
+  await page.addInitScript(mode => {
+    window.__MOCK_NO_PEERS__ = true;
+    localStorage.setItem('app_mode', JSON.stringify({ ...mode,
+      ...(mode.mode === 'normal' ? { config_server_url: `udp://example.invalid:22020/${'A'.repeat(43)}` } : {}),
+    }));
+  }, scenario.mode);
+  const stateSamples = [];
+  const expectStateColor = async (locator, state, colorToken) => {
+    const sample = await locator.evaluate((element, { state, colorToken }) => {
+      const probe = document.createElement('span');
+      probe.style.color = `var(${colorToken})`; document.body.append(probe);
+      const expectedColor = getComputedStyle(probe).color; probe.remove();
+      return { text: element.textContent, state, hasState: element.classList.contains(state),
+        color: getComputedStyle(element).color,
+        dotColor: getComputedStyle(element.querySelector('.status-dot')).backgroundColor, expectedColor };
+    }, { state, colorToken });
+    assert.equal(sample.hasState, true);
+    assert.equal(sample.color, sample.expectedColor);
+    assert.equal(sample.dotColor, sample.color);
+    stateSamples.push(sample);
+    return sample.color;
+  };
+  try {
+    await page.goto(base);
+    await page.getByRole('heading', { name: scenario.heading, exact: true }).waitFor();
+    await page.waitForFunction(() => window.__MOCK_CALLS__.some(call => call.command === 'collect_network_info' && !call.args.instanceId));
+    const header = page.locator('.client-topbar .status');
+    await header.getByText('运行中', { exact: true }).waitFor();
+    const runningColor = await expectStateColor(header, 'running', '--accent-text');
+    assert.ok((await page.evaluate(async () => (await window.__TAURI_INTERNALS__.invoke('list_network_instance_ids')).running_inst_ids)).length > 0,
+      'Core must be genuinely running in this fixture, rather than disconnected at the RPC level');
+    if (scenario.mode.mode === 'normal') {
+      await page.getByRole('button', { name: '设置', exact: true }).click();
+      const management = page.locator('.client-settings-grid .status');
+      await management.getByText('管理服务器认证通过', { exact: true }).waitFor();
+      await expectStateColor(management, 'online', '--success');
+      assert.equal(await header.textContent(), '运行中', 'management authentication cannot imply a peer tunnel');
+      assert.equal(await expectStateColor(header, 'running', '--accent-text'), runningColor);
+      await page.evaluate(() => { window.__MOCK_MANAGEMENT_STATUS__ = 'authenticating'; });
+      await management.getByText('正在验证设备身份', { exact: true }).waitFor();
+      await expectStateColor(management, 'authenticating', '--warning');
+      assert.equal(await header.textContent(), '运行中');
+      await page.evaluate(() => { window.__MOCK_MANAGEMENT_STATUS__ = 'rejected'; });
+      await management.getByText('设备认证失败', { exact: true }).waitFor();
+      await expectStateColor(management, 'failed', '--danger');
+      assert.equal(await header.textContent(), '运行中');
+      await page.evaluate(() => { window.__MOCK_MANAGEMENT_STATUS__ = 'authorized'; });
+      await management.getByText('管理服务器认证通过', { exact: true }).waitFor();
+    }
+    await page.evaluate(() => { window.__MOCK_NO_PEERS__ = false; });
+    await header.getByText('VPN 已连接', { exact: true }).waitFor();
+    const connectedColor = await expectStateColor(header, 'online', '--success');
+    await page.evaluate(() => { window.__MOCK_FAIL_RUNTIME_INFO__ = true; });
+    await header.getByText('VPN 状态未知', { exact: true }).waitFor();
+    const unknownColor = await expectStateColor(header, 'unknown', '--muted');
+    assert.equal(new Set([runningColor, connectedColor, unknownColor]).size, 3);
+    await page.evaluate(() => { window.__MOCK_FAIL_RUNTIME_INFO__ = false; window.__MOCK_NO_PEERS__ = true; });
+    await header.getByText('运行中', { exact: true }).waitFor();
+    assert.equal(await expectStateColor(header, 'running', '--accent-text'), runningColor);
+    assert.deepEqual(errors, []);
+    testContext.diagnostic(JSON.stringify({ platformMode: scenario.name, stateSamples }));
   } finally { await context.close(); await browser.close(); }
 });

@@ -54,12 +54,12 @@
     "nameHint": "Leave blank to use the hostname reported by the device.",
     "blockAgain": "Also block this device from reconnecting",
     "summary": "{{registered}} registered · {{online}} online",
-    "runningCount": "{{countFormatted}} running instances",
+    "runningCount": "{{countFormatted}} instances",
     "editNameAria": "Rename {{name}}",
     "deleteAria": "Delete {{name}}",
     "deleteHint": "Deleting {{name}} stops its central network instances and removes its registration and management tokens.",
-    "runningCount_one": "{{countFormatted}} running instance",
-    "runningCount_other": "{{countFormatted}} running instances",
+    "runningCount_one": "{{countFormatted}} instances",
+    "runningCount_other": "{{countFormatted}} instances",
     "title": "Devices"
   },
   "instance": {
@@ -74,6 +74,8 @@
     "chooseOther": "Select another instance from the list.",
     "detail": "Instance details",
     "notRunning": "Instance is not running",
+    "runtimeUnknown": "Instance runtime status unknown",
+    "runtimeFailed": "Instance runtime failed",
     "deviceOffline": "Device is offline",
     "runtimeHint": "Connections, routes and runtime metrics are available when the instance is running and the device is online.",
     "offlineHint": "The device is offline. Registration and saved information remain visible; runtime status and metrics update after reconnection.",
@@ -302,5 +304,38 @@
     "rejected": "Identity change rejected.",
     "conflict": "This request is no longer valid or the target device has conflicting data. Refresh and review the device again.",
     "noLongerPending": "This request is no longer pending. Close this dialog and refresh."
+  },
+  "connectionLogs": {
+    "title": "Connection logs",
+    "device": "Device",
+    "allDevices": "All devices",
+    "latest": "Latest",
+    "loading": "Loading connection logs",
+    "time": "Time",
+    "event": "Event",
+    "reason": "Reason",
+    "source": "Source IP",
+    "instance": "Instance",
+    "empty": "No connection logs",
+    "newer": "Newer",
+    "older": "Older",
+    "events": {
+      "authorized": "Management authorized",
+      "disconnected": "Management disconnected",
+      "authentication_rejected": "Authentication rejected",
+      "pending_approval": "Device approval pending",
+      "configuration_apply_failed": "Configuration apply failed",
+      "unknown": "Other event"
+    },
+    "reasons": {
+      "authorization_granted": "Authorized",
+      "connection_closed": "Connection closed",
+      "authorization_lost": "Management authorization lost",
+      "device_identity_mismatch": "Device identity mismatch",
+      "device_rebind_required": "Device change requires approval",
+      "node_reported_failure": "Node reported a runtime failure",
+      "configuration_rpc_failed": "Configuration request failed",
+      "unknown": "Other reason"
+    }
   }
 }

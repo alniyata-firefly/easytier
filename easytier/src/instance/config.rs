@@ -37,6 +37,9 @@ pub(crate) fn runtime_core_host_config() -> CoreInstanceHostConfig {
             target_os = "windows",
             all(target_os = "macos", not(feature = "macos-ne"))
         )),
+        // Old controller templates can retain a desktop-only policy. Android
+        // keeps it for reconciliation while using its native Network/VPN APIs.
+        ignore_unsupported_uplink_policy: cfg!(target_os = "android"),
         smoltcp_available: cfg!(feature = "smoltcp"),
         requires_smoltcp: cfg!(any(
             target_os = "android",
@@ -153,6 +156,10 @@ mod tests {
         );
         assert_eq!(config.gateway_enabled, cfg!(feature = "socks5"));
         assert_eq!(config.smoltcp_available, cfg!(feature = "smoltcp"));
+        assert_eq!(
+            config.ignore_unsupported_uplink_policy,
+            cfg!(target_os = "android")
+        );
         assert_eq!(
             config.public_ipv6_provider_supported,
             cfg!(all(target_os = "linux", feature = "public-ipv6-provider"))

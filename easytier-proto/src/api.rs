@@ -426,6 +426,7 @@ mod tests {
                 WebClientServiceMethodDescriptor::ListNetworkInstance => {
                     let _req = ListNetworkInstanceRequest::decode(input.as_ref()).unwrap();
                     let resp = ListNetworkInstanceResponse {
+                        configured_inst_ids: Vec::new(),
                         inst_ids: vec![Uuid {
                             part1: 1,
                             part2: 2,
@@ -537,6 +538,8 @@ mod tests {
             "get_network_instance_config",
             "list_network_instance_meta",
             "get_network_interfaces",
+            "save_network_instance_config",
+            "stop_network_instance",
         ];
         assert_eq!(methods.len(), names.len());
         for (index, (method, name)) in methods.iter().zip(names).enumerate() {
@@ -548,6 +551,7 @@ mod tests {
     #[test]
     fn interface_inventory_json_preserves_unknown_state_and_prefixes() {
         let inventory = super::manage::GetNetworkInterfacesResponse {
+            supports_manual_uplink_config: Some(true),
             supported: true,
             sampled_at_unix_ms: 1_800_000_000_123,
             namespace: Some("branch".into()),

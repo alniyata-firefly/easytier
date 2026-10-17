@@ -48,6 +48,11 @@ export namespace ConfigFilePermission {
 export interface NetworkMeta {
     network_name: string;
     config_permission: ConfigFilePermission.Flags;
+    source?: number | string;
+}
+
+export function isManagedNetwork(meta: Pick<NetworkMeta, 'source'> | undefined): boolean {
+    return meta?.source === 2 || meta?.source === 'ConfigSourceWeb';
 }
 
 export interface GetNetworkMetasResponse {

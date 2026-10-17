@@ -6,7 +6,7 @@ import { installMockTauri } from './mock-tauri.mjs';
 const base = process.env.ET_GUI_QA_URL || 'http://127.0.0.1:19420';
 for (const scenario of [
   { mode: { mode: 'normal' }, heading: 'Local lab' },
-  { mode: { mode: 'service', config_dir: '/mock/config', rpc_portal: '127.0.0.1:15999', file_log_level: 'info', file_log_dir: '/mock/logs' }, heading: 'Local lab' },
+  { mode: { mode: 'service', config_dir: '/mock/config', rpc_portal: '127.0.0.1:15999', file_log_level: 'info', file_log_dir: '/mock/logs' }, heading: 'Service core only' },
   { mode: { mode: 'remote', remote_rpc_address: 'tcp://192.0.2.44:15999' }, heading: 'Remote core only' },
 ]) test(`metadata permissions through ${scenario.mode.mode} GUI RPC entry`, async () => {
   const browser = await chromium.launch({ executablePath: process.env.ET_CHROMIUM_PATH || undefined, headless: true, args: ['--no-sandbox'] });
@@ -19,11 +19,11 @@ for (const scenario of [
     const invoke = window.__TAURI_INTERNALS__.invoke;
     window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
       const response = await invoke(command, args);
-      if (command === 'collect_network_info') return { info: { map: { [args.instanceId]: {
+      if (command === 'collect_network_info') return { info: { map: Object.fromEntries(Object.keys(response.info.map).map(id => [id, {
         running: true, my_node_info: { stun_info: { udp_nat_type: 'FullCone', tcp_nat_type: 'Symmetric' } },
         routes: [{ peer_id: 6, hostname: 'Schema peer', next_hop_peer_id: 6 }],
         peer_route_pairs: [{}, { route: { peer_id: 6, hostname: 'Schema peer' }, peer: { peer_id: 6, conns: [{ conn_id: 'zero-loss' }] } }],
-      } } } };
+      }])) } };
       if (command !== 'get_network_metas') return response;
       if (window.__MOCK_METADATA_CASE__ === 'missing-message') return { metas: {} };
       for (const meta of Object.values(response.metas)) {

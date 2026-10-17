@@ -13,10 +13,12 @@ ARGS = "Lcom/plugin/vpnservice/SetClientEnabledArgs;"
 COMPANION = "Lcom/plugin/vpnservice/TauriVpnService$Companion;"
 
 
-def method(name, signature, *, calls=(), types=(), strings=(), literals=(), conditional=False, annotation=None):
+def method(name, signature, *, calls=(), types=(), strings=(), literals=(), conditional=False,
+           reads=(), writes=(), annotation=None):
     return {"name": name, "signature": signature, "access": 1, "code_present": True,
             "annotations": {annotation: 1} if annotation else {}, "calls": list(calls), "types": list(types),
-            "strings": list(strings), "literal_constants": list(literals), "has_conditional": conditional}
+            "strings": list(strings), "literal_constants": list(literals), "has_conditional": conditional,
+            "field_reads": list(reads), "field_writes": list(writes)}
 
 
 def fixture():
@@ -43,12 +45,19 @@ def fixture():
     stopper = next(item for item in definitions[PLUGIN]["methods"] if item["name"] == "stopVpn")
     stopper["calls"] = [(COMPANION, "requestStop", "(Landroid/content/Context;)V")]
     definitions[COMPANION]["methods"] = [method("requestStop", "(Landroid/content/Context;)V", calls=[
-        stop, ("Landroid/os/ParcelFileDescriptor;", "close", "()V")])]
-    for owner in [SERVICE, MAIN]:
-        definitions[owner]["methods"] = [method("onStartCommand", "(Landroid/content/Intent;II)I", calls=[
-            ("Landroid/content/SharedPreferences;", "getBoolean", "(Ljava/lang/String;Z)Z"),
-            ("Landroid/app/Service;", "stopSelf", "()V"), ("Landroid/app/Service;", "stopForeground", "(I)V")],
-            strings=["easytier_client_lifecycle", "enabled"], literals=[1, 2], conditional=True)]
+        stop, ("Landroid/os/ParcelFileDescriptor;", "close", "()V")],
+        strings=["stopped", "stopping"], conditional=True,
+        writes=[(SERVICE, "state", "Ljava/lang/String;"), (SERVICE, "establishedFd", "Ljava/lang/Integer;")])]
+    definitions[MAIN]["methods"] = [method("onStartCommand", "(Landroid/content/Intent;II)I", calls=[
+        ("Landroid/content/SharedPreferences;", "getBoolean", "(Ljava/lang/String;Z)Z"),
+        ("Landroid/app/Service;", "stopSelf", "()V"), ("Landroid/app/Service;", "stopForeground", "(I)V")],
+        strings=["easytier_client_lifecycle", "enabled"], literals=[1, 2], conditional=True)]
+    definitions[SERVICE]["methods"] = [method("onStartCommand", "(Landroid/content/Intent;II)I", calls=[
+        ("Landroid/content/Intent;", "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;"),
+        ("Landroid/app/Service;", "stopSelf", "()V")],
+        strings=["REQUEST_ID", "INSTANCE_ID", "starting", "stopped", "stopping"],
+        reads=[(SERVICE, name, "Ljava/lang/String;") for name in ["requestId", "instanceId", "state"]],
+        literals=[1, 2], conditional=True)]
     definitions[SERVICE]["methods"].append(method("onDestroy", "()V", calls=[
         ("Landroid/os/ParcelFileDescriptor;", "close", "()V"), ("Landroid/app/Service;", "stopForeground", "(I)V")]))
     definitions[SERVICE]["methods"].append(method("onRevoke", "()V", calls=[
@@ -77,10 +86,106 @@ class DexLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "truncated"):
             instruction_evidence([0x006e, 0], [], [], [], [])
 
+    def test_instruction_parser_distinguishes_real_field_reads_and_writes(self):
+        fields = [(SERVICE, "requestId", "Ljava/lang/String;"),
+                  (SERVICE, "state", "Ljava/lang/String;")]
+        # iget-object, iput-object, sget-object, sput-object. Field-like words
+        # inside an array payload must not contribute ownership evidence.
+        units = [0x0054, 0, 0x005b, 1, 0x0062, 1, 0x0069, 0,
+                 0x0300, 2, 2, 0, 0x0054, 0x0069, 0x000e]
+        result = instruction_evidence(units, [], [], [], fields)
+        self.assertEqual(set(result["field_reads"]), set(fields))
+        self.assertEqual(set(result["field_writes"]), set(fields))
+
+    def test_vpn_request_guard_passes_without_management_preference_read(self):
+        definitions = fixture()
+        vpn = definitions[SERVICE]["methods"][0]
+        self.assertFalse(any(call[1] == "getBoolean" for call in vpn["calls"]))
+        self.assertNotIn("easytier_client_lifecycle", vpn["strings"])
+        proof = verify_lifecycle(definitions, MAPPING)
+        self.assertTrue(proof["main_foreground_management_guard_preserved"])
+        self.assertTrue(proof["vpn_request_identity_guard_preserved"])
+        self.assertTrue(proof["vpn_stop_invalidates_pending_start"])
+        self.assertNotIn("both_service_pause_guards_preserved", proof)
+
+    def test_management_preference_guard_is_still_required(self):
+        definitions = fixture()
+        definitions[MAIN]["methods"][0]["calls"] = [call for call in definitions[MAIN]["methods"][0]["calls"]
+                                                     if call[1] != "getBoolean"]
+        with self.assertRaisesRegex(ValueError, "saved management enabled guard"):
+            verify_lifecycle(definitions, MAPPING)
+
+    def test_vpn_request_and_instance_and_state_reads_are_all_required(self):
+        for removed in ["requestId", "instanceId", "state"]:
+            with self.subTest(removed=removed):
+                definitions = fixture()
+                vpn = definitions[SERVICE]["methods"][0]
+                vpn["field_reads"] = [field for field in vpn["field_reads"] if field[1] != removed]
+                with self.assertRaisesRegex(ValueError, "VPN request identity/state guard: " + removed):
+                    verify_lifecycle(definitions, MAPPING)
+
+    def test_vpn_intent_identity_api_is_required(self):
+        definitions = fixture()
+        definitions[SERVICE]["methods"][0]["calls"] = [call for call in definitions[SERVICE]["methods"][0]["calls"]
+                                                        if call[1] != "getStringExtra"]
+        with self.assertRaisesRegex(ValueError, "VPN intent identity guard"):
+            verify_lifecycle(definitions, MAPPING)
+
+    def test_vpn_old_intent_keys_and_state_checks_are_required(self):
+        for removed in ["REQUEST_ID", "INSTANCE_ID", "starting", "stopped", "stopping"]:
+            with self.subTest(removed=removed):
+                definitions = fixture()
+                vpn = definitions[SERVICE]["methods"][0]
+                vpn["strings"] = [value for value in vpn["strings"] if value != removed]
+                with self.assertRaisesRegex(ValueError, "VPN intent guard"):
+                    verify_lifecycle(definitions, MAPPING)
+
+    def test_vpn_guard_still_requires_a_conditional_branch(self):
+        definitions = fixture()
+        definitions[SERVICE]["methods"][0]["has_conditional"] = False
+        with self.assertRaisesRegex(ValueError, "VPN intent guard"):
+            verify_lifecycle(definitions, MAPPING)
+
+    def test_cancelled_start_must_invalidate_state_and_fd(self):
+        for removed in ["state", "establishedFd"]:
+            with self.subTest(removed=removed):
+                definitions = fixture()
+                stopper = definitions[COMPANION]["methods"][0]
+                stopper["field_writes"] = [field for field in stopper["field_writes"] if field[1] != removed]
+                with self.assertRaisesRegex(ValueError, "pending VPN start cancellation: " + removed):
+                    verify_lifecycle(definitions, MAPPING)
+
+    def test_cancelled_start_cannot_only_close_current_fd(self):
+        definitions = fixture()
+        definitions[COMPANION]["methods"][0]["strings"] = ["stopped"]
+        with self.assertRaisesRegex(ValueError, "conditional pending VPN start cancellation"):
+            verify_lifecycle(definitions, MAPPING)
+
+    def test_lifecycle_owner_fields_can_be_renamed_by_actual_mapping(self):
+        definitions = fixture()
+        names = {"requestId": "a", "instanceId": "b", "state": "c", "establishedFd": "d"}
+        for definition in definitions.values():
+            for entry in definition["methods"]:
+                for key in ["field_reads", "field_writes"]:
+                    entry[key] = [(owner, names.get(name, name), field_type) for owner, name, field_type in entry[key]]
+        mapping = MAPPING + "com.plugin.vpnservice.TauriVpnService -> com.plugin.vpnservice.TauriVpnService:\n"
+        mapping += "".join("    java.lang.String " + name + " -> " + actual + "\n" for name, actual in names.items())
+        self.assertTrue(verify_lifecycle(definitions, mapping)["vpn_request_identity_guard_preserved"])
+        with self.assertRaisesRegex(ValueError, "pending VPN start cancellation"):
+            verify_lifecycle(definitions, MAPPING)
+
+    def test_same_field_names_in_unrelated_owner_do_not_satisfy_request_guard(self):
+        definitions = fixture()
+        vpn = definitions[SERVICE]["methods"][0]
+        vpn["field_reads"] = [("Lunrelated/State;", name, field_type) for _, name, field_type in vpn["field_reads"]]
+        with self.assertRaisesRegex(ValueError, "VPN request identity/state guard"):
+            verify_lifecycle(definitions, MAPPING)
+
     def test_new_stop_bridge_and_renamed_closure_pass(self):
         definitions = fixture()
         result = verify_lifecycle(definitions, MAPPING)
-        self.assertTrue(result["both_service_pause_guards_preserved"])
+        self.assertTrue(result["main_foreground_management_guard_preserved"])
+        self.assertTrue(result["vpn_request_identity_guard_preserved"])
         # The class mapping is necessary; do not guess obfuscated helper names.
         with self.assertRaisesRegex(ValueError, "persisted pause"):
             verify_lifecycle(definitions)
@@ -88,7 +193,7 @@ class DexLifecycleTests(unittest.TestCase):
     def test_reachable_merged_runnable_without_app_mapping_passes(self):
         definitions = fixture()
         definitions['La/b;']['interfaces'] = ['Ljava/lang/Runnable;']
-        self.assertTrue(verify_lifecycle(definitions)['set_client_enabled_persists_pause'])
+        self.assertTrue(verify_lifecycle(definitions)['set_client_enabled_persists_management_intent'])
 
     def test_reachable_function_with_renamed_interface_and_superclass_passes(self):
         definitions = fixture()
@@ -98,7 +203,7 @@ class DexLifecycleTests(unittest.TestCase):
         definitions['La/base;'] = {'methods': [], 'interfaces': ['La/function;'], 'access': 0x401}
         definitions['La/function;'] = {'methods': [], 'access': 0x601}
         mapping = 'kotlin.jvm.functions.Function1 -> a.function:\n'
-        self.assertTrue(verify_lifecycle(definitions, mapping)['set_client_enabled_persists_pause'])
+        self.assertTrue(verify_lifecycle(definitions, mapping)['set_client_enabled_persists_management_intent'])
 
     def test_unreferenced_functional_class_cannot_supply_missing_pause_evidence(self):
         definitions = fixture()
@@ -163,7 +268,7 @@ class DexLifecycleTests(unittest.TestCase):
                                                 strings=callback['strings'])]}
         callback['calls'] = [(holder, 'a', signature)]
         callback['strings'] = []
-        self.assertTrue(verify_lifecycle(definitions, MAPPING)['set_client_enabled_persists_pause'])
+        self.assertTrue(verify_lifecycle(definitions, MAPPING)['set_client_enabled_persists_management_intent'])
 
     def test_directly_invoked_pause_reader_moved_to_library_holder_passes(self):
         definitions = fixture()
@@ -175,7 +280,7 @@ class DexLifecycleTests(unittest.TestCase):
                                                 strings=reader['strings'])]}
         reader['calls'] = [(holder, 'c', signature), *[call for call in reader['calls'] if call != get_boolean]]
         reader['strings'] = []
-        self.assertTrue(verify_lifecycle(definitions, MAPPING)['both_service_pause_guards_preserved'])
+        self.assertTrue(verify_lifecycle(definitions, MAPPING)['main_foreground_management_guard_preserved'])
 
     def test_uninvoked_library_method_cannot_supply_pause_writer(self):
         definitions = fixture()

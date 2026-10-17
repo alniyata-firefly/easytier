@@ -48,6 +48,18 @@ pub trait ReadOnlyInstanceResolver: Clone + Send + Sync + 'static {
         &self,
         identifier: Option<&easytier_proto::api::instance::InstanceIdentifier>,
     ) -> rpc_types::error::Result<Arc<CoreInstance<Self::Host>>>;
+
+    // Acquire before resolving an Instance, then keep through persistence and
+    // runtime commit. Process overwrite/removal uses this same lock first.
+    #[cfg(feature = "web-client")]
+    fn mutation_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        None
+    }
+
+    #[cfg(feature = "web-client")]
+    fn has_pending_config_save(&self, _instance_id: uuid::Uuid) -> bool {
+        false
+    }
 }
 
 /// Resolver used by the public process-level management RPC type.
@@ -82,6 +94,16 @@ where
         identifier: Option<&easytier_proto::api::instance::InstanceIdentifier>,
     ) -> rpc_types::error::Result<Arc<CoreInstance<Self::Host>>> {
         resolve_instance(&self.manager, identifier).map_err(Into::into)
+    }
+
+    #[cfg(feature = "web-client")]
+    fn mutation_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        Some(self.manager.mutation_lock())
+    }
+
+    #[cfg(feature = "web-client")]
+    fn has_pending_config_save(&self, instance_id: uuid::Uuid) -> bool {
+        self.manager.has_pending_config_save(instance_id)
     }
 }
 

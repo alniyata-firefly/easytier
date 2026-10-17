@@ -29,6 +29,8 @@ test('device overview displays actual NodeInfo IPv4 and handles an omitted addre
             if (request.method() === 'GET' && path === 'console-info') data = { username: 'fixture', config_server_protocol: 'udp', config_server_port: 22020, webhook_auth: true };
             else if (request.method() === 'GET' && path === 'machines') data = { machines: [{ client_url: 'udp://192.0.2.1:22020', online: true, info: { machine_id: toUuid(deviceId), hostname: 'Fixture device', running_network_instances: [toUuid(instanceId)], easytier_version: '2.7.0' } }] };
             else if (request.method() === 'GET' && path === `machines/${deviceId}/networks`) data = { running_inst_ids: [toUuid(instanceId)] };
+            else if (request.method() === 'GET' && path === `machines/${deviceId}/networks/info`) data = { info: { map: { [instanceId]: { running: true } } } };
+            else if (request.method() === 'GET' && path === 'management-connection-events') data = { events: [], next_before_id: null };
             else if (request.method() === 'POST' && path === `machines/${deviceId}/networks/metas`) data = { metas: { [instanceId]: { network_name: 'Fixture network' } } };
             else if (request.method() === 'POST' && path === `machines/${deviceId}/proxy-rpc`) {
                 const payload = request.postDataJSON();

@@ -102,12 +102,6 @@ class VpnServicePlugin(private val activity: Activity) : Plugin(activity) {
     fun startVpn(invoke: Invoke) {
         val args = invoke.parseArgs(StartVpnArgs::class.java)
         activity.runOnUiThread {
-            if (!TauriVpnService.isClientEnabled(activity)) {
-                val ret = JSObject()
-                ret.put("errorMsg", "client_paused")
-                invoke.resolve(ret)
-                return@runOnUiThread
-            }
             val it = VpnService.prepare(activity)
             val ret = JSObject()
             if (it != null) {

@@ -65,7 +65,9 @@ every React asset (including the React bundle audit and full font notices),
 reflected VPN/JNI bridge after R8, every native library's LOAD/RELRO
 alignment, and APK ZIP alignment. A 4 KiB or incorrectly signed APK is rejected.
 The R8 gate includes `setClientEnabled`, its reflected boolean argument, saved
-pause preferences, explicit service-stop APIs and both services' pause guards;
+management keepalive preferences and the main foreground service's preference
+guard. VPN start/stop is checked separately through request/instance ownership,
+state guards, descriptor cancellation and explicit service-stop APIs;
 it follows renamed application helpers and closures through the actual mapping.
 Merged callbacks are identified from their actual DEX superclass/interfaces,
 including renamed Kotlin function interfaces. Only callbacks referenced from

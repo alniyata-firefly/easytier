@@ -34,8 +34,23 @@ impl ApiRpcServer<RuntimeRpcListener> {
         rpc_portal_whitelist: Option<Vec<IpCidr>>,
         instance_manager: Arc<NativeInstanceManager>,
     ) -> anyhow::Result<Self> {
+        Self::new_with_hooks(
+            rpc_portal,
+            rpc_portal_whitelist,
+            instance_manager,
+            Arc::new(DefaultHooks),
+        )
+    }
+
+    pub fn new_with_hooks(
+        rpc_portal: Option<String>,
+        rpc_portal_whitelist: Option<Vec<IpCidr>>,
+        instance_manager: Arc<NativeInstanceManager>,
+        hooks: Arc<dyn easytier_core::management::InstanceMutationHooks>,
+    ) -> anyhow::Result<Self> {
         let rpc_addr = parse_rpc_portal(rpc_portal)?;
-        let mut server = Self::from_tunnel(runtime_rpc_listener(rpc_addr), instance_manager);
+        let mut server =
+            Self::from_tunnel_with_hooks(runtime_rpc_listener(rpc_addr), instance_manager, hooks);
         server.rpc_server.set_whitelist(rpc_portal_whitelist);
 
         Ok(server)

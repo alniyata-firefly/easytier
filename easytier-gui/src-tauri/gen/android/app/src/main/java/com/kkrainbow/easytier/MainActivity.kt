@@ -1,7 +1,5 @@
 package com.kkrainbow.easytier
 
-import android.content.Intent
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.OnBackPressedCallback
 
@@ -13,16 +11,5 @@ class MainActivity : TauriActivity() {
                 moveTaskToBack(true)
             }
         })
-        initService()
-    }
-
-    private fun initService() {
-        if (!com.plugin.vpnservice.TauriVpnService.isClientEnabled(this)) return
-        val serviceIntent = Intent(this, MainForegroundService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
-        }
     }
 }

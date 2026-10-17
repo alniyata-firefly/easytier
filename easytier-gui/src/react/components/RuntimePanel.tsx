@@ -30,7 +30,7 @@ export function RuntimePanel({ id, info, running, client, readOnly }: { id: stri
   return <div className="form-stack">
     <Tabs items={['overview', 'connections', 'routes', 'events', 'portal'].map(id => ({ id, label: t(id) }))} value={tab} onChange={setTab}/>
     {tab === 'overview' && <>
-      <div className="client-metrics"><div><span>{t('upload')}</span><strong>{speed(rate.tx)}</strong></div><div><span>{t('download')}</span><strong>{speed(rate.rx)}</strong></div><div><span>{t('connections')}</span><strong>{info.peers.length}</strong></div></div>
+      <div className="client-metrics"><div><span>{t('upload')}</span><strong>{speed(rate.tx)}</strong></div><div><span>{t('download')}</span><strong>{speed(rate.rx)}</strong></div><div><span>{t('connections')}</span><strong>{info.peers.reduce((count, peer) => count + peer.conns.length, 0)}</strong></div></div>
       <TrafficChart points={points}/>
       <dl className="detail-list"><dt>{t('hostname')}</dt><dd>{node?.hostname || '—'}</dd><dt>{t('version')}</dt><dd>{node?.version || '—'}</dd><dt>{t('peerId')}</dt><dd>{node?.peer_id ?? '—'}</dd><dt>{t('virtualIp')}</dt><dd>{runtimeIpv4Label(node?.virtual_ipv4)}</dd><dt>{t('device')}</dt><dd>{info.dev_name || '—'}</dd><dt>{t('publicIp')}</dt><dd>{[Utils.ipv4ToString(node?.ips?.public_ipv4), Utils.ipv6ToString(node?.ips?.public_ipv6)].filter(Boolean).join(', ') || '—'}</dd><dt>{t('nat')}</dt><dd>UDP {node?.stun_info?.udp_nat_type == null ? '—' : NetworkTypes.NatType[node.stun_info.udp_nat_type]} / TCP {node?.stun_info?.tcp_nat_type == null ? '—' : NetworkTypes.NatType[node.stun_info.tcp_nat_type]}</dd><dt>{t('listeners')}</dt><dd>{node?.listeners?.map(item => item.url).join(', ') || '—'}</dd></dl>
     </>}

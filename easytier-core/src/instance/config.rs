@@ -45,6 +45,9 @@ pub struct CoreInstanceHostConfig {
     pub force_exit_node: bool,
     pub allow_interface_bind: bool,
     pub uplink_policy_supported: bool,
+    /// Retain a valid desktop uplink policy in managed configuration without
+    /// activating it on a Host, such as Android, that cannot bind interfaces.
+    pub ignore_unsupported_uplink_policy: bool,
     pub smoltcp_available: bool,
     pub requires_smoltcp: bool,
     pub icmp_failure_is_fatal: bool,
@@ -72,6 +75,7 @@ impl Default for CoreInstanceHostConfig {
             force_exit_node: false,
             allow_interface_bind: true,
             uplink_policy_supported: true,
+            ignore_unsupported_uplink_policy: false,
             smoltcp_available: false,
             requires_smoltcp: false,
             icmp_failure_is_fatal: false,
@@ -176,6 +180,7 @@ impl CoreInstanceConfig {
     ) -> anyhow::Result<Self> {
         config.get_uplink().validate()?;
         if !host.uplink_policy_supported
+            && !host.ignore_unsupported_uplink_policy
             && !host.ignore_unsupported_config
             && config.get_uplink().mode == crate::config::uplink::UplinkMode::Manual
         {
@@ -717,6 +722,124 @@ disable_p2p = true
             ..Default::default()
         };
         assert!(CoreInstanceConfig::from_toml_with_host(&config, &strict).is_err());
+    }
+
+    #[test]
+    fn mobile_uplink_policy_does_not_bind_interfaces_or_change_managed_config() {
+        let config = TomlConfig::new_from_str(
+            "[uplink]\nmode = 'manual'\ninterfaces = ['desktop-eth0']\n[flags]\nbind_device = true\nprefer_ipv6 = true",
+        )
+        .unwrap();
+        let policy = config.get_uplink();
+        let host = CoreInstanceHostConfig {
+            allow_interface_bind: false,
+            uplink_policy_supported: false,
+            ignore_unsupported_uplink_policy: true,
+            ..Default::default()
+        };
+        assert!(!host.ignore_unsupported_config);
+
+        // Initial construction and runtime config patches use this same path.
+        for _ in 0..2 {
+            let normalized = CoreInstanceConfig::from_toml_with_host(&config, &host).unwrap();
+            assert!(
+                normalized
+                    .connectivity
+                    .manual
+                    .tcp_bind
+                    .context
+                    .uplink
+                    .is_none()
+            );
+            assert!(
+                normalized
+                    .connectivity
+                    .manual
+                    .udp_bind
+                    .context
+                    .uplink
+                    .is_none()
+            );
+            assert!(
+                normalized
+                    .connectivity
+                    .direct
+                    .tcp_bind
+                    .context
+                    .uplink
+                    .is_none()
+            );
+            assert!(
+                normalized
+                    .connectivity
+                    .direct
+                    .udp_bind
+                    .context
+                    .uplink
+                    .is_none()
+            );
+            assert!(
+                normalized
+                    .connectivity
+                    .endpoint_discovery
+                    .dns_record_context
+                    .uplink
+                    .is_none()
+            );
+            assert!(!normalized.connectivity.manual.allow_interface_bind);
+            assert!(!normalized.connectivity.direct.allow_interface_bind);
+            assert!(normalized.connectivity.manual.prefer_ipv6);
+            assert!(normalized.connectivity.direct.prefer_ipv6);
+            assert_eq!(config.get_uplink(), policy);
+            assert!(config.get_flags().bind_device);
+        }
+
+        let strict = CoreInstanceHostConfig {
+            ignore_unsupported_uplink_policy: false,
+            ..host.clone()
+        };
+        assert!(CoreInstanceConfig::from_toml_with_host(&config, &strict).is_err());
+        let desktop = CoreInstanceConfig::from_toml(&config).unwrap();
+        assert_eq!(
+            desktop.connectivity.manual.tcp_bind.context.uplink,
+            Some(policy)
+        );
+        assert!(desktop.connectivity.manual.allow_interface_bind);
+
+        let invalid = TomlConfig::default();
+        invalid.set_uplink(crate::config::uplink::UplinkConfig {
+            mode: crate::config::uplink::UplinkMode::Manual,
+            interfaces: Vec::new(),
+        });
+        assert!(CoreInstanceConfig::from_toml_with_host(&invalid, &host).is_err());
+    }
+
+    #[test]
+    fn mobile_uplink_compatibility_keeps_credential_validation() {
+        let config =
+            TomlConfig::new_from_str("[uplink]\nmode = 'manual'\ninterfaces = ['desktop-eth0']")
+                .unwrap();
+        config.set_network_identity(crate::config::toml::NetworkIdentity::new_credential(
+            "credential-network".to_owned(),
+        ));
+        config.set_managed_credentials(vec![crate::config::toml::ManagedCredentialConfig {
+            credential_id: "managed".to_owned(),
+            credential_secret: BASE64_STANDARD.encode([1u8; 32]),
+            groups: Vec::new(),
+            allow_relay: false,
+            allowed_proxy_cidrs: Vec::new(),
+            expiry_unix: 2_000_000_000,
+            reusable: true,
+        }]);
+        let host = CoreInstanceHostConfig {
+            allow_interface_bind: false,
+            uplink_policy_supported: false,
+            ignore_unsupported_uplink_policy: true,
+            ..Default::default()
+        };
+
+        let error = CoreInstanceConfig::from_toml_with_host(&config, &host).unwrap_err();
+        assert!(error.to_string().contains("only admin nodes"));
     }
 
     #[test]

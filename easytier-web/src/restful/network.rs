@@ -410,8 +410,21 @@ impl NetworkApi {
         auth_session: AuthSession,
         State(client_mgr): AppState,
         Path(machine_id): Path<uuid::Uuid>,
-        Json(payload): Json<CollectNetworkInfoJsonReq>,
+        body: axum::body::Bytes,
     ) -> Result<Json<CollectNetworkInfoResponse>, HttpHandleError> {
+        // Browser GET requests cannot carry a JSON body. An empty request
+        // observes all instances; retain the legacy JSON selector for callers
+        // that do supply it, and reject malformed selectors explicitly.
+        let payload = if body.is_empty() {
+            CollectNetworkInfoJsonReq { inst_ids: None }
+        } else {
+            serde_json::from_slice::<CollectNetworkInfoJsonReq>(&body).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(other_error("invalid network info request")),
+                )
+            })?
+        };
         ensure_management_access(&client_mgr, Self::get_user_id(&auth_session)?, machine_id)
             .await?;
         Ok(client_mgr
@@ -618,6 +631,7 @@ impl NetworkApi {
                     failed_network_instances: Vec::new(),
                     support_heartbeat_policy: false,
                     support_auth_state: false,
+                    runtime_control: None,
                 }),
             };
             machines.push(ListMachineItem {
@@ -1263,6 +1277,43 @@ mod tests {
                     .await
                     .unwrap()
                     .0;
+                    // The browser's batch runtime GET has no body. Legacy
+                    // JSON selectors remain accepted, while bad input is 400.
+                    for body in [
+                        axum::body::Bytes::new(),
+                        axum::body::Bytes::from(
+                            serde_json::to_vec(&serde_json::json!({
+                                "inst_ids": [instance_id]
+                            }))
+                            .unwrap(),
+                        ),
+                    ] {
+                        let runtime = NetworkApi::handle_collect_network_info(
+                            auth.clone(),
+                            State(probe_manager.clone()),
+                            Path(machine_id),
+                            body,
+                        )
+                        .await
+                        .unwrap()
+                        .0;
+                        assert!(
+                            runtime
+                                .info
+                                .unwrap()
+                                .map
+                                .contains_key(&instance_id.to_string())
+                        );
+                    }
+                    let invalid = NetworkApi::handle_collect_network_info(
+                        auth.clone(),
+                        State(probe_manager.clone()),
+                        Path(machine_id),
+                        axum::body::Bytes::from_static(b"invalid json"),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert_eq!(invalid.0, StatusCode::BAD_REQUEST);
                     let summary = super::super::RestfulServer::handle_get_summary(
                         auth,
                         State(probe_manager),

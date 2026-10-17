@@ -62,6 +62,21 @@ impl WebhookHandler for DeviceAuth {
                 .db
                 .has_pending_device_rebind(&request.token, machine_id)
                 .await?;
+            if !matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    self.db.record_management_auth_rejection(
+                        &request.token,
+                        machine_id,
+                        response.pending_rebind,
+                        request.public_ip.as_deref(),
+                    )
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
+                tracing::warn!("management authentication event could not be persisted");
+            }
             return Ok(response);
         };
         let device = (identity.user_id, machine_id);
