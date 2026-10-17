@@ -18,6 +18,7 @@ PLAN = (
     ("easytier-core", ("--lib",), (
         "instance::config::tests::",
         "management::full::process_rpc::tests::",
+        "management::full::remote_client::tests::",
         "instance::tests::portable_runtime::cancelled_delete_finishes_stop_and_keeps_wait_blocked",
     )),
     ("easytier", ("--lib",), (

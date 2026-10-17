@@ -24,14 +24,43 @@ use tokio::sync::Notify;
 
 use super::*;
 use crate::{
-    config::toml::ConfigLoader as _,
+    gateway::dhcp::{DhcpIpv4ApplyOutcome, DhcpIpv4Host},
     host::testkit::{TestDns, TestHost},
-    instance::{CoreHostAdapters, CoreInstanceState},
+    instance::{CoreHostAdapters, CoreInstanceState, CorePacketPlane, InstanceRuntimeHost},
     management::InstanceManagementRpc,
     process_runtime::CoreProcessRuntime,
 };
 
 struct TestFactory(Arc<CoreProcessRuntime>);
+
+struct TestRuntime;
+
+#[async_trait::async_trait]
+impl DhcpIpv4Host for TestRuntime {
+    fn take_interface_closed(&self) -> bool {
+        false
+    }
+
+    async fn apply_dhcp_ipv4(
+        &self,
+        _previous: Option<cidr::Ipv4Inet>,
+        next: Option<cidr::Ipv4Inet>,
+    ) -> DhcpIpv4ApplyOutcome {
+        DhcpIpv4ApplyOutcome::applied(next)
+    }
+}
+
+#[async_trait::async_trait]
+impl InstanceRuntimeHost for TestRuntime {
+    async fn prepare(
+        &self,
+        _packet_plane: Arc<CorePacketPlane>,
+    ) -> anyhow::Result<Option<Arc<dyn DhcpIpv4Host>>> {
+        Ok(Some(Arc::new(TestRuntime)))
+    }
+
+    async fn shutdown(&self) {}
+}
 
 impl InstanceFactory for TestFactory {
     type Instance = CoreInstance<TestHost>;
@@ -40,15 +69,16 @@ impl InstanceFactory for TestFactory {
 
     fn create(&self, config: TomlConfig, (): ()) -> anyhow::Result<Arc<Self::Instance>> {
         let (sink, _receiver) = tokio::sync::mpsc::channel(16);
-        CoreInstance::from_toml(
-            config,
-            CoreHostAdapters::new(
-                Arc::new(TestHost::default()),
-                Arc::new(TestDns),
-                Arc::new(sink),
-                self.0.clone(),
-            ),
-        )
+        let mut adapters = CoreHostAdapters::new(
+            Arc::new(TestHost::default()),
+            Arc::new(TestDns),
+            Arc::new(sink),
+            self.0.clone(),
+        );
+        // The fake runtime has no OS interface. DHCP updates only the in-memory
+        // address snapshot while the real Core lifecycle still starts/stops.
+        adapters.instance_runtime = Arc::new(TestRuntime);
+        CoreInstance::from_toml(config, adapters)
     }
 }
 
@@ -145,7 +175,9 @@ fn config(id: uuid::Uuid, hostname: &str) -> TomlConfig {
     config.set_inst_name(format!("test-{id}"));
     config.set_listeners(Vec::new());
     let mut flags = config.get_flags();
-    flags.no_tun = true;
+    // TestHost never creates an OS TUN. no_tun=true instead requests Core
+    // packet-proxy services, which are absent from the default Core feature set.
+    flags.no_tun = false;
     config.set_flags(flags);
     config
 }
@@ -734,6 +766,7 @@ async fn unapplied_save_rejects_hot_patch_until_full_apply_without_losing_desire
     manager.delete_network_instances([id]).await.unwrap();
 }
 
+#[cfg(feature = "dhcp-ipv4")]
 #[tokio::test]
 async fn dhcp_lease_and_default_normalization_do_not_mark_identical_save_pending() {
     let manager = manager(None);

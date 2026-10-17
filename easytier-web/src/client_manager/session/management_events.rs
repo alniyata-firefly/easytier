@@ -17,9 +17,9 @@ struct EventContext {
 }
 
 impl EventContext {
-    fn new(storage: &Storage, token: &StorageToken, epoch: u64) -> Self {
+    fn new(db: &Db, token: &StorageToken, epoch: u64) -> Self {
         Self {
-            db: storage.db().clone(),
+            db: db.clone(),
             owner: token.user_id,
             device: token.machine_id,
             peer_ip: token.client_url.host_str().map(str::to_owned),
@@ -44,7 +44,7 @@ pub(super) fn queue_connection(
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         return;
     };
-    let context = EventContext::new(storage, token, epoch);
+    let context = EventContext::new(storage.db(), token, epoch);
     runtime.spawn(async move {
         if !persisted(context.db.record_management_connection_event(
             context.owner,
@@ -70,12 +70,12 @@ fn failure_snapshot(data: &mut SessionData, ids: &HashSet<String>) -> Option<Fai
     if !data.auth_state.is_authorized() {
         return None;
     }
-    let storage = Storage::try_from(data.storage.clone()).ok()?;
+    let storage = data.storage.upgrade()?;
     let token = data.storage_token.as_ref()?;
     if !storage.owns_authorized_session(token, data.session_epoch) {
         return None;
     }
-    let context = EventContext::new(&storage, token, data.session_epoch);
+    let context = EventContext::new(&storage.db, token, data.session_epoch);
     let mut failures = ids
         .iter()
         .filter_map(|id| {
@@ -128,14 +128,12 @@ pub(super) async fn record_authorized(session: &SharedSessionData) {
     let Some(context) = ({
         let data = session.read().await;
         if data.auth_state.is_authorized() {
-            Storage::try_from(data.storage.clone())
-                .ok()
-                .and_then(|storage| {
-                    let token = data.storage_token.as_ref()?;
-                    storage
-                        .owns_authorized_session(token, data.session_epoch)
-                        .then(|| EventContext::new(&storage, token, data.session_epoch))
-                })
+            data.storage.upgrade().and_then(|storage| {
+                let token = data.storage_token.as_ref()?;
+                storage
+                    .owns_authorized_session(token, data.session_epoch)
+                    .then(|| EventContext::new(&storage.db, token, data.session_epoch))
+            })
         } else {
             None
         }

@@ -1533,10 +1533,11 @@ mod tests {
             ..Default::default()
         });
         assert!(!outcome.has_failed);
+        let storage_inner = storage.weak_ref().upgrade().unwrap();
         assert!(matches!(
             mark_config_revision_applied_if_current(
                 &weak,
-                &storage,
+                &storage_inner,
                 &round,
                 &outcome,
                 &RuntimeMutationFence::default(),
