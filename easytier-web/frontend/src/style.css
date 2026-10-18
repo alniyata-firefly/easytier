@@ -354,3 +354,33 @@ progress::-moz-progress-bar { background: #73a8eb; border-radius: 2px; }
 .uplink-picker-empty{margin:12px;color:var(--muted);font-size:13px}
 
 .connection-log-table { max-height: 460px; overflow: auto; }
+
+.logs-page .tabs { margin-bottom: 0; }
+.log-help,.log-meta { color: var(--muted); font-size: 13px; line-height: 1.7; margin: 0 0 14px; max-width: none; }
+.log-meta { font-size: 12px; }
+.server-log-panel > .alert { margin-bottom: 16px; }
+.server-log-filters { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.server-log-filters .field { flex: 1 1 190px; min-width: 0; }
+.server-log-filters .field:first-child { flex: 0 1 180px; }
+.server-log-filters .button { margin-bottom: 1px; }
+.server-log-actions { flex-wrap: wrap; }
+.log-live-state { font-size: 12px; color: var(--muted); margin-left: auto; }
+.server-log-table { max-height: 620px; overflow: auto; }
+.server-log-table table { table-layout: fixed; width: 100%; min-width: 680px; }
+.server-log-table th:first-child { width: 175px; }
+.server-log-table th:nth-child(2) { width: 95px; }
+.server-log-table th:nth-child(3) { width: 210px; }
+.log-target,.log-message { overflow-wrap: anywhere; white-space: normal !important; }
+.log-message { line-height: 1.7; }
+.log-message details { margin-top: 6px; font-size: 12px; }
+.log-message summary { color: var(--muted); cursor: pointer; }
+.log-message dl { margin: 8px 0 0; font-family: var(--mono); }
+.log-message dl > div { display: flex; gap: 12px; }
+.log-message dt { color: var(--muted); flex: 0 0 110px; }
+.log-message dd { margin: 0; min-width: 0; }
+.server-log-pagination { margin-top: 18px; }
+@media (max-width: 760px) {
+  .server-log-filters .field,.server-log-filters .field:first-child { flex: 1 1 100%; }
+  .server-log-actions .log-live-state { flex: 1 1 100%; margin-left: 0; }
+  .logs-page .tabs { flex-wrap: wrap; }
+}

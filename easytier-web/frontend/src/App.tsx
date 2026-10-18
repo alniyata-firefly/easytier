@@ -16,6 +16,7 @@ const DevicePage=lazy(()=>import('./pages/DevicePage').then(module=>({default:mo
 const TokensPage=lazy(()=>import('./pages/TokensPage').then(module=>({default:module.TokensPage})));
 const NetworksPage=lazy(()=>import('./pages/NetworksPage').then(module=>({default:module.NetworksPage})));
 const NetworkPage=lazy(()=>import('./pages/NetworkPage').then(module=>({default:module.NetworkPage})));
+const ServerLogsPage=lazy(()=>import('./pages/ServerLogsPage').then(module=>({default:module.ServerLogsPage})));
 
 class PageBoundary extends Component<{children:ReactNode}, {failed:boolean}> {
   state={failed:false};
@@ -52,8 +53,8 @@ function Console() {
   if(checking)return <main className="login-layout"><div className="loading" role="status">{t('connection.checking')}</div></main>;
   if(connectionError)return <main className="login-layout"><div className="stack"><Alert tone="error">{errorMessage(connectionError)}</Alert><Button onClick={()=>setLoginRevision(v=>v+1)}>{t('connection.retry')}</Button></div></main>;
   if(!info)return <PageBoundary><Suspense fallback={<main className="login-layout"><div className="loading" role="status">{t('page.loading')}</div></main>}><LoginPage api={api} onLogin={()=>setLoginRevision(v=>v+1)}/></Suspense></PageBoundary>;
-  const entries=[{id:'overview',path:'/h',label:t('nav.overview'),icon:'dashboard'},{id:'networks',path:'/h/networks',label:t('nav.networks'),icon:'network'},{id:'devices',path:'/h/deviceList',label:t('nav.devices'),icon:'devices'},{id:'tokens',path:'/h/tokens',label:t('nav.tokens'),icon:'key'}].filter(item=>!info.webhook_auth||!['networks','tokens'].includes(item.id));
-  const requestedActive=route.startsWith('/h/networks')?'networks':route.startsWith('/h/deviceList')?'devices':route.startsWith('/h/tokens')?'tokens':'overview';
+  const entries=[{id:'overview',path:'/h',label:t('nav.overview'),icon:'dashboard'},{id:'networks',path:'/h/networks',label:t('nav.networks'),icon:'network'},{id:'devices',path:'/h/deviceList',label:t('nav.devices'),icon:'devices'},{id:'tokens',path:'/h/tokens',label:t('nav.tokens'),icon:'key'},{id:'logs',path:'/h/logs',label:t('nav.logs'),icon:'clock'}].filter(item=>!info.webhook_auth||!['networks','tokens'].includes(item.id));
+  const requestedActive=route.startsWith('/h/networks')?'networks':route.startsWith('/h/deviceList')?'devices':route.startsWith('/h/tokens')?'tokens':route.startsWith('/h/logs')?'logs':'overview';
   const active=entries.some(item=>item.id===requestedActive)?requestedActive:'overview';
   const parts=route.split('/').filter(Boolean);
   let page:ReactNode=<OverviewPage api={api} consoleInfo={info}/>;
@@ -62,6 +63,7 @@ function Console() {
     if(active==='networks'&&!info.webhook_auth){page=parts[2]?<NetworkPage api={api} networkId={decodeURIComponent(parts[2])} consoleInfo={info} onTitleChange={updateDetailTitle}/>:<NetworksPage api={api} consoleInfo={info}/>;}
     if(active==='devices'){page=parts[2]==='device'&&parts[3]?<DevicePage api={api} deviceId={decodeURIComponent(parts[3])} instanceId={parts[4]?decodeURIComponent(parts[4]):undefined} onTitleChange={updateDetailTitle}/>:<DevicesPage api={api} consoleInfo={info}/>;}
     if(active==='tokens'&&!info.webhook_auth){page=<TokensPage api={api} consoleInfo={info}/>;}
+    if(active==='logs'){page=<ServerLogsPage api={api} consoleInfo={info} section={parts[2]}/>;}
   } catch {page=<Alert tone="error">{t('page.invalidLink')}</Alert>;}
   const logout=async()=>{if(loggingOut)return;setLoggingOut(true);try{await api.logout();}catch(failure){notice(errorDescriptor(failure),'error');}finally{setLoggingOut(false);}};
   const closeNavigation=()=>{setNavOpen(false);navToggle.current?.focus();};

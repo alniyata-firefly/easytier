@@ -15,7 +15,8 @@
     "skip": "跳到主要内容",
     "networkDetail": "网络详情",
     "deviceDetail": "设备详情",
-    "breadcrumb": "当前位置"
+    "breadcrumb": "当前位置",
+    "logs": "日志"
   },
   "scope": {
     "central": "中央管理",

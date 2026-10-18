@@ -2,7 +2,7 @@ use std::{
     fmt::{self, Write as _},
     io::{self, IsTerminal, Write as _},
     sync::{
-        OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicU8, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -20,7 +20,7 @@ mod file;
 #[cfg(feature = "management")]
 mod management;
 #[cfg(feature = "management")]
-pub use management::{init, init_with_default_console_targets};
+pub use management::{init, init_with_default_console_targets, init_with_event_observer};
 mod tracing_backend;
 
 use file::FileSink;
@@ -57,6 +57,15 @@ macro_rules! __log__ {
 __log__!(const LOG_TARGET = "CORE");
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
+
+/// Receives structured tracing events independently of console and file filters.
+///
+/// Implementations should keep both methods short and must not emit tracing events
+/// from them, since doing so would recursively invoke the observer.
+pub trait EventObserver: Send + Sync {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool;
+    fn on_event(&self, event: &Event<'_>);
+}
 
 pub fn init_console() -> anyhow::Result<()> {
     install(Logger::new(
@@ -206,6 +215,7 @@ struct Logger {
     active_max_level: AtomicU8,
     color: bool,
     file: FileSink,
+    event_observer: Option<Arc<dyn EventObserver>>,
 }
 
 impl Logger {
@@ -218,7 +228,13 @@ impl Logger {
             active_max_level: AtomicU8::new(active_max_level),
             color: io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
             file,
+            event_observer: None,
         }
+    }
+
+    fn with_event_observer(mut self, observer: Arc<dyn EventObserver>) -> Self {
+        self.event_observer = Some(observer);
+        self
     }
 
     fn enabled(&self, target: &str, level: Level) -> bool {
@@ -228,6 +244,14 @@ impl Logger {
 
     fn console_enabled(&self, target: &str, level: Level) -> bool {
         level_is_enabled(self.console_max_level, level) && self.console.enabled(target, level)
+    }
+
+    fn event_enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        self.enabled(metadata.target(), tracing_level(metadata.level()))
+            || self
+                .event_observer
+                .as_ref()
+                .is_some_and(|observer| observer.enabled(metadata))
     }
 
     fn max_level(&self) -> LevelFilter {
@@ -365,6 +389,12 @@ fn tracing_level(level: &tracing::Level) -> Level {
 
 fn emit_event(logger: &Logger, event: &Event<'_>) {
     let metadata = event.metadata();
+    if let Some(observer) = &logger.event_observer
+        && observer.enabled(metadata)
+    {
+        observer.on_event(event);
+    }
+
     let level = tracing_level(metadata.level());
     if !logger.enabled(metadata.target(), level) {
         return;
@@ -426,6 +456,112 @@ mod tests {
 
     #[cfg(feature = "management")]
     use crate::common::config::FileLoggerConfig;
+
+    #[cfg(not(feature = "tracing"))]
+    #[derive(Default)]
+    struct RecordingObserver {
+        events: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[cfg(not(feature = "tracing"))]
+    impl EventObserver for RecordingObserver {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == "observer_test" && *metadata.level() != tracing::Level::TRACE
+        }
+
+        fn on_event(&self, event: &Event<'_>) {
+            let mut fields = EventFields::default();
+            event.record(&mut fields);
+            self.events.lock().unwrap().push((
+                event.metadata().level().as_str().to_owned(),
+                fields.finish(),
+            ));
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "tracing"))]
+    fn event_observer_receives_structured_events_with_outputs_disabled() {
+        let observer = Arc::new(RecordingObserver::default());
+        let logger = Box::leak(Box::new(
+            Logger::new(TargetFilter::off(), FileSink::disabled())
+                .with_event_observer(observer.clone()),
+        ));
+        assert!(!logger.enabled("observer_test", Level::Info));
+        let subscriber = tracing_backend::EventSubscriber::new(logger);
+        assert_eq!(
+            tracing::Subscriber::max_level_hint(&subscriber),
+            Some(tracing::level_filters::LevelFilter::TRACE)
+        );
+        let dispatch = tracing::Dispatch::new(subscriber);
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            let span = tracing::info_span!(target: "observer_test", "not-an-event");
+            let _entered = span.enter();
+            tracing::info!(
+                target: "observer_test",
+                device_id = "node-7",
+                attempt = 3_u64,
+                success = true,
+                "observer-only"
+            );
+            tracing::debug!(target: "observer_test", "debug-observed");
+            tracing::trace!(target: "observer_test", "trace-filtered");
+            tracing::info!(target: "other_target", "target-filtered");
+        });
+
+        let events = observer.events.lock().unwrap();
+        assert_eq!(
+            *events,
+            vec![
+                (
+                    "INFO".to_owned(),
+                    "observer-only device_id=\"node-7\" attempt=3 success=true".to_owned()
+                ),
+                ("DEBUG".to_owned(), "debug-observed".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "management", not(feature = "tracing")))]
+    #[serial_test::serial]
+    fn event_observer_keeps_file_filtering_and_single_delivery() {
+        let _env = EnvVarGuard::set(Some("info"));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("observer.log");
+        let file = FileSink::from_config(
+            FileLoggerConfig {
+                level: Some("info".to_owned()),
+                file: Some("observer.log".to_owned()),
+                dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            false,
+        )
+        .unwrap();
+        let observer = Arc::new(RecordingObserver::default());
+        let logger = Box::leak(Box::new(
+            Logger::new(TargetFilter::off(), file).with_event_observer(observer.clone()),
+        ));
+        let dispatch = tracing::Dispatch::new(tracing_backend::EventSubscriber::new(logger));
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::info!(target: "observer_test", "both-destinations");
+            tracing::debug!(target: "observer_test", "observer-destination-only");
+            tracing::info!(target: "other_target", "file-destination-only");
+        });
+        logger.flush_file();
+
+        let events = observer.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].1, "both-destinations");
+        assert_eq!(events[1].1, "observer-destination-only");
+        let content = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(content.matches("both-destinations").count(), 1);
+        assert!(content.contains("file-destination-only"));
+        assert!(!content.contains("observer-destination-only"));
+    }
 
     struct EnvVarGuard {
         previous: Option<std::ffi::OsString>,

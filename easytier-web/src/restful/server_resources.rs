@@ -27,19 +27,22 @@ struct ServerResourcesResponse {
     host_resources: Option<HostResources>,
 }
 
-async fn ensure_admin(db: &Db, user_id: UserIdInDb) -> Result<(), HttpHandleError> {
+pub(super) async fn is_admin(db: &Db, user_id: UserIdInDb) -> Result<bool, HttpHandleError> {
     // Current SeaORM migrations seed the `admins` group. The obsolete SQL
     // fixture's `superusers` name is not the live schema. Scope this join to
     // the authenticated user; Backend::get_group_permissions currently lacks
     // that filter and must not authorize global host observations.
-    let is_admin: bool = sqlx::query_scalar(
+    sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM users_groups ug JOIN groups g ON g.id=ug.group_id WHERE ug.user_id=? AND g.name='admins')",
     )
     .bind(user_id)
     .fetch_one(&db.inner())
     .await
-    .map_err(|error| convert_db_error(sea_orm::DbErr::Custom(error.to_string())))?;
-    if !is_admin {
+    .map_err(|error| convert_db_error(sea_orm::DbErr::Custom(error.to_string())))
+}
+
+pub(super) async fn ensure_admin(db: &Db, user_id: UserIdInDb) -> Result<(), HttpHandleError> {
+    if !is_admin(db, user_id).await? {
         let mut error = other_error("server resource observations require administrator access");
         error.code = Some("server_resources_forbidden".to_owned());
         return Err((StatusCode::FORBIDDEN, Json(error)));

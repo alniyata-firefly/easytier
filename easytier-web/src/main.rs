@@ -35,6 +35,7 @@ mod client_manager;
 mod db;
 mod migrator;
 mod restful;
+mod server_logs;
 mod webhook;
 
 #[cfg(feature = "embed")]
@@ -361,7 +362,9 @@ async fn main() {
     setup_panic_handler();
 
     let cli = Cli::parse();
-    log::init_with_default_console_targets(&cli, false, &["CORE", "easytier_web"]).unwrap();
+    let server_logs = Arc::new(server_logs::ServerLogs::new());
+    log::init_with_event_observer(&cli, false, &["CORE", "easytier_web"], server_logs.clone())
+        .unwrap();
     let metrics = restful::observability::Observability::from_options(cli.metrics.clone())
         .unwrap_or_else(|error| {
             eprintln!("Invalid metrics configuration: {error}");
@@ -551,6 +554,7 @@ async fn main() {
         cli.config_server_port,
         cli.advertised_config_server_url,
         Arc::new(metrics),
+        server_logs,
     )
     .await
     .unwrap()
@@ -575,7 +579,9 @@ async fn main() {
         None
     };
 
+    tracing::info!("easytier-web ready");
     tokio::signal::ctrl_c().await.unwrap();
+    tracing::info!("easytier-web stopping");
 }
 
 #[cfg(test)]

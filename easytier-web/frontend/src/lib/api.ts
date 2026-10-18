@@ -70,6 +70,31 @@ export interface ManagementConnectionEventPage {
     next_before_id: number | null;
 }
 
+export type ServerLogLevel = 'INFO' | 'WARN' | 'ERROR';
+export interface ServerLogEntry {
+    id: number;
+    occurred_at: number;
+    level: ServerLogLevel;
+    target: string;
+    message: string;
+    fields: Record<string, string>;
+}
+export interface ServerLogQuery {
+    level?: ServerLogLevel;
+    target?: string;
+    q?: string;
+    before_id?: number;
+    limit?: number;
+}
+export interface ServerLogPage {
+    entries: ServerLogEntry[];
+    next_before_id: number | null;
+    instance_id: string;
+    started_at: number;
+    capacity: number;
+    dropped_entries: number;
+}
+
 export interface ListNetworkInstanceIdResponse {
     running_inst_ids: Array<Utils.UUID>,
     disabled_inst_ids: Array<Utils.UUID>,
@@ -284,6 +309,7 @@ export interface ConsoleInfo {
     config_server_protocol: string;
     config_server_port: number;
     webhook_auth: boolean;
+    server_logs_access?: boolean;
 }
 
 export type AclSelector =
@@ -450,6 +476,10 @@ export class ApiClient {
 
     public async list_management_connection_events(options: { device_id?: string; before_id?: number; limit?: number } = {}): Promise<ManagementConnectionEventPage> {
         return this.client.get<any, ManagementConnectionEventPage>('/management-connection-events', { params: options });
+    }
+
+    public async list_server_logs(options: ServerLogQuery = {}): Promise<ServerLogPage> {
+        return this.client.get<any, ServerLogPage>('/server/logs', { params: options });
     }
 
     public async get_node_runtime_infos(machine_id: string): Promise<Record<string, NetworkTypes.NetworkInstanceRunningInfo>> {

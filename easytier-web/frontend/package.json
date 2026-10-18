@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "test": "node --test tests/react-contracts.test.mjs tests/node-config.test.mjs tests/uplink-api-contract.test.mjs tests/lifetime.test.mjs tests/advanced-node-config.test.mjs tests/device-rebind-api.test.mjs tests/management-status.test.mjs tests/connection-logs-api.test.mjs tests/tunnel-events.test.mjs",
+    "test": "node --test tests/react-contracts.test.mjs tests/node-config.test.mjs tests/uplink-api-contract.test.mjs tests/lifetime.test.mjs tests/advanced-node-config.test.mjs tests/device-rebind-api.test.mjs tests/management-status.test.mjs tests/connection-logs-api.test.mjs tests/tunnel-events.test.mjs tests/server-logs-api.test.mjs",
     "test:browser": "node --test tests/react-browser.test.mjs",
     "test:e2e:native": "node --test --test-concurrency=1 tests/device-auth-e2e.test.mjs tests/device-rebind-native-e2e.test.mjs tests/central-native-e2e.test.mjs tests/observability-native-e2e.test.mjs",
     "test:e2e:rebind": "node --test tests/device-rebind-native-e2e.test.mjs",
@@ -17,7 +17,8 @@
     "test:browser:transport": "node --test tests/network-transport-browser.test.mjs tests/network-settings-restore-browser.test.mjs tests/advanced-node-browser.test.mjs",
     "test:e2e:transport": "node --test --test-concurrency=1 tests/network-transport-native-e2e.test.mjs tests/network-transport-legacy-native-e2e.test.mjs",
     "test:browser:rebind": "node --test tests/device-rebind-browser.test.mjs",
-    "test:browser:connections": "node --test --test-concurrency=1 tests/management-connection-logs-browser.test.mjs tests/tunnel-events-browser.test.mjs tests/device-runtime-browser.test.mjs tests/instance-peers-browser.test.mjs"
+    "test:browser:connections": "node --test --test-concurrency=1 tests/management-connection-logs-browser.test.mjs tests/tunnel-events-browser.test.mjs tests/device-runtime-browser.test.mjs tests/instance-peers-browser.test.mjs",
+    "test:browser:logs": "node --test tests/server-logs-browser.test.mjs"
   },
   "dependencies": {
     "@protobuf-ts/runtime": "2.11.1",

@@ -10,6 +10,7 @@ pub(crate) mod oidc;
 mod rpc;
 #[cfg(test)]
 pub(crate) use rpc::{ProxyRpcRequest, handle_proxy_rpc_by_session};
+mod server_logs;
 mod server_resources;
 mod users;
 
@@ -59,6 +60,7 @@ pub struct RestfulServer {
     config_server_port: u16,
     advertised_config_server_url: Option<String>,
     observability: Arc<observability::Observability>,
+    server_logs: Arc<crate::server_logs::ServerLogs>,
     db: Db,
     oidc_config: oidc::OidcConfig,
     web_router: Option<Router>,
@@ -87,6 +89,7 @@ struct ConsoleInfoConfig {
 #[derive(serde::Serialize)]
 struct GetConsoleInfoJsonResp {
     username: String,
+    server_logs_access: bool,
     config_server_protocol: String,
     config_server_port: u16,
     webhook_auth: bool,
@@ -179,6 +182,7 @@ impl RestfulServer {
         config_server_port: u16,
         advertised_config_server_url: Option<String>,
         observability: Arc<observability::Observability>,
+        server_logs: Arc<crate::server_logs::ServerLogs>,
     ) -> anyhow::Result<Self> {
         assert!(client_mgr.is_running());
 
@@ -192,6 +196,7 @@ impl RestfulServer {
             config_server_port,
             advertised_config_server_url,
             observability,
+            server_logs,
             db,
             oidc_config,
             web_router,
@@ -239,12 +244,15 @@ impl RestfulServer {
     async fn handle_get_console_info(
         auth_session: AuthSession,
         Extension(config): Extension<ConsoleInfoConfig>,
+        Extension(service): Extension<Arc<CentralNetworkService>>,
     ) -> Result<Json<GetConsoleInfoJsonResp>, HttpHandleError> {
         let Some(user) = auth_session.user else {
             return Err((StatusCode::UNAUTHORIZED, other_error("No such user").into()));
         };
 
+        let server_logs_access = server_resources::is_admin(&service.db, user.id()).await?;
         Ok(GetConsoleInfoJsonResp {
+            server_logs_access,
             username: user.db_user.username,
             config_server_protocol: config.config_server_protocol,
             config_server_port: config.config_server_port,
@@ -380,6 +388,7 @@ impl RestfulServer {
             .merge(management_connection_events::router())
             .merge(observability::router())
             .merge(server_resources::router())
+            .merge(server_logs::router())
             .route_layer(login_required!(Backend))
             .merge(auth::router().layer(Extension(self.feature_flags.clone())))
             .merge(oidc::router())
@@ -392,6 +401,7 @@ impl RestfulServer {
             .route("/api/v1/parse-config", post(Self::handle_parse_config))
             .layer(Extension(self.central_service.clone()))
             .layer(Extension(self.observability.clone()))
+            .layer(Extension(self.server_logs.clone()))
             .layer(Extension(self.oidc_config.clone()))
             .layer(Extension(ConsoleInfoConfig {
                 config_server_protocol: self.config_server_protocol.clone(),

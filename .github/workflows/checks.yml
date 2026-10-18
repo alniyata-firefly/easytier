@@ -4,7 +4,17 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      server_logs_only:
+        description: Validate and package only the server logs Web module and Linux x86_64 server
+        type: boolean
+        default: false
   workflow_call:
+    inputs:
+      server_logs_only:
+        description: Validate and package only the server logs Web module and Linux x86_64 server
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -15,6 +25,7 @@ concurrency:
 
 jobs:
   frontend:
+    if: ${{ !inputs.server_logs_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -44,6 +55,9 @@ jobs:
         run: |
           pnpm test:browser:connections
           node --test --test-concurrency=1 tests/mobile-uplink-browser.test.mjs
+      - name: Verify server logs API and administrator console in Chromium
+        working-directory: easytier-web/frontend
+        run: node --test --test-concurrency=1 tests/server-logs-api.test.mjs tests/server-logs-browser.test.mjs
       - name: Verify the desktop React application in Chromium
         env:
           ET_GUI_QA_URL: http://127.0.0.1:1420
@@ -72,6 +86,7 @@ jobs:
       - name: Verify Android management authentication and VPN failure diagnosis
         run: pnpm --dir easytier-gui exec node --test --test-concurrency=1 tests/management-auth-browser.test.mjs tests/vpn-failure-browser.test.mjs
   runtime:
+    if: ${{ !inputs.server_logs_only }}
     name: Focused Rust runtime and controller regressions
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -105,6 +120,7 @@ jobs:
       - name: Test shutdown, persistence, local pause, authentication and connection events
         run: python3 ci/check_runtime.py
   workflow:
+    if: ${{ !inputs.server_logs_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -140,3 +156,6 @@ jobs:
           python3 -m unittest discover -s ci/android -p 'test_*.py'
           python3 -m unittest discover -s ci/gui -p 'test_*.py'
           node --test easytier-web/frontend/tests/web-assets-verifier.test.mjs
+  server_logs:
+    if: inputs.server_logs_only
+    uses: ./.github/workflows/server-logs.yml

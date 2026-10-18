@@ -22,11 +22,14 @@ PLAN = (
         "instance::tests::portable_runtime::cancelled_delete_finishes_stop_and_keeps_wait_blocked",
     )),
     ("easytier", ("--lib",), (
+        "common::log::tests::",
         "core::shutdown::tests::",
         "instance::config::tests::",
         "instance::config_storage::tests::",
     )),
     ("easytier-web", ("--bin", "easytier-web"), (
+        "server_logs",
+        "restful::server_resources::tests::",
         "db::management_connection_events::tests::",
         "db::device_rebind_requests::tests::",
         "client_manager::runtime_reconcile::tests::",
@@ -39,13 +42,22 @@ PLAN = (
     )),
 )
 
+SERVER_LOGS_PLAN = (
+    ("easytier", ("--lib",), ("common::log::tests::",)),
+    ("easytier-web", ("--bin", "easytier-web"), (
+        "server_logs",
+        "restful::server_resources::tests::",
+    )),
+)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Print the fixed test plan without invoking Cargo")
+    parser.add_argument("--server-logs-only", action="store_true", help="Run only logger, server logs and server administrator authorization tests")
     args = parser.parse_args()
     failures = []
-    for package, targets, scopes in PLAN:
+    for package, targets, scopes in SERVER_LOGS_PLAN if args.server_logs_only else PLAN:
         command = ["cargo", "test", "--locked", "-p", package, *targets]
         if not args.dry_run:
             # Listing compiles the actual test target first. Validate every

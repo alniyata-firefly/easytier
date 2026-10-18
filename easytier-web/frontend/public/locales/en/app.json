@@ -15,7 +15,8 @@
     "skip": "Skip to main content",
     "networkDetail": "Network details",
     "deviceDetail": "Device details",
-    "breadcrumb": "Breadcrumb"
+    "breadcrumb": "Breadcrumb",
+    "logs": "Logs"
   },
   "scope": {
     "central": "Central management",

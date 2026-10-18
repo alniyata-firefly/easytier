@@ -780,6 +780,7 @@ async fn cleanup_stale_web_source_instances(
             user_id = ?round.user_id,
             machine_id = ?round.machine_id,
             elapsed_ms = operation_started_at.elapsed().as_millis(),
+            success = ret.is_ok(),
             "Clean stale web-source network instances on heartbeat: {:?}",
             ret
         );
@@ -864,6 +865,7 @@ async fn cleanup_patch_deleted_instances(
         user_id = ?round.user_id,
         machine_id = ?round.machine_id,
         elapsed_ms = operation_started_at.elapsed().as_millis(),
+        success = ret.is_ok(),
         deleted_instance_ids = ?running_web_instance_ids,
         "Apply managed config Patch deletions at runtime: {:?}",
         ret
@@ -1170,6 +1172,7 @@ async fn reconcile_running_web_config(
         machine_id = ?round.machine_id,
         instance_id = %config.network_instance_id,
         elapsed_ms = operation_started_at.elapsed().as_millis(),
+        success = ret.is_ok(),
         "Reconcile running web-source network instance: {:?}",
         ret
     );
@@ -1276,6 +1279,7 @@ async fn run_missing_network_config(
         machine_id = ?round.machine_id,
         instance_id = %config.network_instance_id,
         elapsed_ms = operation_started_at.elapsed().as_millis(),
+        success = ret.is_ok(),
         "Run network instance: {:?}",
         ret
     );

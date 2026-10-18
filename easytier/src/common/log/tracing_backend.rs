@@ -12,8 +12,6 @@ use tracing::{
 #[cfg(feature = "tracing")]
 use tracing_subscriber::prelude::*;
 
-#[cfg(not(feature = "tracing"))]
-use super::tracing_level;
 use super::{Logger, emit_event};
 
 #[cfg(not(feature = "tracing"))]
@@ -61,10 +59,7 @@ impl EventSubscriber {
 #[cfg(not(feature = "tracing"))]
 impl tracing::Subscriber for EventSubscriber {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        metadata.is_event()
-            && self
-                .logger
-                .enabled(metadata.target(), tracing_level(metadata.level()))
+        metadata.is_event() && self.logger.event_enabled(metadata)
     }
 
     fn new_span(&self, _attributes: &Attributes<'_>) -> Id {
@@ -98,7 +93,7 @@ impl tracing::Subscriber for EventSubscriber {
     }
 
     fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-        if self.logger.file.dynamic() {
+        if self.logger.file.dynamic() || self.logger.event_observer.is_some() {
             return Some(tracing::level_filters::LevelFilter::TRACE);
         }
         Some(match self.logger.max_level() {

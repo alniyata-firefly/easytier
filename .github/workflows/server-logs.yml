@@ -1,0 +1,224 @@
+name: Validate and package server logs
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-logs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Server logs API and browser regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-frontend
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: '35.1'
+          repo-token: ${{ github.token }}
+      - name: Generate protocol types and check the server console
+        run: |
+          pnpm --dir easytier-web/frontend-lib codegen:proto
+          pnpm --dir easytier-web/frontend typecheck
+      - name: Install Chromium for the server logs console
+        run: pnpm --dir easytier-web/frontend exec playwright install --with-deps chromium
+      - name: Verify server logs queries and administrator browser flows
+        working-directory: easytier-web/frontend
+        run: node --test --test-concurrency=1 tests/server-logs-api.test.mjs tests/server-logs-browser.test.mjs
+
+  runtime:
+    name: Logger, server logs and administrator authorization
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install native unit-test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential cmake clang mold pkg-config libssl-dev
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: '35.1'
+          repo-token: ${{ github.token }}
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: '1.95'
+          cache: false
+          rustflags: ''
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: server-logs-rust195-test-debug0
+          cache-targets: true
+      - name: Run the fixed server logs Rust test plan
+        run: python3 ci/check_runtime.py --server-logs-only
+
+  web:
+    uses: ./.github/workflows/build-web.yml
+
+  server:
+    name: Linux x86_64 server and embedded console
+    needs: [frontend, runtime, web]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '8'
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install native musl build and isolated test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential musl-tools pkg-config cmake clang mold iproute2
+          command -v musl-gcc
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: '35.1'
+          repo-token: ${{ github.token }}
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: '1.95'
+          target: x86_64-unknown-linux-musl
+          cache: false
+          rustflags: ''
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: web-static
+          path: downloaded-web
+      - name: Restore and verify the console built from this source commit
+        run: python3 ci/artifacts.py restore-web --input downloaded-web
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: server-logs-x86_64-musl-rust195-thin8
+          cache-targets: true
+      - name: Build only the Linux x86_64 embedded Web server executable
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --locked --release --target "$TARGET" -p easytier-web --features embed --bin easytier-web
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Verify the actual isolated server logs API without a managed Core
+        run: |
+          sudo env RUST_LOG=off EASYTIER_WEB_BIN="$PWD/target/$TARGET/release/easytier-web" \
+            ET_EXPECTED_FRONTEND_DIST="$PWD/easytier-web/frontend/dist" \
+            ET_EXPECTED_SOURCE_COMMIT="$GITHUB_SHA" \
+            ET_TEST_NETWORK_ISOLATED=1 ET_NATIVE_E2E_OUTPUT="$RUNNER_TEMP/server-logs-native-e2e" \
+            unshare --net sh -c 'ip link set lo up; exec "$@"' sh \
+            "$(command -v node)" --test --test-concurrency=1 \
+            easytier-web/frontend/tests/native-web-assets-e2e.test.mjs \
+            easytier-web/frontend/tests/server-logs-native-e2e.test.mjs
+      - name: Package only the verified server and original console archive
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, shutil, subprocess, sys
+          sys.path.insert(0, 'ci')
+          import artifacts
+
+          commit, version = artifacts.source()
+          artifacts.verify_web()
+          target = os.environ['TARGET']
+          if target != 'x86_64-unknown-linux-musl':
+              raise ValueError('server logs delivery only permits Linux x86_64 musl')
+          describe = subprocess.check_output(
+              ['git', 'describe', '--abbrev=8', '--always', '--dirty=~'], text=True).strip()
+          if describe.endswith('~'):
+              raise ValueError('tracked source changed during the server build')
+          binary = artifacts.ROOT / 'target' / target / 'release/easytier-web'
+          shown = subprocess.check_output([str(binary), '--version'], text=True).strip()
+          if shown != f'easytier-web {version}-{describe}':
+              raise ValueError('server executable source version mismatch')
+          header = subprocess.check_output(['readelf', '-h', str(binary)], text=True)
+          linkage = subprocess.check_output(['readelf', '-l', '-d', str(binary)], text=True)
+          if 'ELF64' not in header or 'X86-64' not in header:
+              raise ValueError('server executable has the wrong ELF architecture')
+          if 'INTERP' in linkage or '(NEEDED)' in linkage:
+              raise ValueError('server executable is not static musl')
+
+          stage = artifacts.ROOT / 'artifacts/stage/server-logs-linux-x86_64'
+          artifacts.fresh_directory(stage)
+          shutil.copy2(binary, stage / 'easytier-web')
+          (stage / 'easytier-web').chmod(0o755)
+          shutil.copy2(artifacts.ROOT / 'LICENSE', stage / 'LICENSE')
+          artifacts.write_json(stage / 'source.json', {
+              'source_commit': commit, 'version': version, 'target': target,
+              'executables': ['easytier-web'],
+          })
+          output = artifacts.ROOT / 'artifacts/server-logs-linux-x86_64'
+          artifacts.fresh_directory(output)
+          package = output / f'easytier-web-linux-x86_64-{version}-{commit[:8]}.tar.gz'
+          artifacts.archive_tree(stage, package)
+
+          downloaded = pathlib.Path('downloaded-web')
+          web_manifest = json.loads((downloaded / 'build-manifest.json').read_text())
+          web_paths = artifacts.validate_manifest(downloaded, web_manifest, commit, version)
+          if web_manifest.get('platform') != 'web-static' or len(web_paths) != 1:
+              raise ValueError('expected exactly one original console archive')
+          expected_sums = ''.join(f"{record['sha256']}  {record['path']}\n" for record in web_manifest['files'])
+          if (downloaded / 'SHA256SUMS').read_text() != expected_sums:
+              raise ValueError('original console checksums disagree with its manifest')
+          web_archive = output / web_paths[0].name
+          shutil.copy2(web_paths[0], web_archive)
+          original_manifest = output / 'web-static-build-manifest.json'
+          original_sums = output / 'web-static-SHA256SUMS'
+          shutil.copy2(downloaded / 'build-manifest.json', original_manifest)
+          shutil.copy2(downloaded / 'SHA256SUMS', original_sums)
+          artifacts.finish_artifact(output, 'server-logs-linux-x86_64',
+              [package, web_archive, original_manifest, original_sums])
+          print(f'Verified and packaged only easytier-web and console from {commit}')
+          PY
+      - name: Make only structured native results readable by the artifact uploader
+        if: always()
+        run: |
+          sudo env ET_PROOF_ROOT="$RUNNER_TEMP/server-logs-native-e2e" ET_PROOF_UID="$(id -u)" ET_PROOF_GID="$(id -g)" python3 - <<'PY'
+          import os, pathlib
+          root = pathlib.Path(os.environ['ET_PROOF_ROOT'])
+          uid, gid = int(os.environ['ET_PROOF_UID']), int(os.environ['ET_PROOF_GID'])
+          if root.is_dir() and not root.is_symlink():
+              os.chown(root, uid, gid)
+              for proof in root.glob('*/proof.json'):
+                  if proof.is_file() and not proof.is_symlink() and not proof.parent.is_symlink():
+                      os.chown(proof.parent, uid, gid)
+                      os.chown(proof, uid, gid)
+          PY
+      - name: Upload structured server logs native test results
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          overwrite: true
+          name: server-logs-native-proof-linux-x86_64
+          path: ${{ runner.temp }}/server-logs-native-e2e/**/proof.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          overwrite: true
+          name: server-logs-linux-x86_64
+          path: artifacts/server-logs-linux-x86_64/
+          if-no-files-found: error
+          retention-days: 14
