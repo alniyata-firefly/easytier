@@ -29,6 +29,11 @@ New shortcuts display `EasyTier`; related MSI upgrades remove the fixed legacy
 shortcut names. The old upstream package skips shortcut removal during an upgrade,
 which is why the cleanup components are needed.
 
+Registry `Key` attributes use one literal backslash between names: XML does not
+escape backslashes. The focused native WiX diagnostic run 39106948256 reproduced
+`LGHT0204 / ICE03: Invalid registry path` for doubled separators in both its
+control and cleanup fixtures. The verifier rejects that exact regression.
+
 `ci/gui/verify.py` checks the actual generated NSIS/WiX scripts, extracts and hashes
 the NSIS executable, and checks ProductName, Publisher and UpgradeCode from the real
 MSI database. The local tests exercise the validation gates with source templates

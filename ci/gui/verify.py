@@ -65,7 +65,10 @@ def verify_wix_identity(text, properties, version):
     directory = root.find('.//w:Directory[@Id="INSTALLDIR"]', ns)
     searches = root.findall('.//w:Property[@Id="INSTALLDIR"]/w:RegistrySearch', ns)
     registry = root.findall('.//w:RegistryKey', ns) + root.findall('.//w:RegistryValue', ns)
-    expected_key = r'Software\\' + PUBLISHER + r'\\' + LEGACY_PRODUCT
+    expected_key = 'Software\\' + PUBLISHER + '\\' + LEGACY_PRODUCT
+    for item in [*searches, *registry]:
+        if '\\\\' in item.get('Key', ''):
+            raise RuntimeError('MSI registry path contains doubled separators rejected by ICE03')
     if (product is None or product.get('Name') != PRODUCT
             or product.get('UpgradeCode', '').strip('{}').lower() != MSI_UPGRADE_CODE
             or directory is None or directory.get('Name') != LEGACY_PRODUCT

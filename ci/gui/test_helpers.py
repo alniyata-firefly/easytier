@@ -74,9 +74,16 @@ class InstallerBrandingTests(unittest.TestCase):
 
     def test_msi_install_directory_or_registry_rename_is_rejected(self):
         for bad in [self.wix.replace('Id="INSTALLDIR" Name="easytier-gui"', 'Id="INSTALLDIR" Name="EasyTier"'),
-                    self.wix.replace('kkrainbow\\\\easytier-gui', 'kkrainbow\\\\EasyTier')]:
+                    self.wix.replace('kkrainbow\\easytier-gui', 'kkrainbow\\EasyTier')]:
             with self.assertRaisesRegex(RuntimeError, 'compatibility'):
                 verify_wix_identity(bad, self.properties, '2.7.2')
+
+    def test_msi_registry_separators_match_actual_wix_ice03_contract(self):
+        invalid = self.wix.replace('Key="Software\\kkrainbow\\easytier-gui"',
+                                   'Key="Software\\\\kkrainbow\\\\easytier-gui"')
+        self.assertNotEqual(invalid, self.wix)
+        with self.assertRaisesRegex(RuntimeError, 'ICE03'):
+            verify_wix_identity(invalid, self.properties, '2.7.2')
 
     def test_native_wix_diagnostic_compares_same_base_and_original_cleanup_components(self):
         template = (self.source / 'easytier-gui/src-tauri/windows/main.wxs').read_text()

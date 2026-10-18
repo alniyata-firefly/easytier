@@ -63,6 +63,8 @@ def tool(command, directory, output, label):
     print(stderr, end='', flush=True)
     return {'exit_code': result.returncode, 'stdout_sha256': digest(output / (label + '.stdout.log')),
             'stderr_sha256': digest(output / (label + '.stderr.log')),
+            'diagnostics': [line for line in (stdout + stderr).splitlines()
+                            if re.search(r'\b(?:error|warning) (?:LGHT|CNDL)\d+', line)],
             'validation_codes': sorted(set(re.findall(r'\b(?:ICE\d+|LGHT\d+|CNDL\d+)\b', stdout + stderr)))}
 
 
