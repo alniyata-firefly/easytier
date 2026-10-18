@@ -17,6 +17,7 @@ from artifacts import validate_manifest
 VERSION = "2.7.2"
 PLATFORMS = {"android-arm64", "gui-macos-aarch64", "gui-macos-x86_64",
              "gui-windows-x86_64", "linux-aarch64", "linux-x86_64", "web-static"}
+PROFILES = {"full": PLATFORMS, "android-web": {"android-arm64", "web-static"}}
 
 
 class Refused(Exception):
@@ -33,7 +34,12 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def validate_inputs(repo, run_id, commit, tag):
+def validate_profile(profile):
+    require(isinstance(profile, str) and profile in PROFILES, "Invalid package profile")
+
+
+def validate_inputs(repo, run_id, commit, tag, profile="full"):
+    validate_profile(profile)
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo), "Invalid repository")
     require(type(run_id) is int and run_id > 0, "Invalid source run ID")
     require(re.fullmatch(r"[0-9a-f]{40}", commit), "Expected a full source commit SHA")
@@ -90,8 +96,8 @@ class GitHub:
         return self._request("POST", url, path=path)
 
 
-def validate_source(api, repo, run_id, commit, tag):
-    validate_inputs(repo, run_id, commit, tag)
+def validate_source(api, repo, run_id, commit, tag, profile="full"):
+    validate_inputs(repo, run_id, commit, tag, profile)
     run = api.request("GET", f"actions/runs/{run_id}")
     repository = run.get("repository", {})
     require(run.get("id") == run_id and run.get("head_sha") == commit
@@ -122,7 +128,7 @@ def validate_source(api, repo, run_id, commit, tag):
             and binding.get("head_repository_id") == repository["id"],
             "Artifact is expired, invalid or not bound to the approved source run")
     check_tag(api, tag, commit)
-    return {"repository": repo, "run_id": run_id, "source_commit": commit, "version": VERSION, "tag": tag,
+    return {"repository": repo, "run_id": run_id, "source_commit": commit, "version": VERSION, "tag": tag, "profile": profile,
             "artifact_id": artifact["id"], "artifact_digest": artifact["digest"], "artifact_bytes": artifact["size_in_bytes"]}
 
 
@@ -139,29 +145,34 @@ def check_tag(api, tag, commit):
             "Remote tag does not resolve to the approved commit; refusing to move it")
 
 
-def expected_names(commit):
+def expected_names(commit, profile="full"):
+    validate_profile(profile)
     short = commit[:8]
-    return {f"easytier-gui-{VERSION}-adapted-{short}-arm64.apk",
-            f"easytier-gui-{VERSION}-adapted-{short}-arm64.apk.sha256", "verification.json",
+    android_web = {f"easytier-gui-{VERSION}-adapted-{short}-arm64.apk",
+                   f"easytier-gui-{VERSION}-adapted-{short}-arm64.apk.sha256", "verification.json",
+                   f"easytier-web-static-{VERSION}-{short}.tar.gz"}
+    if profile == "android-web":
+        return android_web
+    return android_web | {
             f"easytier-gui_{VERSION}_aarch64.dmg", f"easytier-gui-{VERSION}-arm64.app.tgz",
             f"easytier-gui_{VERSION}_x64.dmg", f"easytier-gui-{VERSION}-x86_64.app.tgz",
             f"easytier-gui_{VERSION}_x64-setup.exe", f"easytier-gui_{VERSION}_x64_en-US.msi",
-            f"easytier-linux-aarch64-{VERSION}-{short}.tar.gz", f"easytier-linux-x86_64-{VERSION}-{short}.tar.gz",
-            f"easytier-web-static-{VERSION}-{short}.tar.gz"}
+            f"easytier-linux-aarch64-{VERSION}-{short}.tar.gz", f"easytier-linux-x86_64-{VERSION}-{short}.tar.gz"}
 
 
-def validate_bundle(root, commit):
+def validate_bundle(root, commit, profile="full"):
+    validate_profile(profile)
     require(root.is_dir() and not root.is_symlink(), "Missing package directory")
     entries = list(root.iterdir())
     require(all(item.is_file() and not item.is_symlink() for item in entries), "Package contains nonregular entries")
     manifest = json.loads((root / "build-manifest.json").read_text())
     require(manifest.get("platform") == "release" and isinstance(manifest.get("platforms"), list)
-            and len(manifest["platforms"]) == len(PLATFORMS) and set(manifest["platforms"]) == PLATFORMS,
-            "Expected the complete seven-platform release")
+            and len(manifest["platforms"]) == len(PROFILES[profile]) and set(manifest["platforms"]) == PROFILES[profile],
+            "Package platform set differs from the selected profile")
     # Deliberately explicit: checkout HEAD contains this publisher, not the older built source.
     files = validate_manifest(root, manifest, commit, VERSION)
     names = {item.name for item in files}
-    require(names == expected_names(commit) and len(files) == len(names), "Missing, duplicate or unexpected original assets")
+    require(names == expected_names(commit, profile) and len(files) == len(names), "Missing, duplicate or unexpected original assets")
     require({item.name for item in entries} == names | {"build-manifest.json", "SHA256SUMS"}, "Package has unrecorded files")
     sums = "".join(f"{item['sha256']}  {item['path']}\n" for item in manifest["files"])
     require((root / "SHA256SUMS").read_text() == sums, "SHA256SUMS differs from the original manifest")
@@ -169,7 +180,25 @@ def validate_bundle(root, commit):
 
 
 def release_text(state):
+    profile = state.get("profile", "full")
+    validate_profile(profile)
     marker = f"<!-- verified-ci-promotion:{state['repository']}:{state['run_id']}:{state['source_commit']}:{state['tag']} -->"
+    if profile == "android-web":
+        marker = marker.removesuffix(" -->") + ":android-web -->"
+        body = f"""{marker}
+保留应用版本 **{VERSION}** 的 Android / Web 修复构建；原版本标签及完整平台发布保持不变。
+
+源码提交：`{state['source_commit']}`。全部原始文件来自成功的 [Actions #{state['run_id']}](https://github.com/{state['repository']}/actions/runs/{state['run_id']})，本次发布不重新编译或重新签名。
+
+- 修复 Android VPN 恢复后残留错误、旧请求错误覆盖新连接状态的问题，并移除 Web 成员行的内部配置版本摘要。
+- 仅包含 Android ARM64 APK、对应校验/验证报告及 Web 静态文件。Linux、Windows、macOS 未重新构建，继续使用此前的[完整平台修复版](https://github.com/{state['repository']}/releases/tag/fix-2.7.2-20261018)。
+- 已完成 CI 构建及签名/包校验；发布前重新核验每个原始文件与远端 SHA-256。本工作流不执行额外的本机原生测试。
+- Android 保留原应用标识、签名及 versionCode `2007003`；同版本替换不会成为递增版本号自动升级。
+- **未进行 Android 手机真机测试。** Android 已校验签名、嵌入 Core/前端与 DEX；VPN 恢复仍需在手机上验收。
+
+安装前核对 `SHA256SUMS` 与 `build-manifest.json`。本次发布不修改生产服务或节点，也不替换完整平台的最新发布。
+"""
+        return f"EasyTier {VERSION} Android / Web 修复版", body
     native_note = ("本次源提交另通过 Linux 本机原生审批、管理日志及隔离 TUN/TCP/UDP/WireGuard 回归。"
                    if state['source_commit'] == '1ec2b559205d3df15669c0b63270fbedd89f81d3'
                    else "本工作流不执行额外的本机原生测试。")
@@ -220,8 +249,9 @@ def verify_asset(asset, record):
 
 
 def promote(api, root, state):
-    records = validate_bundle(root, state["source_commit"])
-    require(validate_source(api, state["repository"], state["run_id"], state["source_commit"], state["tag"]) == state,
+    profile = state.get("profile")
+    records = validate_bundle(root, state["source_commit"], profile)
+    require(validate_source(api, state["repository"], state["run_id"], state["source_commit"], state["tag"], profile) == state,
             "Source artifact identity changed after preflight")
     title, body = release_text(state)
 
@@ -264,15 +294,16 @@ def promote(api, root, state):
     require(set(assets) == set(records), "Remote fileset differs after upload")
     for name, record in records.items():
         verify_asset(assets[name], record)
-    require(validate_bundle(root, state["source_commit"]) == records, "Local files changed during upload")
-    require(validate_source(api, state["repository"], state["run_id"], state["source_commit"], state["tag"]) == state,
+    require(validate_bundle(root, state["source_commit"], profile) == records, "Local files changed during upload")
+    require(validate_source(api, state["repository"], state["run_id"], state["source_commit"], state["tag"], profile) == state,
             "Source artifact identity changed during upload")
     current = find_release(api, state["tag"])
     require(current is not None and current.get("id") == release_id and current.get("draft") == release.get("draft"),
             "Release identity or publication state changed during upload")
     owned(current)
     if release.get("draft"):
-        release = api.request("PATCH", f"releases/{release_id}", {"draft": False, "make_latest": "true"})
+        release = api.request("PATCH", f"releases/{release_id}",
+                              {"draft": False, "make_latest": "true" if profile == "full" else "false"})
     owned(release)
     require(release.get("draft") is False, "Release is not public")
     published = api.request("GET", endpoint)
@@ -283,7 +314,7 @@ def promote(api, root, state):
     for name, record in records.items():
         verify_asset(assets[name], record)
     check_tag(api, state["tag"], state["source_commit"])
-    return {"passed": True, "source_commit": state["source_commit"], "version": VERSION, "asset_count": len(records),
+    return {"passed": True, "source_commit": state["source_commit"], "version": VERSION, "profile": profile, "asset_count": len(records),
             "release_url": f"https://github.com/{state['repository']}/releases/tag/{state['tag']}"}
 
 
@@ -292,20 +323,21 @@ def main():
     parser.add_argument("--run-id", type=int, required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--tag", required=True)
+    parser.add_argument("--profile", choices=tuple(PROFILES), default="full")
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--input", type=Path)
     parser.add_argument("--publish", action="store_true")
     args = parser.parse_args()
     repo = os.environ.get("GITHUB_REPOSITORY", "")
-    validate_inputs(repo, args.run_id, args.commit, args.tag)
+    validate_inputs(repo, args.run_id, args.commit, args.tag, args.profile)
     api = GitHub(repo)
     if args.publish:
         require(args.input is not None, "Missing downloaded package directory")
         state = json.loads(args.state.read_text())
-        require(state == validate_source(api, repo, args.run_id, args.commit, args.tag), "Preflight source binding changed")
+        require(state == validate_source(api, repo, args.run_id, args.commit, args.tag, args.profile), "Preflight source binding changed")
         print(json.dumps(promote(api, args.input, state)))
     else:
-        state = validate_source(api, repo, args.run_id, args.commit, args.tag)
+        state = validate_source(api, repo, args.run_id, args.commit, args.tag, args.profile)
         args.state.write_text(json.dumps(state) + "\n")
         print(json.dumps({"passed": True, "mode": "preflight", "artifact_id": state["artifact_id"]}))
 

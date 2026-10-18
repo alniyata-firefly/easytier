@@ -106,8 +106,8 @@ test('member runtime queries stay separate from connection, instance and deploym
         assert.ok((await row.textContent()).includes(labels.runningUnknown));
         assert.equal(await row.locator('.status.unknown').count(), 1);
         assert.equal(await row.locator('.status.applied').count(), 0);
-        assert.ok((await row.textContent()).includes('fixture-'));
-        proof.cases.push({ language, scenario: 'failed member refresh with retained data', result: 'management, runtime and deployment state unknown; revision history retained' });
+        assert.ok(!(await row.textContent()).includes('fixture-'));
+        proof.cases.push({ language, scenario: 'failed member refresh with retained data', result: 'management, runtime and deployment state unknown; internal revision summary absent' });
 
         await scenario('recovered');
         assert.equal(await queryNotice.count(), 0);

@@ -185,7 +185,7 @@ describe('native client lifecycle boundaries', () => {
     session.dispose()
   })
 
-  it('retains a live VPN status if the management connection loses authorization', async () => {
+  it('retains a live VPN through management disconnection and reauthentication after a network change', async () => {
     fixture.platform = 'android'
     fixture.nativeEnabled = true
     fixture.vpnConnected = true
@@ -193,11 +193,14 @@ describe('native client lifecycle boundaries', () => {
     const { NativeSession } = await import('./session')
     const session = new NativeSession()
     await session.initialize()
-    fixture.managementState = 'disconnected'
-    await vi.advanceTimersByTimeAsync(2000)
-    expect(session.getSnapshot()).toMatchObject({ vpnConnected: true, managementConnected: false, managementState: 'disconnected' })
-    expect(fixture.stopLocalClient).not.toHaveBeenCalled()
-    expect(fixture.suspendMobileVpnService).not.toHaveBeenCalled()
+    for (const state of ['disconnected', 'connecting', 'authenticating', 'authorized']) {
+      fixture.managementState = state
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(session.getSnapshot()).toMatchObject({ vpnConnected: true, clientPaused: false, managementConnected: state === 'authorized', managementState: state })
+      expect(fixture.stopLocalClient).not.toHaveBeenCalled()
+      expect(fixture.suspendMobileVpnService).not.toHaveBeenCalled()
+      expect(fixture.initWebClient).not.toHaveBeenCalled()
+    }
     session.dispose()
   })
 

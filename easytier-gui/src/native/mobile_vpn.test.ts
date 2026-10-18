@@ -862,6 +862,95 @@ describe('Android VPN native boundaries', () => {
     expect(vpn.getMobileVpnError()).toBeUndefined()
   })
 
+  it('clears a recovered same-instance failure only after its replacement TUN is committed', async () => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    mocks.getLocalVpnStatus.mockImplementation(async () => mocks.getVpnStatus())
+    await vpn.onNetworkInstanceChange('A', { strict: true })
+    mocks.configs.get('A')!.routes = ['10.5.0.0/24']
+    mocks.setTunFd.mockRejectedValueOnce(new Error('fixture transient attachment failure'))
+    await vpn.onNetworkInstanceUpdate('A')
+    expect(vpn.getMobileVpnError()).toBe('vpn_tun_fd_failed')
+
+    let release!: () => void
+    mocks.setTunFd.mockImplementationOnce(async () => new Promise<void>(resolve => { release = resolve }))
+    const recovering = vpn.onNetworkInstanceUpdate('A')
+    await vi.waitFor(() => expect(mocks.setTunFd).toHaveBeenCalledTimes(3))
+    expect(vpn.getMobileVpnError()).toBe('vpn_tun_fd_failed')
+    release()
+    await recovering
+    expect(await vpn.observeMobileVpnService()).toBe(true)
+    expect(vpn.getMobileVpnError()).toBeUndefined()
+  })
+
+  it('retains a real failure when the replacement TUN is not committed', async () => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A', { strict: true })
+    mocks.configs.get('A')!.routes = ['10.5.0.0/24']
+    mocks.setTunFd.mockRejectedValueOnce(new Error('fixture first attachment failure'))
+    await vpn.onNetworkInstanceUpdate('A')
+    mocks.startVpn.mockResolvedValueOnce({ errorMsg: 'vpn_tun_start_failed' })
+    await vpn.onNetworkInstanceUpdate('A')
+    expect(vpn.getMobileVpnError()).toBe('vpn_tun_start_failed')
+  })
+
+  it('retains a stop failure until its cleanup and replacement TUN both succeed', async () => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A', { strict: true })
+    mocks.configs.get('A')!.routes = ['10.5.0.0/24']
+    mocks.stopVpn.mockResolvedValueOnce({ errorMsg: 'vpn_stop_failed' })
+    await expect(vpn.onNetworkInstanceUpdate('A')).rejects.toThrow('vpn_stop_failed')
+
+    let finishCleanup!: () => void
+    mocks.clearTunFd.mockImplementationOnce(async () => new Promise<void>(resolve => { finishCleanup = resolve }))
+    const recovering = vpn.onNetworkInstanceUpdate('A')
+    await vi.waitFor(() => expect(mocks.clearTunFd).toHaveBeenCalledOnce())
+    expect(mocks.startVpn).toHaveBeenCalledOnce()
+    expect(vpn.getMobileVpnError()).toBe('vpn_stop_failed')
+    finishCleanup()
+    await recovering
+    expect(mocks.startVpn).toHaveBeenCalledTimes(2)
+    expect(vpn.getMobileVpnError()).toBeUndefined()
+  })
+
+  it('ignores an old stop callback failure after the same-instance replacement owns the TUN', async () => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    mocks.getLocalVpnStatus.mockImplementation(async () => mocks.getVpnStatus())
+    await vpn.onNetworkInstanceChange('A', { strict: true })
+    const oldOwner = mocks.startVpn.mock.calls[0][0]
+    const stopped = { ...oldOwner, state: 'stopped', running: false, established: false }
+    mocks.getVpnStatus.mockResolvedValue(stopped)
+    let rejectOldDetach!: (error: Error) => void
+    mocks.clearTunFd.mockImplementationOnce(async () => new Promise<void>((_resolve, reject) => { rejectOldDetach = reject }))
+    const oldCallback = mocks.listeners.get('vpn_service_stop')!(stopped)
+    await vi.waitFor(() => expect(mocks.clearTunFd).toHaveBeenCalledOnce())
+
+    mocks.configs.get('A')!.routes = ['10.5.0.0/24']
+    await vpn.onNetworkInstanceUpdate('A')
+    expect(mocks.startVpn).toHaveBeenCalledTimes(2)
+    rejectOldDetach(new Error('fixture late old detach failure'))
+    await oldCallback
+    expect(await vpn.observeMobileVpnService()).toBe(true)
+    expect(vpn.getMobileVpnError()).toBeUndefined()
+  })
+
+  it('preserves a permission revocation when the current native cleanup fails', async () => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A', { strict: true })
+    const owner = mocks.startVpn.mock.calls[0][0]
+    const stopped = { ...owner, state: 'stopped', running: false, established: false, stopReason: 'system_revoked' }
+    mocks.getVpnStatus.mockResolvedValue(stopped)
+    mocks.clearTunFd.mockRejectedValueOnce(new Error('fixture current revoked detach failure'))
+    await expect(mocks.listeners.get('vpn_service_stop')!(stopped)).rejects.toThrow('vpn_stop_failed')
+    expect(vpn.getMobileVpnError()).toBe('vpn_permission_revoked')
+    await vpn.onNetworkInstanceUpdate('A')
+    expect(mocks.startVpn).toHaveBeenCalledOnce()
+  })
+
   it('clears the saved Core TUN owner only after native Stop is confirmed', async () => {
     setConfig('A'); setReady('A', '10.0.0.1')
     const vpn = await loadVpnModule()
