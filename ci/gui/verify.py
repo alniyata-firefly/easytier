@@ -66,15 +66,25 @@ def verify_wix_identity(text, properties, version):
     searches = root.findall('.//w:Property[@Id="INSTALLDIR"]/w:RegistrySearch', ns)
     registry = root.findall('.//w:RegistryKey', ns) + root.findall('.//w:RegistryValue', ns)
     expected_key = 'Software\\' + PUBLISHER + '\\' + LEGACY_PRODUCT
+    # Only fixed booleans/counts enter diagnostics; unexpected template values
+    # must never become raw configuration or path dumps in CI logs.
+    observed = json.dumps({'product_name_matches': product is not None and product.get('Name') == PRODUCT,
+                           'install_directory_matches': directory is not None and directory.get('Name') == LEGACY_PRODUCT,
+                           'install_search_count': len(searches),
+                           'matching_legacy_search_count': sum(item.get('Key') == expected_key for item in searches),
+                           'matching_legacy_registry_count': sum(item.get('Key') == expected_key for item in registry),
+                           'unexpanded_template_token_count': text.count('{{') + text.count('}}')}, sort_keys=True)
+    if '{{' in text or '}}' in text:
+        raise RuntimeError('MSI generated template contains unexpanded Handlebars placeholders; observed=' + observed)
     for item in [*searches, *registry]:
         if '\\\\' in item.get('Key', ''):
-            raise RuntimeError('MSI registry path contains doubled separators rejected by ICE03')
+            raise RuntimeError('MSI registry path contains doubled separators rejected by ICE03; observed=' + observed)
     if (product is None or product.get('Name') != PRODUCT
             or product.get('UpgradeCode', '').strip('{}').lower() != MSI_UPGRADE_CODE
             or directory is None or directory.get('Name') != LEGACY_PRODUCT
             or len(searches) != 2 or any(item.get('Key') != expected_key for item in searches)
             or not any(item.get('Key') == expected_key for item in registry)):
-        raise RuntimeError('MSI existing installation directory/registry compatibility is missing')
+        raise RuntimeError('MSI existing installation directory/registry compatibility is missing; observed=' + observed)
     shortcuts = root.findall('.//w:Shortcut', ns)
     if not shortcuts or any(LEGACY_PRODUCT in item.get('Name', '') for item in shortcuts):
         raise RuntimeError('MSI shortcuts still expose the internal application name')

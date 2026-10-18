@@ -34,6 +34,22 @@ escape backslashes. The focused native WiX diagnostic run 39106948256 reproduced
 `LGHT0204 / ICE03: Invalid registry path` for doubled separators in both its
 control and cleanup fixtures. The verifier rejects that exact regression.
 
+The eight legacy registry keys are literal `Software\kkrainbow\easytier-gui`;
+the publisher and install identity are already fixed by the CI input checks.
+A backslash immediately before `{{manufacturer}}` escapes the Handlebars
+expression instead of expanding it. Actual bundling at source `ef00e48d` exposed
+that bug and the strict identity verifier rejected the generated MSI template.
+The dynamic protocol path uses the XML entity `&#92;` before `{{protocol}}` so
+Handlebars expands the protocol and XML resolves exactly one path separator.
+
+The focused Windows diagnostic renders the complete source template through
+Handlebars 6.3.0 with `no_escape`, matching the official Tauri CLI 2.7.1 lock and
+renderer settings. It checks all eight legacy keys and a nonempty protocol,
+rejects a genuinely rendered escaped-expression negative control, and only then
+copies the rendered cleanup components into native candle/light fixtures.
+No ICE validation is disabled. The tiny renderer is compiled only in Windows CI;
+the application Rust workspace is not built for this diagnostic.
+
 `ci/gui/verify.py` checks the actual generated NSIS/WiX scripts, extracts and hashes
 the NSIS executable, and checks ProductName, Publisher and UpgradeCode from the real
 MSI database. The local tests exercise the validation gates with source templates

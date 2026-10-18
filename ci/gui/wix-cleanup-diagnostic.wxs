@@ -26,6 +26,10 @@
       <Component Id="DiagnosticPayload" Guid="*" Win64="yes">
         <File Id="Path" Source="$(var.PayloadPath)" KeyPath="yes" />
       </Component>
+      <Component Id="DiagnosticProtocol" Guid="*" Win64="yes">
+        <RegistryValue Root="HKLM" Key="@@PROTOCOL_REGISTRY_KEY@@" Name="URL Protocol"
+                       Type="string" Value="" KeyPath="yes" />
+      </Component>
     </DirectoryRef>
     <DirectoryRef Id="ApplicationProgramsFolder">
       <Component Id="ApplicationShortcut" Guid="*">
@@ -37,6 +41,7 @@
     </DirectoryRef>
     <Feature Id="MainProgram" Title="Diagnostic" Level="1">
       <ComponentRef Id="DiagnosticPayload" />
+      <ComponentRef Id="DiagnosticProtocol" />
       <ComponentRef Id="ApplicationShortcutDesktop" />
       <ComponentRef Id="ApplicationShortcut" />
       @@LEGACY_COMPONENT_REFS@@

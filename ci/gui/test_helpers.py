@@ -1,6 +1,7 @@
 """Small negative checks for the gate that prevents stale GUI payload releases."""
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ from unittest.mock import patch
 from prepare import BINARY, Head, MSI_UPGRADE_CODE, PRODUCT, verify_installer_config
 from frontend_assets import freeze_frontend
 from verify import native_assets, verify_nsis_identity, verify_wix_identity
-from diagnose_wix import render_fixture
+from diagnose_wix import render_fixture, validate_rendered_contract, validate_renderer_lock
 
 
 class InstallerBrandingTests(unittest.TestCase):
@@ -24,15 +25,16 @@ class InstallerBrandingTests(unittest.TestCase):
         cls.cargo = tomllib.loads((cls.source / 'easytier-gui/src-tauri/Cargo.toml').read_text())
         cls.nsis = (cls.source / 'easytier-gui/src-tauri/windows/installer.nsi').read_text()
         cls.wix = (cls.source / 'easytier-gui/src-tauri/windows/main.wxs').read_text()
-        # This substitutes the identity fields only; the real CLI renders and
-        # compiles these templates on Windows CI before the artifact verifier.
+        # Build XML identity fixtures only. These substitutions do not model
+        # Handlebars lexing; the Windows diagnostic uses the real pinned engine.
         fields = {'product_name': PRODUCT, 'main_binary_name': BINARY,
                   'bundle_id': 'com.kkrainbow.easytier', 'manufacturer': 'kkrainbow',
                   'version': '2.7.2', 'install_mode': 'currentUser', 'arch': 'x64',
-                  'upgrade_code': MSI_UPGRADE_CODE}
+                  'upgrade_code': MSI_UPGRADE_CODE, 'protocol': 'easytier-diagnostic'}
         for key, value in fields.items():
             cls.nsis = cls.nsis.replace('{{' + key + '}}', value)
             cls.wix = cls.wix.replace('{{' + key + '}}', value)
+        cls.wix = re.sub(r'{{.*?}}', '', cls.wix, flags=re.S)
         cls.properties = {'ProductName': PRODUCT, 'ProductVersion': '2.7.2',
                           'Manufacturer': 'kkrainbow', 'UpgradeCode': '{' + MSI_UPGRADE_CODE.upper() + '}',
                           'ProductCode': '{12345678-1234-4234-9234-123456789ABC}'}
@@ -85,12 +87,40 @@ class InstallerBrandingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'ICE03'):
             verify_wix_identity(invalid, self.properties, '2.7.2')
 
+    def test_actual_escaped_handlebars_regression_is_rejected_without_raw_values(self):
+        invalid = self.wix.replace('Software\\kkrainbow\\easytier-gui',
+                                   'Software{{manufacturer}}\\easytier-gui', 1)
+        with self.assertRaisesRegex(RuntimeError, 'unexpanded Handlebars') as caught:
+            verify_wix_identity(invalid, self.properties, '2.7.2')
+        self.assertIn('"matching_legacy_search_count": 1', str(caught.exception))
+        self.assertIn('"unexpanded_template_token_count": 2', str(caught.exception))
+        self.assertNotIn('Software{{manufacturer}}', str(caught.exception))
+
+    def test_diagnostic_checks_all_legacy_keys_and_real_protocol_boundary(self):
+        result = validate_rendered_contract(self.wix)
+        self.assertEqual(result['legacy_registry_key_count'], 8)
+        self.assertEqual(result['protocol_registry_key'], 'Software\\Classes\\easytier-diagnostic')
+        source = (self.source / 'easytier-gui/src-tauri/windows/main.wxs').read_text()
+        self.assertNotIn('Software\\{{manufacturer}}', source)
+        self.assertIn('Key="Software\\Classes&#92;{{protocol}}"', source)
+        with self.assertRaisesRegex(RuntimeError, 'identity differs'):
+            validate_rendered_contract(self.wix.replace('Classes&#92;easytier-diagnostic', 'Classes&#92;wrong-protocol'))
+
+    def test_diagnostic_renderer_rejects_any_drift_from_tauri_lock(self):
+        lock = (self.source / 'ci/gui/wix-template-renderer/Cargo.lock').read_text()
+        self.assertGreater(validate_renderer_lock(lock, lock), 2)
+        wrong_version = lock.replace('name = "handlebars"\nversion = "6.3.0"',
+                                     'name = "handlebars"\nversion = "6.3.1"')
+        self.assertNotEqual(lock, wrong_version)
+        with self.assertRaisesRegex(RuntimeError, 'outside the Tauri lock'):
+            validate_renderer_lock(lock, wrong_version)
+
     def test_native_wix_diagnostic_compares_same_base_and_original_cleanup_components(self):
         template = (self.source / 'easytier-gui/src-tauri/windows/main.wxs').read_text()
         fixture = (self.source / 'ci/gui/wix-cleanup-diagnostic.wxs').read_text()
         ns = {'w': 'http://schemas.microsoft.com/wix/2006/wi'}
-        control = ET.fromstring(render_fixture(template, fixture, False))
-        current = ET.fromstring(render_fixture(template, fixture, True))
+        control = ET.fromstring(render_fixture(self.wix, fixture, False))
+        current = ET.fromstring(render_fixture(self.wix, fixture, True))
         ids = lambda root: {item.get('Id') for item in root.findall('.//w:Component', ns)}
         self.assertEqual(ids(current) - ids(control), {'LegacyDesktopCleanup', 'LegacyStartMenuCleanup'})
         self.assertIsNotNone(control.find('.//w:RemoveFolder[@Id="DesktopFolder"]', ns))

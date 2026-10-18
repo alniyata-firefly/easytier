@@ -156,7 +156,7 @@ jobs:
         working-directory: easytier-gui
         run: |
           set -euo pipefail
-          pnpm exec tauri -vv build --ci --target "$GUI_TARGET" --bundles '${{ matrix.bundles }}' \
+          pnpm exec tauri build --ci --target "$GUI_TARGET" --bundles '${{ matrix.bundles }}' \
             --features custom-protocol --config "$GUI_WORK/tauri-ci.json" -- --locked
 
       - name: Validate optional Apple signing configuration
