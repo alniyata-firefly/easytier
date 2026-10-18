@@ -19,21 +19,33 @@ test('actual Web captures runtime logs with all sinks off and enforces fresh adm
     const directory = await mkdtemp(join(process.env.ET_NATIVE_E2E_OUTPUT || tmpdir(), 'server-logs-native-'));
     const database = join(directory, 'web.db');
     const ports = { api: await freePort(), config: await freePort() };
+    while (ports.config === ports.api) ports.config = await freePort();
     const base = `http://127.0.0.1:${ports.api}`;
     const processes = [];
     const hash = createHash('sha256');
     for await (const bytes of createReadStream(webBinary)) hash.update(bytes);
-    const proof = { scope: 'prebuilt Web, temporary SQLite, real loopback HTTP, console/file/RUST_LOG off, no managed Core', source_commit: process.env.ET_EXPECTED_SOURCE_COMMIT, binary_sha256: hash.digest('hex'), checks: [] };
+    const proof = { scope: 'prebuilt Web, temporary SQLite, real loopback HTTP, console/file/RUST_LOG off, no managed Core', source_commit: process.env.ET_EXPECTED_SOURCE_COMMIT, binary_sha256: hash.digest('hex'), fixture: { protocol: 'tcp', config_bind_addr: '127.0.0.1', gateway: false }, checks: [] };
     const check = name => { proof.checks.push({ name, status: 'PASS' }); };
     const launch = () => {
-        const web = startWeb(database, ports.api, ports.config, '127.0.0.1', { gateway: false, logLevel: 'off', extraArgs: ['--file-log-level', 'off'] });
+        // The namespace intentionally has no physical uplink. An explicit
+        // loopback listener exercises the real API without the production
+        // wildcard listener's physical-uplink selection policy.
+        const web = startWeb(database, ports.api, ports.config, '127.0.0.1', { configBindAddr: '127.0.0.1', gateway: false, logLevel: 'off', extraArgs: ['--file-log-level', 'off'] });
         processes.push(web);
         return web;
+    };
+    const ready = async (web, phase) => {
+        proof.phase = phase;
+        const result = await waitFor(async () => {
+            if (web.startupError() || web.child.exitCode !== null || web.child.signalCode !== null) return 'exited';
+            return await fetch(`${base}/auth/config`, { signal: AbortSignal.timeout(1000) }).then(response => response.ok) ? 'ready' : false;
+        }, phase);
+        assert.equal(result, 'ready', `${phase}: Web process exited before HTTP readiness`);
     };
     let web;
     try {
         web = launch();
-        await waitFor(() => fetch(`${base}/auth/config`).then(response => response.ok), 'Web schema bootstrap');
+        await ready(web, 'Web schema bootstrap');
         await stopWeb(web);
         const adminId = seedUser(database, 'log-operator', passwordHash);
         seedUser(database, 'log-viewer', passwordHash);
@@ -42,7 +54,7 @@ test('actual Web captures runtime logs with all sinks off and enforces fresh adm
             : "db.execute(\"DELETE FROM users_groups WHERE user_id=? AND group_id IN (SELECT id FROM groups WHERE name='admins')\",(sys.argv[2],))", [adminId]);
         setRole(true);
         web = launch();
-        await waitFor(() => fetch(`${base}/auth/config`).then(response => response.ok), 'Web after test account setup');
+        await ready(web, 'Web after test account setup');
         const anonymous = await fetch(`${base}/api/v1/server/logs`, { redirect: 'manual' });
         assert.ok([401, 302, 303].includes(anonymous.status));
         const bearerOnly = await fetch(`${base}/api/v1/server/logs`, { headers: { Authorization: `Bearer ${randomBytes(32).toString('hex')}` }, redirect: 'manual' });
@@ -96,7 +108,7 @@ test('actual Web captures runtime logs with all sinks off and enforces fresh adm
 
         await stopWeb(web);
         web = launch();
-        await waitFor(() => fetch(`${base}/auth/config`).then(response => response.ok), 'Web restart');
+        await ready(web, 'Web restart');
         const restarted = httpApi(base);
         await restarted.post('auth/login', { username: 'log-operator', password });
         const after = await restarted.get('server/logs');
@@ -110,6 +122,16 @@ test('actual Web captures runtime logs with all sinks off and enforces fresh adm
         proof.error = error.message;
         throw error;
     } finally {
+        // Keep failure diagnostics useful without publishing raw output or the
+        // temporary authentication database. Snapshot before cleanup signals.
+        proof.processes_before_cleanup = processes.map(item => ({
+            exit_code: item.child.exitCode,
+            signal_code: item.child.signalCode,
+            startup_error: Boolean(item.startupError()),
+            output_bytes: Buffer.byteLength(item.rawLogs()),
+            output_sha256: createHash('sha256').update(item.rawLogs()).digest('hex'),
+            config_listener_failure: item.rawLogs().includes('Cannot bind a configuration-server listener; check protocol, port and address-family support'),
+        }));
         for (const child of processes.slice().reverse()) await stopWeb(child);
         proof.processes_stopped = processes.every(child => child.child.exitCode !== null || child.child.signalCode !== null);
         await writeFile(join(directory, 'proof.json'), JSON.stringify(proof, null, 2), { mode: 0o600 });
