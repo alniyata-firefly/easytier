@@ -1,0 +1,45 @@
+<?define Win64 = "yes" ?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="EasyTier installer cleanup diagnostic" Language="1033"
+           Version="2.7.2" Manufacturer="kkrainbow"
+           UpgradeCode="f8a6cf4a-bdd8-5924-ac7e-aa00c156b9c1">
+    <Package Id="*" InstallerVersion="450" Compressed="yes" InstallScope="perMachine" />
+    <MajorUpgrade Schedule="afterInstallInitialize" AllowDowngrades="yes" />
+    <Media Id="1" Cabinet="diagnostic.cab" EmbedCab="yes" />
+    <InstallExecuteSequence>
+      <RemoveShortcuts>Installed AND NOT UPGRADINGPRODUCTCODE</RemoveShortcuts>
+    </InstallExecuteSequence>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="DesktopFolder" Name="Desktop">
+        @@LEGACY_DESKTOP_COMPONENT@@
+        @@APPLICATION_DESKTOP_COMPONENT@@
+      </Directory>
+      <Directory Id="ProgramFiles64Folder" Name="PFiles">
+        <Directory Id="INSTALLDIR" Name="easytier-gui" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="EasyTier" />
+        @@LEGACY_STARTMENU_DIRECTORY@@
+      </Directory>
+    </Directory>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="DiagnosticPayload" Guid="*" Win64="yes">
+        <File Id="Path" Source="$(var.PayloadPath)" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="*">
+        <Shortcut Id="ApplicationStartMenuShortcut" Name="EasyTier" Target="[!Path]" WorkingDirectory="INSTALLDIR" />
+        <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\kkrainbow\easytier-gui" Name="Start Menu Shortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <Feature Id="MainProgram" Title="Diagnostic" Level="1">
+      <ComponentRef Id="DiagnosticPayload" />
+      <ComponentRef Id="ApplicationShortcutDesktop" />
+      <ComponentRef Id="ApplicationShortcut" />
+      @@LEGACY_COMPONENT_REFS@@
+    </Feature>
+  </Product>
+</Wix>

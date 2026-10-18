@@ -25,7 +25,7 @@ class AndroidCiTests(unittest.TestCase):
     def test_application_and_launcher_labels_are_verified_and_recorded(self):
         badging = ("application-label:'EasyTier'\napplication-label-en:'EasyTier'\n"
                    "application-label-zh-CN:'EasyTier'\n"
-                   "launchable-activity: name='com.kkrainbow.easytier.MainActivity' label='EasyTier' icon=''\n")
+                   "launchable-activity: name='com.kkrainbow.easytier.MainActivity'  label='EasyTier' icon=''\n")
         proof = check_product_labels(badging)
         self.assertEqual(proof['product_name'], 'EasyTier')
         self.assertEqual(proof['application_label'], 'EasyTier')
@@ -38,6 +38,22 @@ class AndroidCiTests(unittest.TestCase):
                         "application-label:'EasyTier'\n", ""]:
             with self.subTest(badging=invalid), self.assertRaises(RuntimeError):
                 check_product_labels(invalid)
+
+    def test_launcher_label_accepts_aapt_horizontal_whitespace_and_reports_observed_identity(self):
+        for separator in [" ", "  ", "\t"]:
+            badging = ("application-label:'EasyTier'\n"
+                       "launchable-activity: name='com.kkrainbow.easytier.MainActivity'"
+                       + separator + "label='EasyTier' icon=''\n")
+            with self.subTest(separator=repr(separator)):
+                self.assertEqual(check_product_labels(badging)['launcher_label'], 'EasyTier')
+                with self.assertRaises(RuntimeError) as error:
+                    check_product_labels(badging.replace("label='EasyTier'", "label='EasyTier GUI'"))
+                observed = json.loads(str(error.exception).split(': ', 1)[1])
+                self.assertEqual(observed['observed'], [['com.kkrainbow.easytier.MainActivity', 'EasyTier GUI']])
+        with self.assertRaises(RuntimeError):
+            check_product_labels("application-label:'EasyTier'\n"
+                                 "launchable-activity: name='com.kkrainbow.easytier.MainActivity'\n"
+                                 "label='EasyTier' icon=''\n")
 
     def test_apk_identity_accepts_the_exact_adapted_release(self):
         check_package_identity(

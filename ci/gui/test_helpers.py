@@ -5,11 +5,13 @@ import subprocess
 import tempfile
 import unittest
 import uuid
+import xml.etree.ElementTree as ET
 from unittest.mock import patch
 
 from prepare import BINARY, Head, MSI_UPGRADE_CODE, PRODUCT, verify_installer_config
 from frontend_assets import freeze_frontend
 from verify import native_assets, verify_nsis_identity, verify_wix_identity
+from diagnose_wix import render_fixture
 
 
 class InstallerBrandingTests(unittest.TestCase):
@@ -75,6 +77,25 @@ class InstallerBrandingTests(unittest.TestCase):
                     self.wix.replace('kkrainbow\\\\easytier-gui', 'kkrainbow\\\\EasyTier')]:
             with self.assertRaisesRegex(RuntimeError, 'compatibility'):
                 verify_wix_identity(bad, self.properties, '2.7.2')
+
+    def test_native_wix_diagnostic_compares_same_base_and_original_cleanup_components(self):
+        template = (self.source / 'easytier-gui/src-tauri/windows/main.wxs').read_text()
+        fixture = (self.source / 'ci/gui/wix-cleanup-diagnostic.wxs').read_text()
+        ns = {'w': 'http://schemas.microsoft.com/wix/2006/wi'}
+        control = ET.fromstring(render_fixture(template, fixture, False))
+        current = ET.fromstring(render_fixture(template, fixture, True))
+        ids = lambda root: {item.get('Id') for item in root.findall('.//w:Component', ns)}
+        self.assertEqual(ids(current) - ids(control), {'LegacyDesktopCleanup', 'LegacyStartMenuCleanup'})
+        self.assertIsNotNone(control.find('.//w:RemoveFolder[@Id="DesktopFolder"]', ns))
+        self.assertIsNone(control.find('.//w:Directory[@Id="LegacyApplicationProgramsFolder"]', ns))
+        for identifier in ['LegacyDesktopCleanup', 'LegacyStartMenuCleanup']:
+            start = template.index('<Component Id="' + identifier + '"')
+            stop = template.index('</Component>', start) + len('</Component>')
+            original = ET.fromstring(template[start:stop].replace('{{manufacturer}}', 'kkrainbow'))
+            copied = current.find('.//w:Component[@Id="' + identifier + '"]', ns)
+            self.assertEqual(copied.attrib, original.attrib)
+            self.assertEqual([(item.tag.rsplit('}', 1)[-1], item.attrib, (item.text or '').strip()) for item in copied],
+                             [(item.tag, item.attrib, (item.text or '').strip()) for item in original])
 
 
 class PayloadGateTests(unittest.TestCase):

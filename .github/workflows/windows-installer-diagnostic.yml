@@ -1,0 +1,40 @@
+name: Diagnose Windows installer cleanup
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  wix-cleanup:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Enable the same MSI validation prerequisite as desktop CI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (!(Test-Path "$env:WINDIR\System32\vbscript.dll")) {
+            $feature = Get-WindowsCapability -Online | Where-Object { $_.Name -like 'VBSCRIPT*' } | Select-Object -First 1
+            if ($null -eq $feature) { throw 'VBScript is required by the Tauri WiX MSI toolchain' }
+            Add-WindowsCapability -Online -Name $feature.Name | Out-Null
+          }
+      - name: Compare real WiX control and current cleanup validation
+        shell: pwsh
+        run: python ci/gui/diagnose_wix.py --output "$env:RUNNER_TEMP/easytier-wix-cleanup-diagnostic"
+      - name: Preserve actual candle and light diagnostics
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: windows-wix-cleanup-diagnostic
+          path: ${{ runner.temp }}/easytier-wix-cleanup-diagnostic/reports/
+          if-no-files-found: warn
+          retention-days: 14

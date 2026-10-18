@@ -43,9 +43,13 @@ def check_product_labels(badging):
     labels = dict(re.findall(r"^(application-label(?:-[^:]+)?):'([^']*)'$", badging, re.M))
     check(labels.get("application-label") == "EasyTier" and all(value == "EasyTier" for value in labels.values()),
           "APK application labels must all be EasyTier")
-    launchers = re.findall(r"^launchable-activity: name='([^']+)' label='([^']*)'", badging, re.M)
-    check(launchers == [("com.kkrainbow.easytier.MainActivity", "EasyTier")],
-          "APK launcher label must be EasyTier and retain its Java namespace")
+    # The locked aapt separates name and label with two spaces. Accept its
+    # horizontal whitespace without allowing a match to cross activity lines.
+    launchers = re.findall(r"^launchable-activity:[ \t]+name='([^'\r\n]+)'[ \t]+label='([^'\r\n]*)'", badging, re.M)
+    expected = [("com.kkrainbow.easytier.MainActivity", "EasyTier")]
+    check(launchers == expected,
+          "APK launcher label must be EasyTier and retain its Java namespace: "
+          + json.dumps({"expected": expected, "observed": launchers}, ensure_ascii=False))
     return {"product_name": "EasyTier", "application_label": labels["application-label"],
             "application_labels": labels, "launcher_label": launchers[0][1]}
 

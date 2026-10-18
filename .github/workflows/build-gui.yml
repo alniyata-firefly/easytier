@@ -3,6 +3,10 @@ name: Build EasyTier desktop clients
 on:
   workflow_call:
     inputs:
+      wix-diagnostic-only:
+        description: Run only the small native Windows WiX cleanup diagnostic
+        type: boolean
+        default: false
       artifact-prefix:
         description: Prefix for the three platform artifact names
         type: string
@@ -26,6 +30,10 @@ on:
         required: false
   workflow_dispatch:
     inputs:
+      wix-diagnostic-only:
+        description: Run only the small native Windows WiX cleanup diagnostic, without Rust or app builds
+        type: boolean
+        default: false
       artifact-prefix:
         type: string
         default: gui
@@ -38,7 +46,12 @@ permissions:
   contents: read
 
 jobs:
+  wix-diagnostic:
+    if: inputs.wix-diagnostic-only
+    uses: ./.github/workflows/windows-installer-diagnostic.yml
+
   desktop:
+    if: ${{ !inputs.wix-diagnostic-only }}
     name: ${{ matrix.platform }}
     timeout-minutes: 180
     strategy:
@@ -143,7 +156,7 @@ jobs:
         working-directory: easytier-gui
         run: |
           set -euo pipefail
-          pnpm exec tauri build --ci --target "$GUI_TARGET" --bundles '${{ matrix.bundles }}' \
+          pnpm exec tauri -vv build --ci --target "$GUI_TARGET" --bundles '${{ matrix.bundles }}' \
             --features custom-protocol --config "$GUI_WORK/tauri-ci.json" -- --locked
 
       - name: Validate optional Apple signing configuration
@@ -198,4 +211,17 @@ jobs:
           name: ${{ inputs.artifact-prefix }}-${{ matrix.platform }}
           path: artifacts/gui/
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Preserve Windows installer diagnostics after a failed build
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: windows-installer-failure-diagnostic
+          path: |
+            target/x86_64-pc-windows-msvc/release/wix/**/*.wxs
+            target/x86_64-pc-windows-msvc/release/wix/**/*.wxl
+            target/x86_64-pc-windows-msvc/release/wix/**/*.wixobj
+            target/x86_64-pc-windows-msvc/release/nsis/**/*.nsi
+          if-no-files-found: warn
           retention-days: 14
