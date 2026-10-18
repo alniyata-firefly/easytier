@@ -37,7 +37,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/android16-vpn-service-exit-20261018'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:

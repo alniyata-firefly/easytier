@@ -187,6 +187,22 @@ def release_text(state):
     marker = f"<!-- verified-ci-promotion:{state['repository']}:{state['run_id']}:{state['source_commit']}:{state['tag']} -->"
     if profile == "android-web":
         marker = marker.removesuffix(" -->") + ":android-web -->"
+        if state['source_commit'] == '5fd7bb09f14aef5dc8fccb4325a58fad6dc6c9cd':
+            body = f"""{marker}
+保留应用版本 **{VERSION}** 的 Android VPN 修复预发布构建。
+
+源码提交：`{state['source_commit']}`。全部原始文件来自成功的 [Actions #{state['run_id']}](https://github.com/{state['repository']}/actions/runs/{state['run_id']})，本次发布不重新编译或重新签名。
+
+- 节点连通状态显示为“节点已连接”；系统 VPN 状态需通过原生 TUN 与 Core 归属校验，避免把节点握手误报为 VPN 已连接。
+- 修复停止流程中 Android 服务等待 Core 释放 TUN、应用又等待服务销毁的互相等待；停止请求成功后先释放对应 Core TUN，再确认原生服务停止。
+- 连接失败详情区分启动前查询、发起启动后的状态查询与 Core 绑定查询，保留安全阶段码和完整 Core 构建版本，不显示配置或凭据。
+- 同源 x86_64 调试包已通过 [Android 16 模拟器真实界面与系统 VPN 行为验证](https://github.com/alniyata-firefly/easytier/actions/runs/39098118587)：两轮连接/断开均确认系统 VPN 建立和移除。测试收尾时框架结束进程，系统记录确认正常 `EXIT_SELF(0)`；JUnit 未返回最终结果。
+- ARM64 签名 APK 已核验应用标识、原证书、嵌入 Core/前端、DEX 及 SHA-256。Core：`2.7.2-v2.7.2-14-g5fd7bb09`；应用 versionCode 保持 `2007003`。
+- **未进行 iQOO / OriginOS 6 或其他 Android 手机真机验收。** 模拟器结果不能证明手机首次状态查询超时已经解决，仍需安装后复测。
+
+附件包含 Android ARM64 APK、校验/验证报告与同源 Web 静态文件。安装前核对 `SHA256SUMS`；本次发布仅提供原始构建产物。
+"""
+            return f"EasyTier {VERSION} Android 16 VPN 修复预发布", body
         if state['source_commit'] != 'abc526b847f2539d175940c7ba5d65a5dee270e5':
             body = f"""{marker}
 保留应用版本 **{VERSION}** 的 Android / Web 修复构建。
