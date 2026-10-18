@@ -20,10 +20,10 @@ export function aggregateNetworkState(runningIds: string[], infos: Record<string
 
 export function networkConnectionStatus(state: NetworkConnectionState): { state: string; label: string } {
   switch (state) {
-    case 'connected': return { state: 'online', label: 'vpnConnected' };
+    case 'connected': return { state: 'online', label: 'networkConnected' };
     case 'running': return { state: 'running', label: 'running' };
     case 'failed': return { state: 'failed', label: 'networkFailed' };
-    case 'unknown': return { state: 'unknown', label: 'vpnUnknown' };
+    case 'unknown': return { state: 'unknown', label: 'networkUnknown' };
     default: return { state: 'offline', label: 'stopped' };
   }
 }

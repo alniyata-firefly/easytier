@@ -336,7 +336,7 @@ test('managed GUI distinguishes Core readiness, authentication, denial, and appr
       await page.goto(`http://127.0.0.1:${server.address().port}`);
       await waitIdle(page);
       const header = page.locator('.client-topbar .status');
-      const vpnLabel = platform === 'android' ? 'VPN 未连接' : 'VPN 已连接';
+      const vpnLabel = platform === 'android' ? 'VPN 未连接' : '节点已连接';
       await header.getByText(vpnLabel, { exact: true }).waitFor();
       const assertHeaderFits = async label => {
         await page.evaluate(() => document.fonts.ready);

@@ -46,6 +46,9 @@ test('Android failure details expose only safe translated stages and the complet
           if (command === 'easytier_version') return coreVersion;
           if (command === 'resume_local_client' && window.__DIAG_RAW_ERROR__)
             throw new Error('private-token-at-udp://private.invalid/secret');
+          if (command === 'plugin:vpnservice|get_vpn_status' && window.__DIAG_STATUS_REJECT__)
+            // eslint-disable-next-line prefer-promise-reject-errors -- Tauri plugin failures are serialized objects.
+            return Promise.reject({ code: 'NO_PLUGIN', message: 'private-token-at-udp://private.invalid/secret' });
           return original(command, args);
         };
       }, { locale, coreVersion });
@@ -66,6 +69,14 @@ test('Android failure details expose only safe translated stages and the complet
       await page.getByRole('button', { name: locale === 'en' ? 'Disconnect' : '断开', exact: true }).click();
       await connect().waitFor();
       assert.equal(await detail.count(), 0);
+      await page.evaluate(() => { window.__DIAG_STATUS_REJECT__ = true; });
+      await connect().click();
+      await detail.getByText('vpn_native_preflight_rejected', { exact: true }).waitFor();
+      assert.match(await detail.textContent(), locale === 'en' ? /before starting the system VPN/ : /启动系统 VPN 前的状态查询被拒绝/);
+      assert.doesNotMatch(await page.locator('body').textContent(), /private-token-at|private\.invalid|NO_PLUGIN/);
+      await page.evaluate(() => { window.__DIAG_STATUS_REJECT__ = false; });
+      await page.getByRole('button', { name: locale === 'en' ? 'Retry disconnecting' : '重试断开', exact: true }).click();
+      await connect().waitFor();
       await page.evaluate(() => { window.__DIAG_RAW_ERROR__ = true; });
       await connect().click();
       await detail.getByText('vpn_start_failed', { exact: true }).waitFor();

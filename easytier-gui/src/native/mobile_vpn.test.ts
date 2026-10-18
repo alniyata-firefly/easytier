@@ -1261,6 +1261,7 @@ describe('Android VPN native boundaries', () => {
 
   it.each([
     ['Core TUN installation timed out', 'vpn_core_install_timeout'],
+    ['VPN status query timed out', 'vpn_core_status_timeout'],
     ['TUN descriptor is no longer available', 'vpn_tun_descriptor_unavailable'],
     ['TUN Core instance was replaced', 'vpn_core_instance_replaced'],
   ])('retains a safe diagnostic for %s through failed-start cleanup and clears it after recovery', async (message, diagnostic) => {
@@ -1327,7 +1328,7 @@ describe('Android VPN native boundaries', () => {
     await vi.advanceTimersByTimeAsync(200)
     expect(outcome).toBe('vpn_start_timeout')
     await starting
-    expect(vpn.getMobileVpnFailureCode()).toBe('vpn_core_status_timeout')
+    expect(vpn.getMobileVpnFailureCode()).toBe('vpn_native_confirmation_timeout')
     expect(mocks.setTunFd).toHaveBeenCalledOnce()
     expect(mocks.stopVpn).toHaveBeenCalledOnce()
     expect(vi.getTimerCount()).toBe(0)
@@ -1349,6 +1350,78 @@ describe('Android VPN native boundaries', () => {
     await syncing
     expect(mocks.startVpn).not.toHaveBeenCalled()
     expect(mocks.setTunFd).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each(['preflight', 'start_status', 'confirmation'] as const)('distinguishes rejected IPC from a missing reply during %s without exposing native text', async phase => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    const rejectStatus = () => mocks.getVpnStatus.mockRejectedValue({
+      code: 'COMMAND_FAILED', message: 'udp://private.invalid:22020/SECRET_MUST_NOT_ESCAPE',
+    })
+    if (phase === 'preflight') rejectStatus()
+    else if (phase === 'start_status') mocks.startVpn.mockImplementationOnce(async request => {
+      await nativeEstablished(request)
+      rejectStatus()
+      return {}
+    })
+    else mocks.setTunFd.mockImplementationOnce(async () => { rejectStatus() })
+    const starting = vpn.onNetworkInstanceChange('A', { strict: true }).catch(error => error)
+    await vi.advanceTimersByTimeAsync(18100)
+    const error = await starting
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toBe(phase === 'preflight' ? 'vpn_start_failed' : 'vpn_start_timeout')
+    expect(vpn.getMobileVpnFailureCode(error)).toBe(`vpn_native_${phase}_rejected`)
+    expect(vpn.getMobileVpnFailureCode()).toBe(`vpn_native_${phase}_rejected`)
+    expect(JSON.stringify(error)).not.toMatch(/private\.invalid|SECRET_MUST_NOT_ESCAPE/)
+    expect(mocks.startVpn).toHaveBeenCalledTimes(phase === 'preflight' ? 0 : 1)
+    expect(mocks.setTunFd).toHaveBeenCalledTimes(phase === 'confirmation' ? 1 : 0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each(['preflight', 'start_status'] as const)('identifies a missing %s reply before Core attachment', async phase => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    if (phase === 'preflight') mocks.getVpnStatus.mockImplementation(() => new Promise(() => {}))
+    else mocks.startVpn.mockImplementationOnce(async request => {
+      await nativeEstablished(request)
+      mocks.getVpnStatus.mockImplementation(() => new Promise(() => {}))
+      return {}
+    })
+    const starting = vpn.onNetworkInstanceChange('A', { strict: true }).catch(error => error)
+    await vi.advanceTimersByTimeAsync(18100)
+    const error = await starting
+    expect(error.message).toBe('vpn_start_timeout')
+    expect(vpn.getMobileVpnFailureCode(error)).toBe(`vpn_native_${phase}_timeout`)
+    expect(mocks.setTunFd).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('retains a preflight IPC diagnostic when sync fails before selecting a JS owner', async () => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    mocks.listNetworkInstanceIds.mockResolvedValue({ running_inst_ids: ['A'] })
+    const vpn = await loadVpnModule()
+    mocks.getVpnStatus.mockRejectedValue({ code: 'NO_PLUGIN', message: 'private native text' })
+    const error = await vpn.syncMobileVpnService({ strict: true, preferredInstanceId: 'A' }).catch(error => error)
+    expect(vpn.getMobileVpnError()).toBeUndefined()
+    expect(vpn.getMobileVpnFailureCode(error)).toBe('vpn_native_preflight_rejected')
+    expect(mocks.startVpn).not.toHaveBeenCalled()
+    expect(mocks.setTunFd).not.toHaveBeenCalled()
+  })
+
+  it('reports a later hung confirmation instead of an earlier transient rejection', async () => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    mocks.setTunFd.mockImplementationOnce(async () => {
+      mocks.getVpnStatus.mockRejectedValueOnce('temporary rejection')
+        .mockImplementationOnce(() => new Promise(() => {}))
+    })
+    const starting = vpn.onNetworkInstanceChange('A', { strict: true }).catch(error => error)
+    await vi.advanceTimersByTimeAsync(18100)
+    const error = await starting
+    expect(vpn.getMobileVpnFailureCode(error)).toBe('vpn_native_confirmation_timeout')
+    expect(mocks.setTunFd).toHaveBeenCalledOnce()
+    expect(mocks.stopVpn).toHaveBeenCalledOnce()
     expect(vi.getTimerCount()).toBe(0)
   })
 

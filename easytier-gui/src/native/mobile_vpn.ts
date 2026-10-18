@@ -275,7 +275,9 @@ function assertCurrentRequest(request: VpnRequest) {
   if (!isCurrentRequest(request)) throw new Error('vpn_request_canceled')
 }
 
-function readNativeVpnStatus(deadline: number, timeoutCode: string, assertCurrent?: () => void): Promise<VpnStatusResponse | null> {
+type NativeStatusPhase = 'status' | 'preflight' | 'start_status' | 'confirmation'
+
+function readNativeVpnStatus(deadline: number, timeoutCode: string, assertCurrent?: () => void, phase: NativeStatusPhase = 'status'): Promise<VpnStatusResponse | null> {
   return new Promise((resolve, reject) => {
     let settled = false
     let timer: ReturnType<typeof setTimeout>
@@ -289,7 +291,7 @@ function readNativeVpnStatus(deadline: number, timeoutCode: string, assertCurren
       try { assertCurrent?.() }
       catch (error) { finish(() => reject(error)); return }
       if (Date.now() >= deadline) {
-        finish(() => reject(new MobileVpnOperationError(timeoutCode, 'vpn_core_status_timeout')))
+        finish(() => reject(new MobileVpnOperationError(timeoutCode, `vpn_native_${phase}_timeout`)))
         return
       }
       timer = setTimeout(check, Math.min(100, deadline - Date.now()))
@@ -299,7 +301,12 @@ function readNativeVpnStatus(deadline: number, timeoutCode: string, assertCurren
     timer = setTimeout(check, Math.max(0, Math.min(100, deadline - Date.now())))
     Promise.resolve().then(get_vpn_status).then(
       status => finish(() => resolve(status)),
-      error => finish(() => reject(error)),
+      // A completed IPC rejection is different from a call which never replies.
+      // Only a fixed category crosses into diagnostics; native text may be private.
+      () => finish(() => reject(new MobileVpnOperationError(
+        timeoutCode === 'vpn_stop_timeout' ? 'vpn_stop_status_unavailable' : 'vpn_start_failed',
+        `vpn_native_${phase}_rejected`,
+      ))),
     )
   })
 }
@@ -310,10 +317,10 @@ async function waitForNativeStart(request: VpnRequest) {
   while (true) {
     assertCurrentRequest(request)
     let status: VpnStatusResponse | null
-    try { status = await readNativeVpnStatus(deadline, 'vpn_start_timeout', () => assertCurrentRequest(request)) }
-    catch {
+    try { status = await readNativeVpnStatus(deadline, 'vpn_start_timeout', () => assertCurrentRequest(request), attachedFd === undefined ? 'start_status' : 'confirmation') }
+    catch (error) {
       assertCurrentRequest(request)
-      if (Date.now() >= deadline) throw new MobileVpnOperationError('vpn_start_timeout', 'vpn_core_status_timeout')
+      if (Date.now() >= deadline) throw operationError('vpn_start_timeout', error)
       await new Promise(resolve => setTimeout(resolve, 100))
       continue
     }
@@ -394,7 +401,7 @@ async function doStartVpn(instanceId: string, generation: number, ipv4Addr: stri
   const assertSelected = () => {
     if (!isCurrentVpnReconcile(instanceId, generation) || vpnServiceSuspended) throw new Error('vpn_request_canceled')
   }
-  const existing = await readNativeVpnStatus(Date.now() + VPN_TRANSITION_TIMEOUT_MS, 'vpn_start_timeout', assertSelected)
+  const existing = await readNativeVpnStatus(Date.now() + VPN_TRANSITION_TIMEOUT_MS, 'vpn_start_timeout', assertSelected, 'preflight')
   assertSelected()
   if (existing?.state !== 'stopped' || existing.running || tunRequestToClear) await doStopVpn(true)
   if (!isCurrentVpnReconcile(instanceId, generation) || vpnServiceSuspended) throw new Error('vpn_request_canceled')
@@ -897,7 +904,7 @@ export async function syncMobileVpnService(options: { strict?: boolean; preferre
   }
   const instanceId = await findRunningTunInstanceId(options.preferredInstanceId)
   assertSelected()
-  const status = await readNativeVpnStatus(Date.now() + VPN_TRANSITION_TIMEOUT_MS, 'vpn_start_timeout', assertSelected)
+  const status = await readNativeVpnStatus(Date.now() + VPN_TRANSITION_TIMEOUT_MS, 'vpn_start_timeout', assertSelected, 'preflight')
   assertSelected()
   syncVpnStatusFromNative(status)
   if (instanceId) {
@@ -917,8 +924,9 @@ export function getMobileVpnError(): string | undefined {
   return mobileVpnError?.code
 }
 
-export function getMobileVpnFailureCode(): string | undefined {
-  return mobileVpnError?.failureCode ?? mobileVpnError?.code
+export function getMobileVpnFailureCode(error?: unknown): string | undefined {
+  return (error instanceof MobileVpnOperationError ? error.failureCode : undefined)
+    ?? mobileVpnError?.failureCode ?? mobileVpnError?.code
 }
 
 export async function initMobileManagementService(): Promise<void> {

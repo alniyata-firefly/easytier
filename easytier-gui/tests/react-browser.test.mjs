@@ -309,10 +309,10 @@ for (const scenario of [
       await management.getByText('管理服务器认证通过', { exact: true }).waitFor();
     }
     await page.evaluate(() => { window.__MOCK_NO_PEERS__ = false; });
-    await header.getByText('VPN 已连接', { exact: true }).waitFor();
+    await header.getByText('节点已连接', { exact: true }).waitFor();
     const connectedColor = await expectStateColor(header, 'online', '--success');
     await page.evaluate(() => { window.__MOCK_FAIL_RUNTIME_INFO__ = true; });
-    await header.getByText('VPN 状态未知', { exact: true }).waitFor();
+    await header.getByText('节点状态未知', { exact: true }).waitFor();
     const unknownColor = await expectStateColor(header, 'unknown', '--muted');
     assert.equal(new Set([runningColor, connectedColor, unknownColor]).size, 3);
     await page.evaluate(() => { window.__MOCK_FAIL_RUNTIME_INFO__ = false; window.__MOCK_NO_PEERS__ = true; });

@@ -43,6 +43,10 @@ export const VPN_FAILURE_CODES = [
   'vpn_core_install_timeout', 'vpn_core_install_failed', 'vpn_core_cleanup_pending', 'vpn_core_cleanup_failed',
   'vpn_core_status_timeout', 'vpn_tun_descriptor_unavailable', 'vpn_core_instance_replaced',
   'vpn_core_unavailable', 'vpn_tun_request_stale',
+  'vpn_native_status_timeout', 'vpn_native_status_rejected',
+  'vpn_native_preflight_timeout', 'vpn_native_preflight_rejected',
+  'vpn_native_start_status_timeout', 'vpn_native_start_status_rejected',
+  'vpn_native_confirmation_timeout', 'vpn_native_confirmation_rejected',
 ] as const
 export type VpnFailureCode = typeof VPN_FAILURE_CODES[number]
 export function normalizeVpnFailureCode(value: unknown): VpnFailureCode | undefined {

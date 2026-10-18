@@ -1,0 +1,80 @@
+name: Android real IPC smoke
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-ipc-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android-ipc-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check instrumentation driver without native compilation
+        run: |
+          python3 -m unittest discover -s ci/android -p 'test_smoke.py'
+          node --check ci/android/ipc-smoke.js
+
+      - name: Install build dependencies and enable runner KVM access
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential clang libclang-dev mold pkg-config
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0 ndk;26.0.10792818 emulator system-images;android-34;google_apis;x86_64'
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: '1.95'
+          target: x86_64-linux-android
+          cache: false
+          rustflags: ''
+
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: '35.1'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: ./.github/actions/setup-frontend
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          prefix-key: android-ipc-smoke-crates
+          cache-targets: false
+
+      - name: Build isolated x86_64 debug app and instrumentation once
+        run: python3 ci/android/smoke.py --phase build --source . --output "$RUNNER_TEMP/android-ipc-smoke"
+
+      - name: Run actual MainActivity WebView and Android VPN lifecycle
+        run: python3 ci/android/smoke.py --phase run --source . --output "$RUNNER_TEMP/android-ipc-smoke"
+
+      - name: Upload test evidence only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-ipc-smoke-evidence
+          path: ${{ runner.temp }}/android-ipc-smoke/reports/
+          if-no-files-found: warn
+          retention-days: 7

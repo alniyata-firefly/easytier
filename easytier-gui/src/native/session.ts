@@ -64,7 +64,7 @@ export class NativeSession {
   }
   private captureVpnFailure(error?: unknown, fallback: VpnFailureCode = 'vpn_start_failed') {
     if (this.snapshot.platform !== 'android') return
-    const code = normalizeVpnFailureCode(getMobileVpnFailureCode()) ?? normalizeVpnFailureCode(getMobileVpnError())
+    const code = normalizeVpnFailureCode(getMobileVpnFailureCode(error)) ?? normalizeVpnFailureCode(getMobileVpnError())
       ?? normalizeVpnFailureCode(error instanceof Error ? error.message : error) ?? fallback
     this.patch({ vpnFailureCode: code })
   }
