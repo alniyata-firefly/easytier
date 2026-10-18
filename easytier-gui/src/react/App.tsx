@@ -5,6 +5,7 @@ import { Alert, Button, Dialog, Empty, Field, Icon, BrandMark, LanguageSwitch, P
 import { RuntimePanel } from './components/RuntimePanel';
 import { supportsUplinkSelectionForTarget } from './lib/uplink-capabilities';
 import { aggregateNetworkState, clientConnectionStatus, networkConnectionState, networkConnectionStatus } from './lib/management-status';
+import { normalizeVpnFailureCode } from '../native/types';
 const NetworkEditor = lazy(() => import('./components/NetworkEditor').then(module => ({ default: module.NetworkEditor })));
 const SettingsPanel = lazy(() => import('./components/SettingsPanel').then(module => ({ default: module.SettingsPanel })));
 
@@ -14,6 +15,7 @@ export function App() {
   const [session] = useState(() => new NativeSession());
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot), client = session.remoteClient;
   const localAndroid = snapshot.platform === 'android' && snapshot.mode.mode === 'normal';
+  const vpnFailureCode = localAndroid ? normalizeVpnFailureCode(snapshot.vpnFailureCode) : undefined;
   const retryDisconnect = snapshot.vpnStopIncomplete || snapshot.errorCode === 'client_stop_failed';
   const disconnectVpn = retryDisconnect || !snapshot.clientPaused;
   const canManageConfigs = snapshot.connected || snapshot.mode.mode === 'normal';
@@ -76,7 +78,7 @@ export function App() {
     <header className="client-topbar"><a className="client-brand" href="#" onClick={event => { event.preventDefault(); setPage('networks'); }}><span className="brand-mark"><BrandMark size={24}/></span>EasyTier</a><span className="desktop-version">{snapshot.version}</span><div className="client-topbar-actions"><Status state={connectionStatus.state} label={t(connectionStatus.label)}/><LanguageSwitch/></div></header>
     <nav className="client-navigation" aria-label="EasyTier"><Button icon="network" tone={page === 'networks' ? 'primary' : 'ghost'} onClick={() => setPage('networks')}>{t('networks')}</Button><Button icon="settings" tone={page === 'settings' ? 'primary' : 'ghost'} onClick={() => setPage('settings')}>{t('settings')}</Button></nav>
     <main className="client-workspace">
-      {snapshot.errorCode && <Alert tone="error">{t(snapshot.errorCode === 'config_server_credentials_required' ? 'legacyCredentials' : snapshot.errorCode === 'client_stop_failed' ? 'clientStopFailed' : snapshot.errorCode === 'client_start_failed' ? 'clientStartFailed' : snapshot.errorCode === 'vpn_no_network' ? 'vpnNoNetwork' : snapshot.errorCode === 'vpn_permission_revoked' ? 'vpnPermissionRevoked' : snapshot.errorCode === 'vpn_connection_timeout' ? 'vpnConnectionTimeout' : 'nativeError')}</Alert>}
+      {(snapshot.errorCode || vpnFailureCode) && <Alert tone="error"><span>{t(snapshot.errorCode === 'config_server_credentials_required' ? 'legacyCredentials' : snapshot.errorCode === 'client_stop_failed' ? 'clientStopFailed' : snapshot.errorCode === 'client_start_failed' || !snapshot.errorCode ? 'clientStartFailed' : snapshot.errorCode === 'vpn_no_network' ? 'vpnNoNetwork' : snapshot.errorCode === 'vpn_permission_revoked' ? 'vpnPermissionRevoked' : snapshot.errorCode === 'vpn_connection_timeout' ? 'vpnConnectionTimeout' : 'nativeError')}</span>{vpnFailureCode && <div className="entity-secondary" data-testid="vpn-failure-detail">{t('vpnFailureStage')}: {t(`vpnFailureStages.${vpnFailureCode}`)} · <code>{vpnFailureCode}</code> · Core <code>{snapshot.version || t('resourceUnavailable')}</code></div>}</Alert>}
       {page === 'settings' ? <Suspense fallback={<div className="loading">{t('common:busy')}</div>}><SettingsPanel session={session} snapshot={snapshot}/></Suspense> : <>
         <div className="page-heading"><h1>{t('networks')}</h1><div className="actions">{localAndroid && <Button icon={disconnectVpn ? 'pause' : 'play'} busy={snapshot.busy} onClick={() => void (disconnectVpn ? session.stopLocalClient() : session.startLocalClient()).catch(() => {})}>{t(retryDisconnect ? 'retryStopClient' : disconnectVpn ? 'stopClient' : 'startClient')}</Button>}<Button icon="refresh" busy={busy || snapshot.busy} onClick={refresh}>{t('refresh')}</Button><Button icon="download" disabled={!canManageConfigs || busy || snapshot.busy} onClick={() => { setImporting(true); setImportError(false); }}>{t('import')}</Button><Button icon="plus" disabled={!canManageConfigs || busy || snapshot.busy} onClick={() => void openEditor()}>{t('newNetwork')}</Button></div></div>
         {!canManageConfigs ? <Panel><Empty title={t(snapshot.clientPaused ? 'clientPaused' : 'disconnected')} action={snapshot.clientPaused ? snapshot.errorCode === 'client_stop_failed' ? <Button busy={snapshot.busy} onClick={() => void session.stopLocalClient().catch(() => {})}>{t('retryStopClient')}</Button> : undefined : <Button busy={snapshot.busy} onClick={() => void session.reconnect().catch(() => notice(t('nativeError'), 'error'))}>{t('retry')}</Button>}/></Panel> : <div className="client-network-layout">

@@ -162,5 +162,32 @@
   "retryStopClient": "重试断开",
   "clientStopFailed": "VPN 尚未完全断开，请重试。管理连接和配置已保留。",
   "clientStartFailed": "VPN 连接失败，请检查后重试。",
-  "networkFailed": "组网异常"
+  "networkFailed": "组网异常",
+  "vpnFailureStage": "失败阶段",
+  "vpnFailureStages": {
+    "vpn_permission_denied": "VPN 授权未通过",
+    "vpn_permission_revoked": "系统已撤销 VPN 权限",
+    "vpn_tun_fd_failed": "TUN 与 Core 附着失败",
+    "vpn_foreground_start_failed": "Android 前台服务启动失败",
+    "vpn_tun_start_failed": "Android VPN 接口创建失败",
+    "vpn_service_busy": "Android VPN 服务仍忙碌",
+    "vpn_start_timeout": "等待 Android VPN 接口启动超时",
+    "vpn_stop_timeout": "等待 Android VPN 服务停止超时",
+    "vpn_stop_status_unavailable": "无法确认 Android VPN 服务停止状态",
+    "vpn_stop_failed": "VPN 接口或 Core 清理失败",
+    "vpn_instance_failed": "Core 网络实例启动失败",
+    "vpn_no_network": "尚未取得可连接的网络",
+    "vpn_start_failed": "VPN 启动阶段失败",
+    "vpn_connection_timeout": "等待 VPN 就绪超时",
+    "vpn_listener_failed": "VPN 事件监听初始化失败",
+    "vpn_core_install_timeout": "Core 安装 TUN 超时",
+    "vpn_core_install_failed": "Core 安装 TUN 失败",
+    "vpn_core_cleanup_pending": "上一次 Core TUN 清理仍在进行",
+    "vpn_core_cleanup_failed": "Core TUN 清理失败",
+    "vpn_core_status_timeout": "查询 Android VPN 状态超时",
+    "vpn_tun_descriptor_unavailable": "Android TUN 描述符已失效",
+    "vpn_core_instance_replaced": "Core 网络实例已更换",
+    "vpn_core_unavailable": "Core 网络实例尚未就绪",
+    "vpn_tun_request_stale": "TUN 请求已被替换"
+  }
 }

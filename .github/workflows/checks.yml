@@ -69,8 +69,8 @@ jobs:
           pnpm --dir easytier-gui exec node --test --test-concurrency=1 tests/react-browser.test.mjs tests/runtime-metadata.browser.test.mjs tests/runtime-routes.browser.test.mjs
       - name: Verify local configurations without a running client
         run: pnpm --dir easytier-gui exec node --test --test-concurrency=1 tests/local-config-offline-browser.test.mjs
-      - name: Verify management authentication independently of local client state
-        run: pnpm --dir easytier-gui exec node --test --test-concurrency=1 tests/management-auth-browser.test.mjs
+      - name: Verify Android management authentication and VPN failure diagnosis
+        run: pnpm --dir easytier-gui exec node --test --test-concurrency=1 tests/management-auth-browser.test.mjs tests/vpn-failure-browser.test.mjs
   runtime:
     name: Focused Rust runtime and controller regressions
     runs-on: ubuntu-24.04

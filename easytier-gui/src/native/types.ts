@@ -35,6 +35,20 @@ export interface RemoteMode extends ManagementConfiguration {
 export type Mode = NormalMode | ServiceMode | RemoteMode
 export interface ConfigServerCredentials { address: string; token: string }
 export type ManagementConnectionState = 'disconnected' | 'connecting' | 'authenticating' | 'authorized' | 'rejected' | 'pending_approval' | 'unknown'
+export const VPN_FAILURE_CODES = [
+  'vpn_permission_denied', 'vpn_permission_revoked', 'vpn_tun_fd_failed', 'vpn_foreground_start_failed',
+  'vpn_tun_start_failed', 'vpn_service_busy', 'vpn_start_timeout', 'vpn_stop_timeout',
+  'vpn_stop_status_unavailable', 'vpn_stop_failed', 'vpn_instance_failed', 'vpn_no_network',
+  'vpn_start_failed', 'vpn_connection_timeout', 'vpn_listener_failed',
+  'vpn_core_install_timeout', 'vpn_core_install_failed', 'vpn_core_cleanup_pending', 'vpn_core_cleanup_failed',
+  'vpn_core_status_timeout', 'vpn_tun_descriptor_unavailable', 'vpn_core_instance_replaced',
+  'vpn_core_unavailable', 'vpn_tun_request_stale',
+] as const
+export type VpnFailureCode = typeof VPN_FAILURE_CODES[number]
+export function normalizeVpnFailureCode(value: unknown): VpnFailureCode | undefined {
+  return typeof value === 'string' && (VPN_FAILURE_CODES as readonly string[]).includes(value)
+    ? value as VpnFailureCode : undefined
+}
 export interface SessionSnapshot {
   platform: string
   version: string
@@ -46,6 +60,7 @@ export interface SessionSnapshot {
   vpnConnected: boolean
   vpnTransition?: 'connecting' | 'disconnecting'
   vpnStopIncomplete?: boolean
+  vpnFailureCode?: VpnFailureCode
   serviceStatus: ServiceStatus
   busy: boolean
   errorCode?: string

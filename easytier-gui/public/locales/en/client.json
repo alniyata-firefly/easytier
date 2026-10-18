@@ -162,5 +162,32 @@
   "retryStopClient": "Retry disconnecting",
   "clientStopFailed": "The VPN has not completely disconnected. Retry; management and saved configuration are retained.",
   "clientStartFailed": "The VPN could not connect. Check and retry.",
-  "networkFailed": "Network failed"
+  "networkFailed": "Network failed",
+  "vpnFailureStage": "Failure stage",
+  "vpnFailureStages": {
+    "vpn_permission_denied": "VPN permission was not granted",
+    "vpn_permission_revoked": "Android revoked VPN permission",
+    "vpn_tun_fd_failed": "TUN attachment to Core failed",
+    "vpn_foreground_start_failed": "Android foreground service failed to start",
+    "vpn_tun_start_failed": "Android VPN interface creation failed",
+    "vpn_service_busy": "Android VPN service is busy",
+    "vpn_start_timeout": "Android VPN interface start timed out",
+    "vpn_stop_timeout": "Android VPN service stop timed out",
+    "vpn_stop_status_unavailable": "Android VPN stop status is unavailable",
+    "vpn_stop_failed": "VPN interface or Core cleanup failed",
+    "vpn_instance_failed": "Core network instance failed to start",
+    "vpn_no_network": "No connectable network is available yet",
+    "vpn_start_failed": "VPN startup failed",
+    "vpn_connection_timeout": "VPN readiness timed out",
+    "vpn_listener_failed": "VPN event listener initialization failed",
+    "vpn_core_install_timeout": "Core TUN installation timed out",
+    "vpn_core_install_failed": "Core TUN installation failed",
+    "vpn_core_cleanup_pending": "Previous Core TUN cleanup is still pending",
+    "vpn_core_cleanup_failed": "Core TUN cleanup failed",
+    "vpn_core_status_timeout": "Android VPN status query timed out",
+    "vpn_tun_descriptor_unavailable": "Android TUN descriptor is no longer available",
+    "vpn_core_instance_replaced": "Core network instance was replaced",
+    "vpn_core_unavailable": "Core network instance is not ready",
+    "vpn_tun_request_stale": "TUN request was superseded"
+  }
 }

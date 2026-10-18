@@ -1,11 +1,11 @@
 import { type as osType } from '@tauri-apps/plugin-os'
 import * as Utils from '../../../easytier-web/frontend-lib/src/modules/utils'
-import type { Mode, ServiceMode, ServiceOptions, SessionSnapshot } from './types'
+import { normalizeVpnFailureCode, type Mode, type ServiceMode, type ServiceOptions, type SessionSnapshot, type VpnFailureCode } from './types'
 import * as backend from './backend'
 import { listenGlobalEvents } from './events'
 import { loadEnabledNetworks, loadMode, loadStoredConfigs, saveMode, loadLastNetworkInstanceId, saveLastNetworkInstanceId, saveLocalClientPaused } from './storage'
 import { applyServiceConfiguration, ServiceConfigurationError } from './service_configuration'
-import { consumePendingMobileVpnTileAction, disposeMobileVpnService, getMobileVpnError, initMobileVpnService, initMobileManagementService, observeMobileVpnService, setMobileVpnTileActionHandler, syncMobileVpnService, suspendMobileVpnService, resumeMobileVpnService, isMobileVpnConnected, waitForMobileVpnInstance } from './mobile_vpn'
+import { cancelPendingMobileVpnStart, consumePendingMobileVpnTileAction, disposeMobileVpnService, getMobileVpnError, getMobileVpnFailureCode, initMobileVpnService, initMobileManagementService, observeMobileVpnService, setMobileVpnTileActionHandler, syncMobileVpnService, suspendMobileVpnService, resumeMobileVpnService, isMobileVpnConnected, waitForMobileVpnInstance } from './mobile_vpn'
 import { executeVpnTileAction } from './mobile_vpn_tile'
 import { GUIRemoteClient } from './client'
 import { supportsUplinkSelectionForOs } from '../../../easytier-web/frontend-lib/src/modules/uplinkCapabilities'
@@ -33,6 +33,7 @@ export class NativeSession {
   private vpnConnectionDeadline?: number
   private persistLocal = false
   private generation = 0
+  private vpnIntentRevision = 0
   private reconnectAttempts = 0
   private retryAt = 0
   private configurationClient?: { mode: Mode; connected: boolean; client: GUIRemoteClient }
@@ -61,6 +62,12 @@ export class NativeSession {
     this.snapshot = { ...this.snapshot, ...update, revision: this.snapshot.revision + 1 }
     this.subscribers.forEach(listener => listener())
   }
+  private captureVpnFailure(error?: unknown, fallback: VpnFailureCode = 'vpn_start_failed') {
+    if (this.snapshot.platform !== 'android') return
+    const code = normalizeVpnFailureCode(getMobileVpnFailureCode()) ?? normalizeVpnFailureCode(getMobileVpnError())
+      ?? normalizeVpnFailureCode(error instanceof Error ? error.message : error) ?? fallback
+    this.patch({ vpnFailureCode: code })
+  }
   private serial<T>(task: () => Promise<T>): Promise<T> {
     const next = this.operation.catch(() => undefined).then(async () => {
       if (this.disposed) throw new Error('session_disposed')
@@ -76,7 +83,10 @@ export class NativeSession {
     if (this.initializing) return this.initializing
     this.initializing = this.serial(async () => {
       try {
-        if (this.snapshot.platform === 'android') this.retainCleanup(await initMobileVpnService())
+        if (this.snapshot.platform === 'android') {
+          try { this.retainCleanup(await initMobileVpnService()) }
+          catch (error) { this.captureVpnFailure(error, 'vpn_listener_failed'); throw error }
+        }
         if (this.disposed) return
         this.retainCleanup(await listenGlobalEvents({
           android: this.snapshot.platform === 'android', persist: () => this.persistLocal,
@@ -97,6 +107,7 @@ export class NativeSession {
           const revoked = enabled && getMobileVpnError() === 'vpn_permission_revoked'
           if (revoked) {
             enabled = false
+            this.captureVpnFailure('vpn_permission_revoked')
             try { await this.pauseLocalClient(); this.patch({ errorCode: 'vpn_permission_revoked' }) }
             catch { /* Preserve the cleanup error and Retry Disconnect state. */ }
           }
@@ -111,7 +122,8 @@ export class NativeSession {
               await syncMobileVpnService({ strict: true })
               if (!await isMobileVpnConnected() && this.snapshot.mode.config_server_url) waitForMobileVpnInstance()
             }
-            catch {
+            catch (error) {
+              this.captureVpnFailure(error)
               try { await this.pauseLocalClient(); this.patch({ errorCode: 'client_start_failed' }) }
               catch { /* The incomplete cleanup state is retained for Retry Disconnect. */ }
             }
@@ -273,23 +285,46 @@ export class NativeSession {
     this.patch({ errorCode: undefined, vpnStopIncomplete: false, vpnTransition: undefined })
   }
   stopLocalClient(): Promise<void> {
-    return this.serial(() => this.pauseLocalClient())
+    if (this.snapshot.platform === 'android' && this.snapshot.mode.mode === 'normal') {
+      this.vpnIntentRevision++
+      cancelPendingMobileVpnStart()
+    }
+    return this.serial(async () => {
+      this.patch({ vpnFailureCode: undefined })
+      try { await this.pauseLocalClient() }
+      catch (error) { this.captureVpnFailure(error, 'vpn_stop_failed'); throw error }
+    })
   }
   startLocalClient(): Promise<void> {
+    const intent = ++this.vpnIntentRevision
+    const assertIntent = () => {
+      if (this.disposed || intent !== this.vpnIntentRevision) throw new Error('vpn_request_canceled')
+    }
     return this.serial(async () => {
       this.assertLocalAndroid()
+      assertIntent()
+      this.patch({ vpnFailureCode: undefined })
       try {
         if (this.localStopIncomplete) await this.pauseLocalClient()
+        assertIntent()
         this.vpnConnectionDeadline = Date.now() + VPN_CONNECTION_TIMEOUT_MS
         this.patch({ vpnTransition: 'connecting' })
         await backend.resumeLocalClient()
+        assertIntent()
         await resumeMobileVpnService()
+        assertIntent()
         this.patch({ clientPaused: false })
         if (!this.snapshot.connected) await this.connect(cloneMode(this.snapshot.mode))
+        assertIntent()
         const result = await executeVpnTileAction('start', this.remoteClient, {
           lastInstanceId: loadLastNetworkInstanceId(),
-          syncVpnService: preferredInstanceId => syncMobileVpnService({ strict: true, preferredInstanceId }),
+          syncVpnService: async preferredInstanceId => {
+            assertIntent()
+            await syncMobileVpnService({ strict: true, preferredInstanceId })
+            assertIntent()
+          },
         })
+        assertIntent()
         // Managed instances are recreated only from the controller's current
         // desired state. A first connection can wait for its next heartbeat.
         if (!result.instanceId && !this.snapshot.mode.config_server_url) throw new Error('vpn_no_network')
@@ -297,9 +332,13 @@ export class NativeSession {
         if (result.instanceId) saveLastNetworkInstanceId(result.instanceId)
         saveLocalClientPaused(false)
         const vpnConnected = await isMobileVpnConnected().catch(() => false)
+        assertIntent()
         if (vpnConnected) this.vpnConnectionDeadline = undefined
-        this.patch({ clientPaused: false, vpnConnected, vpnTransition: vpnConnected ? undefined : 'connecting' })
+        this.patch({ clientPaused: false, vpnConnected, vpnTransition: vpnConnected ? undefined : 'connecting', vpnFailureCode: undefined })
       } catch (error) {
+        if (intent !== this.vpnIntentRevision || this.disposed)
+          throw new Error('vpn_request_canceled')
+        this.captureVpnFailure(error, this.localStopIncomplete ? 'vpn_stop_failed' : 'vpn_start_failed')
         try { await this.pauseLocalClient() }
         catch { throw new Error('client_stop_failed') }
         const code = error instanceof Error && error.message === 'vpn_no_network' ? 'vpn_no_network' : 'client_start_failed'
@@ -345,17 +384,18 @@ export class NativeSession {
           const vpnError = getMobileVpnError()
           if (vpnConnected && !vpnError) {
             this.vpnConnectionDeadline = undefined
-            if (this.snapshot.vpnTransition) this.patch({ vpnTransition: undefined })
+            if (this.snapshot.vpnTransition || this.snapshot.vpnFailureCode) this.patch({ vpnTransition: undefined, vpnFailureCode: undefined })
           } else {
             this.vpnConnectionDeadline ??= Date.now() + VPN_CONNECTION_TIMEOUT_MS
             const timedOut = Date.now() >= this.vpnConnectionDeadline
             if (nativeEnabled === false || vpnError || timedOut) {
+              if (vpnError || timedOut) this.captureVpnFailure(vpnError, timedOut ? 'vpn_connection_timeout' : 'vpn_start_failed')
               const errorCode = vpnError === 'vpn_permission_revoked' ? vpnError
                 : timedOut || vpnError === 'vpn_connection_timeout' ? 'vpn_connection_timeout'
                 : vpnError ? 'client_start_failed' : undefined
               // Native revocation and background reconciliation failures use the
               // same bounded cleanup as Disconnect; management remains live.
-              await this.stopLocalClient().catch(() => undefined)
+              await this.serial(() => this.pauseLocalClient()).catch(() => undefined)
               if (!this.localStopIncomplete && errorCode) this.patch({ errorCode })
             }
           }

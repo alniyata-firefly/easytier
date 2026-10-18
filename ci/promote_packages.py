@@ -187,6 +187,22 @@ def release_text(state):
     marker = f"<!-- verified-ci-promotion:{state['repository']}:{state['run_id']}:{state['source_commit']}:{state['tag']} -->"
     if profile == "android-web":
         marker = marker.removesuffix(" -->") + ":android-web -->"
+        if state['source_commit'] != 'abc526b847f2539d175940c7ba5d65a5dee270e5':
+            body = f"""{marker}
+保留应用版本 **{VERSION}** 的 Android / Web 修复构建。
+
+源码提交：`{state['source_commit']}`。全部原始文件来自成功的 [Actions #{state['run_id']}](https://github.com/{state['repository']}/actions/runs/{state['run_id']})，本次发布不重新编译或重新签名。
+
+- 修复 Android VPN 状态读取瞬时异常被当作连接故障、触发健康实例清理的问题，以及原生状态查询挂起阻塞连接/断开的情况；状态读取采用有界等待和取消检查，过期结果不能覆盖当前请求。
+- 连接失败详情补充受限阶段码及完整 Core 构建版本；不显示原始错误、配置或凭据，便于区分接口创建、Core 安装和状态读取等阶段。
+- 仅包含 Android ARM64 APK、对应校验/验证报告及同源 Web 静态文件。Linux、Windows、macOS 未重新构建，本次发布不替换这些平台的既有安装包。
+- 已完成 CI 构建及签名/包校验；发布前重新核验每个原始文件与远端 SHA-256。本工作流不执行额外的本机原生测试。
+- Android 保留原应用标识、签名及 versionCode `2007003`；同版本替换不会成为递增版本号自动升级。
+- **未进行 Android 手机真机测试。** 本次针对已复现的状态读取与生命周期缺陷，不能据此认定已定位或解决真实手机上的首次失败；仍需安装新 APK 后真机验收。Android 已校验签名、嵌入 Core/前端与 DEX。
+
+安装前核对 `SHA256SUMS` 与 `build-manifest.json`。本工作流只发布安装包；生产服务或节点的部署另行验收。
+"""
+            return f"EasyTier {VERSION} Android / Web 修复版", body
         body = f"""{marker}
 保留应用版本 **{VERSION}** 的 Android / Web 修复构建。
 

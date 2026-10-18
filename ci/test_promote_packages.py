@@ -9,11 +9,51 @@ import unittest
 from unittest.mock import Mock, patch
 
 import promote_packages as promote
+import retire_old_fix as retire
 
 COMMIT = "1ec2b559205d3df15669c0b63270fbedd89f81d3"
 RUN = 38998168675
 REPO = "example/easytier"
 TAG = "fix-2.7.2-test"
+
+
+class AndroidWebNotesCompatibilityTests(unittest.TestCase):
+    def test_existing_abc_notes_remain_byte_exact_for_promotion_and_fixed_retirement(self):
+        state = {"repository": "alniyata-firefly/easytier", "run_id": 39087615977,
+                 "source_commit": "abc526b847f2539d175940c7ba5d65a5dee270e5",
+                 "tag": "fix-2.7.2-android-20261018", "profile": "android-web"}
+        title, body = promote.release_text(state)
+        self.assertEqual(title, "EasyTier 2.7.2 Android / Web 修复版")
+        self.assertEqual(hashlib.sha256(body.encode()).hexdigest(),
+                         "3313c28890ee0b86328ed49644a4db071a0ab63c1dd7bbc32775eb0cd1ef7375")
+        retirement_title, original, wanted = retire.bodies()
+        self.assertEqual((retirement_title, wanted), (title, body))
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
+                         "950b5f2b1e19f4c04bfe8b3313b9a65f16b5f8a4db746c2f94abadcfa50d6342")
+        for before, after in retire.BODY_EDITS:
+            self.assertEqual(original.count(before), 1)
+            self.assertEqual(wanted.count(after), 1)
+        self.assertEqual(retire.replacement_body(original), body)
+        self.assertEqual(retire.replacement_body(body), body)
+
+    def test_new_notes_describe_status_reads_without_rewriting_the_abc_release(self):
+        state = {"repository": "alniyata-firefly/easytier", "run_id": 39087615978,
+                 "source_commit": "b" * 40, "tag": "fix-2.7.2-android-status-20261018",
+                 "profile": "android-web"}
+        title, body = promote.release_text(state)
+        self.assertIn("Android / Web", title)
+        self.assertIn(":" + state['tag'] + ":android-web -->", body)
+        self.assertIn(state['source_commit'], body)
+        for text in ["瞬时异常", "状态查询挂起", "取消检查", "受限阶段码", "完整 Core 构建版本",
+                     "未进行 Android 手机真机测试", "仍需安装新 APK 后真机验收",
+                     "本次发布不替换这些平台的既有安装包"]:
+            self.assertIn(text, body)
+        self.assertNotIn("并移除 Web 成员行的内部配置版本摘要", body)
+        self.assertNotIn("本次补丁未修改这些平台的运行时代码", body)
+        with self.assertRaises(retire.Refused):
+            retire.replacement_body(body)
+        with self.assertRaises(retire.Refused):
+            retire.check_operation("PATCH", f"releases/{retire.LATEST_ID}", {"body": body})
 
 
 class FakeGitHub:
