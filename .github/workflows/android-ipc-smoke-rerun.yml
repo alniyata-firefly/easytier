@@ -1,0 +1,69 @@
+name: Android 16 reuse original IPC smoke APKs
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-run-id:
+        description: 'Completed Android real IPC smoke run containing the original internal debug artifact'
+        required: true
+        type: string
+      expected-source-commit:
+        description: 'Full 40-character source SHA of the original debug APKs, not the rerun driver SHA'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: android-ipc-smoke-reuse-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android-16-original-apks:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check reuse identity gates without compiling
+        run: python3 -m unittest discover -s ci/android -p 'test_smoke.py'
+
+      - name: Import exact original APKs and verify GitHub archive and manifest hashes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source-run-id }}
+          EXPECTED_SOURCE_COMMIT: ${{ inputs.expected-source-commit }}
+        run: |
+          python3 ci/android/smoke.py --phase import --source . \
+            --output "$RUNNER_TEMP/android-ipc-smoke-reuse" \
+            --source-run-id "$SOURCE_RUN_ID" --expected-source-commit "$EXPECTED_SOURCE_COMMIT"
+
+      - name: Enable runner KVM access
+        run: |
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: 'platform-tools emulator system-images;android-36;google_apis;x86_64'
+
+      - name: Run unchanged original full GUI Instrumentation on Android 16
+        run: python3 ci/android/smoke.py --phase run --api-level 36 --source . --output "$RUNNER_TEMP/android-ipc-smoke-reuse"
+
+      - name: Upload Android 16 evidence only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-16-original-apks-smoke-evidence
+          path: ${{ runner.temp }}/android-ipc-smoke-reuse/reports/
+          if-no-files-found: warn
+          retention-days: 7
