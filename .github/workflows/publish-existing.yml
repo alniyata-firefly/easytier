@@ -1,0 +1,63 @@
+name: Publish existing verified packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-run-id:
+        description: Successful packages workflow run ID
+        required: true
+        type: string
+        default: '38998168675'
+      expected-commit:
+        description: Exact source commit of the existing packages
+        required: true
+        type: string
+        default: '1ec2b559205d3df15669c0b63270fbedd89f81d3'
+      release-tag:
+        description: Existing fix-* tag pointing to that source commit
+        required: true
+        type: string
+        default: 'fix-2.7.2-20261018'
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-existing-${{ inputs.release-tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SOURCE_RUN: ${{ inputs.source-run-id }}
+      EXPECTED_COMMIT: ${{ inputs.expected-commit }}
+      RELEASE_TAG: ${{ inputs.release-tag }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Check publisher rejection and draft recovery behavior
+        run: python3 -m unittest discover -s ci -p test_promote_packages.py -v
+      - name: Bind the source workflow, artifact and existing tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 ci/promote_packages.py --run-id "$SOURCE_RUN" --commit "$EXPECTED_COMMIT"
+          --tag "$RELEASE_TAG" --state "$RUNNER_TEMP/promotion-source.json"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-packages
+          path: release-assets
+          run-id: ${{ inputs.source-run-id }}
+          github-token: ${{ github.token }}
+      - name: Verify original files, resume draft, verify remote hashes and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 ci/promote_packages.py --run-id "$SOURCE_RUN" --commit "$EXPECTED_COMMIT"
+          --tag "$RELEASE_TAG" --state "$RUNNER_TEMP/promotion-source.json"
+          --input release-assets --publish
