@@ -7,6 +7,7 @@ used. Native compilation is deliberately refused outside GitHub Actions.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -27,9 +28,15 @@ from signing import SECRETS
 TOOLS = Path(__file__).resolve().parent
 PACKAGE = "com.kkrainbow.easytier.adapted.debug"
 TEST_CLASS = "com.kkrainbow.easytier.AndroidIpcSmokeTest"
+TEST_METHOD = "realWebViewCanStartObserveStopAndReconnectAndroidVpn"
 IMAGE = "system-images;android-34;google_apis;x86_64"
 DEBUG_ARTIFACT = "android-ipc-smoke-internal-debug"
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
+EXIT_REASONS = dict(enumerate([
+    "UNKNOWN", "EXIT_SELF", "SIGNALED", "LOW_MEMORY", "CRASH", "CRASH_NATIVE", "ANR",
+    "INITIALIZATION_FAILURE", "PERMISSION_CHANGE", "EXCESSIVE_RESOURCE_USAGE", "USER_REQUESTED",
+    "USER_STOPPED", "DEPENDENCY_DIED", "OTHER", "FREEZER", "PACKAGE_STATE_CHANGE", "PACKAGE_UPDATED",
+]))
 
 
 def require(condition, message):
@@ -182,6 +189,187 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def parse_application_exit_info(raw):
+    """Keep only numeric metadata for the exact app's main process, never dump text.
+
+    Android 16's official dump format and reason constants:
+    https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-16.0.0_r1/core/java/android/app/ApplicationExitInfo.java
+    https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-16.0.0_r1/services/core/java/com/android/server/am/AppExitInfoTracker.java
+    The timestamp uses the device's local timezone, which the dump omits.
+    """
+    require(len(raw) <= 1024 * 1024, "Exit-info output exceeds size bound")
+    lines = raw.splitlines()
+    require("ACTIVITY MANAGER PROCESS EXIT INFO (dumpsys activity exit-info)" in lines,
+            "Unrecognized exit-info output")
+    timestamp = re.compile(r"\s+timestamp=(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})"
+                           r" pid=(\d{1,10}) realUid=(\d{1,10}) packageUid=(\d{1,10}) definingUid=\d+ user=\d+\s*")
+    process = re.compile(r"\s+process=" + re.escape(PACKAGE)
+                         + r" reason=(\d{1,3}) \([^\r\n]*\) subreason=\d+ \([^\r\n]*\) status=(-?\d{1,10})\s*")
+    selected = False
+    records = []
+    for index, line in enumerate(lines):
+        if match := re.fullmatch(r"\s+package: (\S+)\s*", line):
+            selected = match[1] == PACKAGE
+        if not selected or not re.fullmatch(r"\s+ApplicationExitInfo #\d+:", line) or index + 2 >= len(lines):
+            continue
+        first, second = timestamp.fullmatch(lines[index + 1]), process.fullmatch(lines[index + 2])
+        if not first or not second:
+            continue
+        try:
+            date = datetime.strptime(first[1], "%Y-%m-%d %H:%M:%S.%f")
+        except ValueError:
+            continue
+        pid, reason, status = int(first[2]), int(second[1]), int(second[2])
+        if not (0 < pid <= 2**31 - 1 and -(2**31) <= status < 2**31):
+            continue
+        record = {"reason": reason, "reasonName": EXIT_REASONS.get(reason, "UNRECOGNIZED"),
+                  "status": status, "pid": pid, "uid": int(first[4]), "realUid": int(first[3]),
+                  "process": PACKAGE, "timestamp": date.isoformat(timespec="milliseconds")}
+        if record not in records:
+            records.append(record)
+    return sorted(records, key=lambda record: record["timestamp"], reverse=True)[:20]
+
+
+def collect_application_exit_info(adb, env, api_level):
+    """Best-effort host-only diagnostics; never print or persist raw stdout/stderr."""
+    safe = {"schema": 1, "apiLevel": api_level, "timestampClock": "device_local", "records": []}
+    for attempt in range(3):
+        try:
+            result = subprocess.run([*adb, "shell", "dumpsys", "activity", "exit-info", PACKAGE],
+                                    env=env, capture_output=True, text=True, errors="replace", timeout=10)
+            if result.returncode:
+                return dict(safe, collectionStatus="COMMAND_FAILED")
+            try:
+                records = parse_application_exit_info(result.stdout)
+            except RuntimeError:
+                return dict(safe, collectionStatus="UNRECOGNIZED_OUTPUT")
+            if records:
+                return dict(safe, collectionStatus="COLLECTED", records=records)
+        except subprocess.TimeoutExpired:
+            return dict(safe, collectionStatus="QUERY_TIMEOUT")
+        except OSError:
+            return dict(safe, collectionStatus="QUERY_FAILED")
+        # Process death records can reach system_server just after am instrument
+        # returns. A short, bounded retry also works with unchanged reused APKs.
+        if attempt < 2:
+            time.sleep(0.25)
+    return dict(safe, collectionStatus="NO_MAIN_PROCESS_EXIT")
+
+
+def private_adb_stdout(adb, arguments, env):
+    """Read a small identity/clock value without exposing diagnostics on failure."""
+    try:
+        result = subprocess.run([*adb, "shell", *arguments], env=env, capture_output=True,
+                                text=True, errors="replace", timeout=10)
+        if not result.returncode and len(result.stdout) <= 4096:
+            return result.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def device_clock(adb, env):
+    raw = private_adb_stdout(adb, ["date", "+%s,%z"], env)
+    match = re.fullmatch(r"(\d{9,12}),([+-])(\d{2})(\d{2})", (raw or "").strip())
+    if not match:
+        return None
+    minutes = int(match[3]) * 60 + int(match[4])
+    if minutes > 14 * 60 or int(match[4]) > 59:
+        return None
+    return {"epochSeconds": int(match[1]), "offsetMinutes": minutes * (-1 if match[2] == "-" else 1)}
+
+
+def target_package_uid(adb, env):
+    raw = private_adb_stdout(adb, ["cmd", "package", "list", "packages", "-U", PACKAGE], env)
+    matches = [re.fullmatch(r"package:" + re.escape(PACKAGE) + r" uid:(\d{1,10})", line.strip())
+               for line in (raw or "").splitlines()]
+    uids = [int(match[1]) for match in matches if match]
+    return uids[0] if len(uids) == 1 and 0 < uids[0] <= 2**31 - 1 else None
+
+
+def observer_exit_boundary(log):
+    line = re.compile(r"\s*(\d{9,12})\.(\d{3,6})\s+(\d{1,10})\s+\d+\s+[VDIWEF]\s+AndroidIpcSmoke\s*:\s*(.*)")
+    pids, completed = set(), []
+    for raw in log.splitlines():
+        if "AndroidIpcSmoke" not in raw:
+            continue
+        match = line.fullmatch(raw)
+        if not match or int(match[3]) <= 0:
+            return None
+        pid = int(match[3])
+        pids.add(pid)
+        if match[4] == "guiPhase=gui_complete guiStatus=PASS":
+            completed.append({"pid": pid, "guiCompleteEpochMs": int(match[1]) * 1000 + int((match[2] + "000")[:3])})
+    return completed[0] if len(pids) == 1 and len(completed) == 1 else None
+
+
+def exact_process_crashed_result(result):
+    if result.returncode or result.stderr.strip():
+        return False
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()] == [
+        f"INSTRUMENTATION_STATUS: class={TEST_CLASS}",
+        "INSTRUMENTATION_STATUS: current=1", "INSTRUMENTATION_STATUS: id=AndroidJUnitRunner",
+        "INSTRUMENTATION_STATUS: numtests=1", "INSTRUMENTATION_STATUS: stream=", f"{TEST_CLASS}:",
+        f"INSTRUMENTATION_STATUS: test={TEST_METHOD}", "INSTRUMENTATION_STATUS_CODE: 1",
+        "INSTRUMENTATION_RESULT: shortMsg=Process crashed.", "INSTRUMENTATION_CODE: 0",
+    ]
+
+
+def instrumentation_outcome(result, report, exit_info, log, uid, started, ended):
+    """Fail closed unless JUnit finished or all evidence binds one EXIT_SELF(0)."""
+    outcome = {"schema": 1, "classification": "failed", "junitFinalized": False,
+               "behaviorAssertionsPassed": False}
+
+    def failed(reason):
+        return dict(outcome, reason=reason)
+
+    try:
+        validate_report(report)
+    except (RuntimeError, KeyError, TypeError, AttributeError, StopIteration):
+        return failed("behavior_report_invalid")
+    outcome["behaviorAssertionsPassed"] = True
+    if result is None:
+        return failed("instrumentation_missing_or_timed_out")
+    if not result.returncode and "OK (1 test)" in result.stdout and "FAILURES!!!" not in result.stdout + result.stderr:
+        return dict(outcome, classification="junit_completed", junitFinalized=True)
+    if not exact_process_crashed_result(result):
+        return failed("instrumentation_result_not_expected_exit")
+    if re.search(r"AndroidRuntime.*\bFATAL\b|\bF\s+AndroidRuntime\s*:|\b(?:AssertionError|AssertionFailedError|TimeoutException|TestTimedOutException|assertion failed|timed out)\b",
+                 log, re.IGNORECASE):
+        return failed("fatal_assertion_or_timeout_logged")
+    boundary = observer_exit_boundary(log)
+    if not boundary:
+        return failed("observer_identity_or_completion_ambiguous")
+    if uid is None:
+        return failed("target_uid_unavailable")
+    if (not started or not ended or started["offsetMinutes"] != ended["offsetMinutes"]
+            or started["epochSeconds"] > ended["epochSeconds"]):
+        return failed("device_clock_window_unavailable")
+    records = [record for record in exit_info.get("records", []) if record.get("pid") == boundary["pid"]]
+    if exit_info.get("collectionStatus") != "COLLECTED" or len(records) != 1:
+        return failed("exit_record_missing_or_ambiguous")
+    record = records[0]
+    if record.get("uid") != uid or record.get("realUid") != uid or record.get("process") != PACKAGE:
+        return failed("exit_record_identity_mismatch")
+    if record.get("reason") != 1 or record.get("status") != 0:
+        return failed("exit_record_not_self_zero")
+    try:
+        local = datetime.fromisoformat(record["timestamp"])
+        if local.tzinfo is not None:
+            return failed("exit_timestamp_invalid")
+        utc = local.replace(tzinfo=timezone(timedelta(minutes=started["offsetMinutes"]))).astimezone(timezone.utc)
+        delta = utc - datetime(1970, 1, 1, tzinfo=timezone.utc)
+        exit_ms = delta.days * 86400000 + delta.seconds * 1000 + delta.microseconds // 1000
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return failed("exit_timestamp_invalid")
+    if not started["epochSeconds"] * 1000 <= boundary["guiCompleteEpochMs"] < exit_ms <= (ended["epochSeconds"] + 1) * 1000:
+        return failed("exit_timestamp_outside_current_run")
+    evidence = {**boundary, "uid": uid, "process": PACKAGE, "reason": 1, "reasonName": "EXIT_SELF", "status": 0,
+                "exitEpochMs": exit_ms, "windowStartEpochSeconds": started["epochSeconds"],
+                "windowEndEpochSeconds": ended["epochSeconds"], "deviceOffsetMinutes": started["offsetMinutes"]}
+    return dict(outcome, classification="expected_final_window_exit", evidence=evidence)
+
+
 def debug_overlay():
     return {"build": {"beforeBuildCommand": None}, "app": {"windows": [{
         "label": "main", "title": "Android IPC smoke", "url": "ipc-smoke.html",
@@ -245,9 +433,13 @@ def validate_report(report):
     for cycle in (1, 2):
         live = next(event["details"] for event in gui_events if event.get("phase") == f"gui_native_and_validated_{cycle}" and event.get("status") == "pass")
         stopped = next(event["details"] for event in gui_events if event.get("phase") == f"gui_stopped_native_and_validated_{cycle}" and event.get("status") == "pass")
-        if not all(live.get(key) is True for key in ["nativeEstablished", "correctInstance", "positiveFd", "validatedOwner", "connected", "vpnTransportPresent"]):
+        queries = ["directQueryResolved", "validatedQueryResolved", "connectedQueryResolved"]
+        if not all(live.get(key) is True for key in ["nativeEstablished", "correctInstance", "positiveFd", "validatedOwner",
+                                                   "connected", "vpnTransportPresent", *queries]):
             raise RuntimeError("GUI label is not backed by native TUN, Core owner and system VPN")
-        if stopped.get("nativeStopped") is not True or stopped.get("validatedCleared") is not True or stopped.get("vpnTransportPresent") is not False:
+        if (stopped.get("nativeStopped") is not True or stopped.get("validatedCleared") is not True
+                or stopped.get("vpnTransportPresent") is not False or stopped.get("connected") is not False
+                or not all(stopped.get(key) is True for key in queries)):
             raise RuntimeError("GUI Disconnect is not backed by native/Core/system VPN cleanup")
 
 
@@ -361,6 +553,8 @@ def run(source, output, env, api_level=34):
                                  "-accel", "on", "-cores", "2", "-memory", "2048"],
                                 env=env, stdout=emulator_log, stderr=subprocess.STDOUT)
     instrumentation = None
+    result, uid, started, ended = None, None, None, None
+    log = ""
     try:
         checked([*adb, "wait-for-device"], env=env, timeout=120)
         deadline = time.monotonic() + 180
@@ -373,32 +567,51 @@ def run(source, output, env, api_level=34):
         for setting in ["window_animation_scale", "transition_animation_scale", "animator_duration_scale"]:
             checked([*adb, "shell", "settings", "put", "global", setting, "0"], env=env)
         checked([*adb, "shell", "input", "keyevent", "82"], env=env)
-        checked([*adb, "logcat", "-c"], env=env)
         for apk in [proof["app"], proof["test"]]:
             checked([*adb, "install", "-r", "-t", apk], env=env)
-        result = subprocess.run([*adb, "shell", "am", "instrument", "-w", "-r", "-e", "class", TEST_CLASS,
-                                 f"{PACKAGE}.test/androidx.test.runner.AndroidJUnitRunner"],
-                                env=env, capture_output=True, text=True, timeout=390)
+        uid = target_package_uid(adb, env)
+        # Installation may itself generate exit history/logs. Bind observer
+        # evidence only to this attempt, after installation and before launch.
+        checked([*adb, "logcat", "-c"], env=env)
+        started = device_clock(adb, env)
+        try:
+            result = subprocess.run([*adb, "shell", "am", "instrument", "-w", "-r", "-e", "class", TEST_CLASS,
+                                     f"{PACKAGE}.test/androidx.test.runner.AndroidJUnitRunner"],
+                                    env=env, capture_output=True, text=True, timeout=390)
+        except subprocess.TimeoutExpired as error:
+            stdout, stderr = error.stdout or "", error.stderr or ""
+            instrumentation = (stdout.decode(errors="replace") if isinstance(stdout, bytes) else stdout) \
+                + (stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr)
+            (output / "reports/instrumentation.txt").write_text(instrumentation)
+            raise
+        ended = device_clock(adb, env)
         instrumentation = result.stdout + result.stderr
         (output / "reports/instrumentation.txt").write_text(instrumentation)
-        if result.returncode or "OK (1 test)" not in instrumentation or "FAILURES!!!" in instrumentation:
-            print(instrumentation[-6000:], flush=True)
-            raise RuntimeError("real Android IPC instrumentation failed")
     finally:
+        if started and not ended:
+            ended = device_clock(adb, env)
+        exit_info = collect_application_exit_info(adb, env, api_level)
         try:
-            result = checked([*adb, "exec-out", "run-as", PACKAGE, "cat", "files/android-ipc-smoke-report.json"], env=env, timeout=10)
-            report = json.loads(result)
+            (output / "reports/application-exit-info.json").write_text(json.dumps(exit_info, indent=2) + "\n")
+        except OSError:
+            pass
+        try:
+            raw_report = checked([*adb, "exec-out", "run-as", PACKAGE, "cat", "files/android-ipc-smoke-report.json"], env=env, timeout=10)
+            report = json.loads(raw_report)
             report.update(provenance)
             (output / "reports/ipc-smoke-report.json").write_text(json.dumps(report, indent=2) + "\n")
         except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError):
             report = {"status": "NO_COMPLETED_REPORT", **provenance}
             (output / "reports/ipc-smoke-report.json").write_text(json.dumps(report, indent=2) + "\n")
         try:
-            log = checked([*adb, "logcat", "-d", "-v", "threadtime", "-s", "AndroidIpcSmoke:I", "AndroidRuntime:E", "*:S"],
+            log = checked([*adb, "logcat", "-d", "-v", "epoch", "-s", "AndroidIpcSmoke:I", "AndroidRuntime:E", "*:S"],
                           env=env, timeout=10)
             (output / "reports/filtered-logcat.txt").write_text(log)
         except (RuntimeError, subprocess.TimeoutExpired):
             pass
+        outcome = instrumentation_outcome(result, report, exit_info, log, uid, started, ended)
+        outcome.update(provenance)
+        (output / "reports/instrumentation-outcome.json").write_text(json.dumps(outcome, indent=2) + "\n")
         emulator.terminate()
         try:
             emulator.wait(timeout=15)
@@ -406,8 +619,14 @@ def run(source, output, env, api_level=34):
             emulator.kill()
             emulator.wait(timeout=5)
         emulator_log.close()
-    validate_report(report)
-    print("Real Android IPC and actual GUI Connect/Disconnect, native TUN, Core ownership and system VPN: PASS", flush=True)
+    if outcome["classification"] == "failed":
+        if instrumentation:
+            print(instrumentation[-6000:], flush=True)
+        raise RuntimeError("real Android IPC instrumentation failed; see safe instrumentation-outcome.json")
+    if outcome["classification"] == "expected_final_window_exit":
+        print("All real VPN/GUI behavior assertions passed; Android recorded EXIT_SELF(0) after final-window closure. JUnit did not finalize.", flush=True)
+    else:
+        print("Real Android IPC and actual GUI Connect/Disconnect, native TUN, Core ownership and system VPN: PASS", flush=True)
 
 
 def main():
