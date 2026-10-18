@@ -37,7 +37,7 @@ These screenshots show this branch's React interfaces with anonymized example da
 
 ## Packages
 
-The current source version is **2.7.2**. Each build records its source commit, checksums and verification results; a source version does not mean every platform package has been published.
+The current source version is **2.7.2 (prerelease)**. Each build records its source commit, checksums and verification results; a source version does not mean every platform package has been published.
 
 | Platform | Packages built by this repository |
 | --- | --- |

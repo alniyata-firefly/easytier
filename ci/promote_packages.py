@@ -258,7 +258,7 @@ def promote(api, root, state):
     def owned(release):
         require(type(release.get("id")) is int and release["id"] > 0 and release.get("tag_name") == state["tag"]
                 and release.get("name") == title and release.get("body") == body
-                and release.get("target_commitish") == "main" and release.get("prerelease") is False,
+                and release.get("target_commitish") == "main" and release.get("prerelease") is True,
                 "Existing release belongs to another publication; refusing modification")
 
     endpoint = "releases/tags/" + urllib.parse.quote(state["tag"], safe="")
@@ -268,7 +268,7 @@ def promote(api, root, state):
         # main avoids requesting forbidden Workflows permission for an old SHA.
         # The pre-existing tag, checked before and after uploads, binds the source.
         release = api.request("POST", "releases", {"tag_name": state["tag"], "target_commitish": "main",
-                              "name": title, "body": body, "draft": True, "prerelease": False, "make_latest": "false"})
+                              "name": title, "body": body, "draft": True, "prerelease": True, "make_latest": "false"})
     owned(release)
     release_id = release["id"]
     assets = list_assets(api, release_id)
@@ -303,7 +303,7 @@ def promote(api, root, state):
     owned(current)
     if release.get("draft"):
         release = api.request("PATCH", f"releases/{release_id}",
-                              {"draft": False, "make_latest": "true" if profile == "full" else "false"})
+                              {"draft": False, "prerelease": True, "make_latest": "false"})
     owned(release)
     require(release.get("draft") is False, "Release is not public")
     published = api.request("GET", endpoint)
@@ -314,7 +314,8 @@ def promote(api, root, state):
     for name, record in records.items():
         verify_asset(assets[name], record)
     check_tag(api, state["tag"], state["source_commit"])
-    return {"passed": True, "source_commit": state["source_commit"], "version": VERSION, "profile": profile, "asset_count": len(records),
+    return {"passed": True, "source_commit": state["source_commit"], "version": VERSION, "profile": profile,
+            "prerelease": True, "asset_count": len(records),
             "release_url": f"https://github.com/{state['repository']}/releases/tag/{state['tag']}"}
 
 

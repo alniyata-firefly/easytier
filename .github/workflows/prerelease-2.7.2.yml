@@ -1,0 +1,27 @@
+name: Mark existing 2.7.2 releases as prereleases
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prerelease-2.7.2-metadata
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Test version boundaries and metadata preservation
+        run: python3 -m unittest discover -s ci -p test_prerelease_272.py -v
+      - name: Update only existing public 2.7.2 release metadata
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 ci/prerelease_272.py

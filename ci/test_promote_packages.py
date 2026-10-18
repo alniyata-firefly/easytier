@@ -96,7 +96,7 @@ class PromotionTests(unittest.TestCase):
     def owned_draft(self):
         title, body = promote.release_text(self.state)
         self.api.release = {"id": 7, "tag_name": TAG, "target_commitish": "main",
-                            "name": title, "body": body, "draft": True, "prerelease": False}
+                            "name": title, "body": body, "draft": True, "prerelease": True}
 
     def test_source_binding_and_tag_mismatch_refuse_without_writes(self):
         for mutate in [lambda api: api.run.update(conclusion="failure"),
@@ -137,7 +137,9 @@ class PromotionTests(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertEqual(result["asset_count"], 14)
         self.assertFalse(self.api.release["draft"])
-        self.assertEqual(self.api.release["make_latest"], "true")
+        self.assertTrue(self.api.release["prerelease"])
+        self.assertTrue(result["prerelease"])
+        self.assertEqual(self.api.release["make_latest"], "false")
         self.assertIn(("DELETE", "releases/assets/999"), self.api.writes)
         self.assertTrue(all(self.api.uploaded.count(name) == 1 for name in completed))
         writes = self.api.writes.copy(); uploaded = self.api.uploaded.copy()
@@ -161,6 +163,14 @@ class PromotionTests(unittest.TestCase):
         with self.assertRaises(promote.Refused): promote.promote(self.api, self.root, self.state)
         self.assertTrue(self.api.release["draft"])
         self.assertFalse(any(method == "PATCH" for method, _ in self.api.writes))
+
+    def test_stable_release_must_be_converted_by_the_metadata_workflow_first(self):
+        self.owned_draft()
+        self.api.release.update(draft=False, prerelease=False)
+        with self.assertRaisesRegex(promote.Refused, "belongs to another publication"):
+            promote.promote(self.api, self.root, self.state)
+        self.assertEqual(self.api.writes, [])
+        self.assertEqual(self.api.uploaded, [])
 
     def test_workflow_is_manual_only_pinned_and_never_builds_or_moves_version_tags(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/publish-existing.yml").read_text()
@@ -247,6 +257,8 @@ class AndroidWebPromotionTests(unittest.TestCase):
         result = promote.promote(self.api, self.root, self.state)
         self.assertEqual(result["profile"], "android-web")
         self.assertEqual(result["asset_count"], 6)
+        self.assertTrue(result["prerelease"])
+        self.assertTrue(self.api.release["prerelease"])
         self.assertFalse(self.api.release["draft"])
         self.assertEqual(self.api.release["make_latest"], "false")
         self.assertIn(("DELETE", "releases/assets/999"), self.api.writes)

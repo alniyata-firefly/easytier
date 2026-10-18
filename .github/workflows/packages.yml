@@ -147,6 +147,8 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           draft: false
+          prerelease: ${{ github.ref_name == 'v2.7.2' || startsWith(github.ref_name, 'v2.7.2-') || startsWith(github.ref_name, 'v2.7.2+') }}
+          make_latest: ${{ (github.ref_name == 'v2.7.2' || startsWith(github.ref_name, 'v2.7.2-') || startsWith(github.ref_name, 'v2.7.2+')) && 'false' || 'legacy' }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: release-assets/*
