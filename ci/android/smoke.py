@@ -76,6 +76,21 @@ def validate_report(report):
         for prefix, value in [("system_vpn_present", True), ("system_vpn_absent", False)]:
             if not any(event.get("phase") == f"{prefix}_{cycle}" and event.get("vpnTransportPresent") is value for event in system):
                 raise RuntimeError("Android report did not independently observe the system VPN transport")
+    gui_events = report.get("guiEvents", [])
+    gui_passed = {event.get("phase") for event in gui_events if event.get("status") == "pass"}
+    gui_required = {"gui_fixture_prepare", "gui_index_navigation", "gui_complete"}
+    for cycle in (1, 2):
+        gui_required.update(f"{phase}_{cycle}" for phase in ["gui_connect_button", "gui_native_and_validated",
+                            "gui_connected_stable", "gui_disconnect_button", "gui_stopped_native_and_validated"])
+    if report.get("guiStatus") != "PASS" or not gui_required <= gui_passed or any(event.get("status") == "fail" for event in gui_events):
+        raise RuntimeError("Android report did not confirm actual GUI Connect/Disconnect cycles")
+    for cycle in (1, 2):
+        live = next(event["details"] for event in gui_events if event.get("phase") == f"gui_native_and_validated_{cycle}" and event.get("status") == "pass")
+        stopped = next(event["details"] for event in gui_events if event.get("phase") == f"gui_stopped_native_and_validated_{cycle}" and event.get("status") == "pass")
+        if not all(live.get(key) is True for key in ["nativeEstablished", "correctInstance", "positiveFd", "validatedOwner", "connected", "vpnTransportPresent"]):
+            raise RuntimeError("GUI label is not backed by native TUN, Core owner and system VPN")
+        if stopped.get("nativeStopped") is not True or stopped.get("validatedCleared") is not True or stopped.get("vpnTransportPresent") is not False:
+            raise RuntimeError("GUI Disconnect is not backed by native/Core/system VPN cleanup")
 
 
 def environment(source, output):
@@ -143,7 +158,14 @@ def build(source, output, env):
              "testApkSha256": digest(tests[0]), "overlay": debug_overlay(),
              "testPageSha256": digest(TOOLS / "ipc-smoke.js")}
     (output / "build.json").write_text(json.dumps(proof, indent=2) + "\n")
+    # Authenticated, one-day CI artifact for re-running the exact debug binaries
+    # without a second Rust compilation. Never added to a GitHub Release.
+    internal = output / "internal-debug-build"
+    internal.mkdir(exist_ok=True)
+    shutil.copy2(apps[0], internal / "app-debug.apk")
+    shutil.copy2(tests[0], internal / "app-debug-androidTest.apk")
     public = {key: value for key, value in proof.items() if key not in ("app", "test")}
+    (internal / "manifest.json").write_text(json.dumps(public, indent=2) + "\n")
     (output / "reports/build-proof.json").write_text(json.dumps(public, indent=2) + "\n")
 
 
@@ -180,7 +202,7 @@ def run(source, output, env):
             checked([*adb, "install", "-r", "-t", apk], env=env)
         result = subprocess.run([*adb, "shell", "am", "instrument", "-w", "-r", "-e", "class", TEST_CLASS,
                                  f"{PACKAGE}.test/androidx.test.runner.AndroidJUnitRunner"],
-                                env=env, capture_output=True, text=True, timeout=210)
+                                env=env, capture_output=True, text=True, timeout=390)
         instrumentation = result.stdout + result.stderr
         (output / "reports/instrumentation.txt").write_text(instrumentation)
         if result.returncode or "OK (1 test)" not in instrumentation or "FAILURES!!!" in instrumentation:
@@ -210,7 +232,7 @@ def run(source, output, env):
             emulator.wait(timeout=5)
         emulator_log.close()
     validate_report(report)
-    print("Real Android IPC, native TUN, system VPN transport and two stop/reconnect cycles: PASS", flush=True)
+    print("Real Android IPC and actual GUI Connect/Disconnect, native TUN, Core ownership and system VPN: PASS", flush=True)
 
 
 def main():

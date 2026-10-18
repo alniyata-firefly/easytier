@@ -56,8 +56,18 @@ class AndroidIpcSmokeDriverTest(unittest.TestCase):
             phases.update(f"concurrent_status_{cycle}_{sample}" for sample in range(10))
             system.extend([{"phase": f"system_vpn_present_{cycle}", "vpnTransportPresent": True},
                            {"phase": f"system_vpn_absent_{cycle}", "vpnTransportPresent": False}])
+        gui = [{"phase": phase, "status": "pass"} for phase in ["gui_fixture_prepare", "gui_index_navigation", "gui_complete"]]
+        for cycle in (1, 2):
+            gui.extend({"phase": f"{phase}_{cycle}", "status": "pass"} for phase in
+                       ["gui_connect_button", "gui_connected_stable", "gui_disconnect_button"])
+            gui.extend([
+                {"phase": f"gui_native_and_validated_{cycle}", "status": "pass", "details": {
+                    key: True for key in ["nativeEstablished", "correctInstance", "positiveFd", "validatedOwner", "connected", "vpnTransportPresent"]}},
+                {"phase": f"gui_stopped_native_and_validated_{cycle}", "status": "pass", "details": {
+                    "nativeStopped": True, "validatedCleared": True, "vpnTransportPresent": False}},
+            ])
         return {"status": "PASS", "cycles": 2, "events": [{"phase": phase, "status": "pass"} for phase in phases],
-                "androidSystemObservations": system}
+                "androidSystemObservations": system, "guiStatus": "PASS", "guiEvents": gui}
 
     def test_empty_or_ui_only_pass_is_rejected(self):
         for report in [{"status": "PASS", "cycles": 2}, self.report() | {"androidSystemObservations": []}]:
@@ -73,6 +83,16 @@ class AndroidIpcSmokeDriverTest(unittest.TestCase):
             incomplete["events"] = [event for event in incomplete["events"] if event["phase"] != phase]
             with self.assertRaises(RuntimeError):
                 smoke.validate_report(incomplete)
+
+    def test_native_only_success_or_gui_label_without_system_vpn_is_rejected(self):
+        native_only = self.report() | {"guiEvents": [], "guiStatus": "not_started"}
+        with self.assertRaisesRegex(RuntimeError, "actual GUI"):
+            smoke.validate_report(native_only)
+        report = self.report()
+        event = next(event for event in report["guiEvents"] if event["phase"] == "gui_native_and_validated_1")
+        event["details"]["vpnTransportPresent"] = False
+        with self.assertRaisesRegex(RuntimeError, "not backed"):
+            smoke.validate_report(report)
 
 
 if __name__ == "__main__":

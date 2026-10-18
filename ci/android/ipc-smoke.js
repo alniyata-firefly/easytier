@@ -153,6 +153,44 @@ enable_ipv6 = false
   }
   window.__ANDROID_IPC_SMOKE__ = {
     run,
+    prepareGui: async () => {
+      window.__ANDROID_GUI_PREPARE__ = 'pending'
+      try {
+        const instanceId = 'dfb23100-1fa0-4000-8000-000000000003'
+        const cfg = await bounded('gui_fixture_parse', () => invoke('generate_network_config', { tomlConfig: `
+instance_id = "${instanceId}"
+ipv4 = "10.254.253.3/24"
+dhcp = false
+listeners = []
+stun_servers = []
+tcp_stun_servers = []
+stun_servers_v6 = []
+[network_identity]
+network_name = "android-gui-smoke"
+network_secret = "synthetic-smoke-only"
+[flags]
+no_tun = false
+disable_p2p = true
+disable_udp_hole_punching = true
+disable_tcp_hole_punching = true
+enable_ipv6 = false
+` }))
+        check(cfg.instance_id === instanceId, 'gui_fixture_identity_invalid')
+        // The same process already has a live RPC manager. Seed native storage
+        // as well as browser storage: a warm Session need not reload configs.
+        const configs = [{ config: cfg, source: 'user' }]
+        await bounded('gui_fixture_native_load', () => invoke('load_configs', { configs, enabledNetworks: [] }))
+        localStorage.setItem('networkList', JSON.stringify(configs))
+        localStorage.setItem('enabled_networks', '[]')
+        localStorage.setItem('last_network_instance_id', instanceId)
+        localStorage.setItem('local_client_paused', 'true')
+        localStorage.setItem('app_mode', JSON.stringify({ mode: 'normal' }))
+        localStorage.setItem('easytier.locale', 'en')
+        window.__ANDROID_GUI_PREPARE__ = 'ready'
+      } catch (error) {
+        window.__ANDROID_GUI_PREPARE__ = safeRejection(error)
+      }
+    },
     acknowledgeSystem: () => { const done = acknowledgement; acknowledgement = undefined; done?.() },
     report,
   }
