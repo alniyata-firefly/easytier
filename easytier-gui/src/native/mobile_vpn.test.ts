@@ -951,16 +951,26 @@ describe('Android VPN native boundaries', () => {
     expect(mocks.startVpn).toHaveBeenCalledOnce()
   })
 
-  it('clears the saved Core TUN owner only after native Stop is confirmed', async () => {
+  it('detaches after the Stop receipt and still waits for native service exit', async () => {
     setConfig('A'); setReady('A', '10.0.0.1')
     const vpn = await loadVpnModule()
     await vpn.onNetworkInstanceChange('A', { strict: true })
     const owner = mocks.startVpn.mock.calls[0][0]
-    mocks.clearTunFd.mockImplementationOnce(async () => {
-      expect(await mocks.getVpnStatus()).toMatchObject({ state: 'stopped', running: false })
-    })
-    await vpn.suspendMobileVpnService()
+    let acceptStop!: (response: Record<string, never>) => void
+    mocks.stopVpn.mockImplementationOnce(async () => new Promise(resolve => { acceptStop = resolve }))
+    mocks.getVpnStatus.mockResolvedValue({ ...owner, state: 'stopping', running: true, established: false })
+    let finished = false
+    const stopping = vpn.suspendMobileVpnService().then(() => { finished = true })
+    await vi.waitFor(() => expect(mocks.stopVpn).toHaveBeenCalledOnce())
+    expect(mocks.clearTunFd).not.toHaveBeenCalled()
+    acceptStop({})
+    await vi.waitFor(() => expect(mocks.clearTunFd).toHaveBeenCalledOnce())
     expect(mocks.clearTunFd).toHaveBeenCalledWith('A', owner.requestId)
+    expect(finished).toBe(false)
+    mocks.getVpnStatus.mockResolvedValue({ ...owner, state: 'stopped', running: false, established: false })
+    await vi.advanceTimersByTimeAsync(50)
+    await stopping
+    expect(finished).toBe(true)
   })
 
   it('reports a failed Core detach and retains its identity for a later Stop retry', async () => {
@@ -968,7 +978,12 @@ describe('Android VPN native boundaries', () => {
     const vpn = await loadVpnModule()
     await vpn.onNetworkInstanceChange('A', { strict: true })
     const owner = mocks.startVpn.mock.calls[0][0]
+    mocks.stopVpn.mockResolvedValue({})
+    mocks.getVpnStatus.mockResolvedValue({ ...owner, state: 'stopping', running: true, established: false })
     mocks.clearTunFd.mockRejectedValueOnce(new Error('fixture detach failed'))
+    mocks.clearTunFd.mockImplementationOnce(async () => {
+      mocks.getVpnStatus.mockResolvedValue({ ...owner, state: 'stopped', running: false, established: false })
+    })
 
     await expect(vpn.suspendMobileVpnService()).rejects.toThrow('vpn_stop_failed')
     await vpn.suspendMobileVpnService()
@@ -1180,6 +1195,32 @@ describe('Android VPN native boundaries', () => {
     expect(mocks.startVpn).toHaveBeenCalledTimes(2)
   })
 
+  it.each(['Disconnect', 'route rebuild'])('releases the Core descriptor before waiting for the system-bound VPN service to exit during %s', async operation => {
+    setConfig('A'); setReady('A', '10.0.0.1')
+    const vpn = await loadVpnModule()
+    await vpn.onNetworkInstanceChange('A', { strict: true })
+    const owner = mocks.startVpn.mock.calls[0][0]
+    // Android keeps its VPN service bound while Core's duplicated TUN fd
+    // keeps the interface alive, even after the service closes its own fd.
+    mocks.stopVpn.mockImplementationOnce(async () => {
+      mocks.getVpnStatus.mockResolvedValue({ ...owner, state: 'stopping', running: true, established: false })
+      return {}
+    })
+    mocks.clearTunFd.mockImplementationOnce(async () => {
+      mocks.getVpnStatus.mockResolvedValue({ ...owner, state: 'stopped', running: false, established: false })
+    })
+    if (operation === 'route rebuild') setReady('A', '10.0.0.2')
+    const transition = (operation === 'Disconnect' ? vpn.suspendMobileVpnService()
+      : vpn.onNetworkInstanceChange('A', { strict: true })).then(() => 'complete', error => error.message)
+    await vi.advanceTimersByTimeAsync(15100)
+    expect(await transition).toBe('complete')
+    expect(mocks.clearTunFd).toHaveBeenCalledOnce()
+    expect(mocks.clearTunFd).toHaveBeenCalledWith('A', owner.requestId)
+    expect(mocks.startVpn).toHaveBeenCalledTimes(operation === 'Disconnect' ? 1 : 2)
+    if (operation === 'route rebuild') expect(mocks.startVpn.mock.calls[1][0].requestId).not.toBe(owner.requestId)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('does not claim a successful stop while the native service remains active', async () => {
     const vpn = await loadVpnModule()
     mocks.stopVpn.mockImplementationOnce(async () => ({}))
@@ -1190,7 +1231,7 @@ describe('Android VPN native boundaries', () => {
     expect(mocks.startVpn).not.toHaveBeenCalled()
   })
 
-  it('bounds a hung stop status query and retains the Core lease for Retry Disconnect', async () => {
+  it('bounds a hung stop status query after Core detach and still allows Retry Disconnect', async () => {
     setConfig('A'); setReady('A', '10.0.0.1')
     const vpn = await loadVpnModule()
     await vpn.onNetworkInstanceChange('A', { strict: true })
@@ -1200,7 +1241,8 @@ describe('Android VPN native boundaries', () => {
     const stopping = expect(vpn.suspendMobileVpnService()).rejects.toThrow('vpn_stop_timeout')
     await vi.advanceTimersByTimeAsync(15100)
     await stopping
-    expect(mocks.clearTunFd).not.toHaveBeenCalled()
+    expect(mocks.clearTunFd).toHaveBeenCalledOnce()
+    expect(mocks.clearTunFd).toHaveBeenCalledWith('A', owner.requestId)
     mocks.getVpnStatus.mockResolvedValue({ state: 'stopped', running: false })
     await vpn.suspendMobileVpnService()
     expect(mocks.clearTunFd).toHaveBeenCalledOnce()

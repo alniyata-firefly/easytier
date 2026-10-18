@@ -2,7 +2,20 @@ name: Android real IPC smoke
 
 on:
   workflow_dispatch:
+    inputs:
+      api-level:
+        description: Android emulator API
+        type: choice
+        options: ['34', '36']
+        default: '34'
+        required: true
   workflow_call:
+    inputs:
+      api-level:
+        description: Android emulator API (34 or 36)
+        type: string
+        default: '34'
+        required: false
 
 permissions:
   contents: read
@@ -15,6 +28,8 @@ jobs:
   android-ipc-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 100
+    env:
+      ANDROID_SMOKE_API_LEVEL: ${{ inputs['api-level'] || '34' }}
     defaults:
       run:
         shell: bash
@@ -26,6 +41,7 @@ jobs:
 
       - name: Check instrumentation driver without native compilation
         run: |
+          python3 -c 'import os; assert os.environ["ANDROID_SMOKE_API_LEVEL"] in ("34", "36"), "Unsupported Android smoke API"'
           python3 -m unittest discover -s ci/android -p 'test_smoke.py'
           node --check ci/android/ipc-smoke.js
 
@@ -43,7 +59,7 @@ jobs:
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
-          packages: 'platform-tools platforms;android-36 build-tools;35.0.0 ndk;26.0.10792818 emulator system-images;android-34;google_apis;x86_64'
+          packages: platform-tools platforms;android-36 build-tools;35.0.0 ndk;26.0.10792818 emulator system-images;android-${{ env.ANDROID_SMOKE_API_LEVEL }};google_apis;x86_64
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
@@ -68,7 +84,7 @@ jobs:
         run: python3 ci/android/smoke.py --phase build --source . --output "$RUNNER_TEMP/android-ipc-smoke"
 
       - name: Run actual WebView bridge, GUI Connect and Android VPN lifecycle
-        run: python3 ci/android/smoke.py --phase run --source . --output "$RUNNER_TEMP/android-ipc-smoke"
+        run: python3 ci/android/smoke.py --phase run --source . --output "$RUNNER_TEMP/android-ipc-smoke" --api-level "$ANDROID_SMOKE_API_LEVEL"
 
       - name: Upload test evidence only
         if: always()

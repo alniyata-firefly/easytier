@@ -207,15 +207,28 @@ def validate_report(report):
         raise RuntimeError("Android report did not confirm both complete VPN cycles")
     events = report.get("events", [])
     passed = {event.get("phase") for event in events if event.get("status") == "pass"}
-    required = {"cold_direct_js_status", "core_version", "local_rpc_init", "cold_validated_getter", "complete"}
+    queries = {event.get("phase") for event in events if event.get("status") == "query_response"}
+    transitions = {event.get("phase") for event in events if event.get("status") == "transition_pass"}
+    required = {"core_version", "local_rpc_init", "cold_validated_getter", "complete"}
+    required_transitions = set()
     for cycle in (1, 2):
         required.update(f"{phase}_{cycle}" for phase in ["resume", "config_parse", "core_start", "vpn_permission",
-                        "native_start", "native_owner", "native_establish_status", "rust_set_tun_fd", "validated_getter",
-                        "system_vpn_present", "native_stop", "native_stopped_status", "rust_clear_tun_fd", "core_stop",
+                        "native_start", "native_owner", "rust_set_tun_fd", "validated_getter",
+                        "system_vpn_present", "native_stop", "rust_clear_tun_fd", "core_stop",
                         "stopped_validated_getter", "system_vpn_absent"])
+        required_transitions.update(f"{phase}_{cycle}" for phase in ["native_establish_status", "native_stopped_status"])
         required.update(f"concurrent_status_{cycle}_{sample}" for sample in range(10))
-    if not required <= passed or any(event.get("status") == "fail" for event in events):
+    if (not required <= passed or not required_transitions <= transitions
+            or not (required_transitions | {"cold_direct_js_status"}) <= queries
+            or any(event.get("status") == "fail" for event in events)):
         raise RuntimeError("Android report is missing successful real IPC stages")
+    for cycle in (1, 2):
+        stop_order = [(f"native_stop_{cycle}", "pass"), (f"rust_clear_tun_fd_{cycle}", "pass"),
+                      (f"native_stopped_status_{cycle}", "transition_pass")]
+        positions = [next(index for index, event in enumerate(events) if (event.get("phase"), event.get("status")) == stage)
+                     for stage in stop_order]
+        if positions != sorted(positions):
+            raise RuntimeError("Native stop must release Core's TUN before awaiting service exit")
     system = report.get("androidSystemObservations", [])
     for cycle in (1, 2):
         for prefix, value in [("system_vpn_present", True), ("system_vpn_absent", False)]:
@@ -317,7 +330,7 @@ def build(source, output, env):
 def run_provenance(proof, current, api_level=34):
     identity = proof.get("driverCommit") if proof.get("reused") else proof["sourceCommit"]
     require(identity == current, "Debug build/driver identity no longer matches this checkout")
-    require(api_level in (34, 36), "Only the API 34 baseline and API 36 reuse checks are supported")
+    require(api_level in (34, 36), "Only the API 34 and API 36 smoke checks are supported")
     image = f"system-images;android-{api_level};google_apis;x86_64"
     provenance = {"sourceCommit": proof["sourceCommit"], "driverCommit": current,
                   "apkReused": proof.get("reused", False), "apiLevel": api_level,

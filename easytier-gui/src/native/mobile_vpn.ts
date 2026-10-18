@@ -372,6 +372,10 @@ async function doStopVpn(force = false) {
   console.log('stop vpn')
   const response = await stop_vpn()
   if (response?.errorMsg) throw new Error('vpn_stop_failed')
+  // Android keeps the service bound while Core's duplicated TUN descriptor
+  // keeps its interface alive. Release this exact Core owner before waiting
+  // for onDestroy; waiting first would prevent the service from ever exiting.
+  await clearCoreTunRequest(request)
   // The event is advisory: Android may stop a service before its WebView
   // listener is attached, or a listener may have been recreated on resume.
   const deadline = Date.now() + VPN_TRANSITION_TIMEOUT_MS
@@ -385,7 +389,6 @@ async function doStopVpn(force = false) {
     if (Date.now() >= deadline) throw new Error('vpn_stop_timeout')
     await new Promise(resolve => setTimeout(resolve, 50))
   }
-  await clearCoreTunRequest(request)
   curVpnStatus.running = false
   activeVpnInstanceId = undefined
   resetVpnConfigStatus()
