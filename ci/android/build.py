@@ -71,6 +71,10 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def apk_filename(version, commit):
+    return f"EasyTier-{version}-adapted-{commit[:8]}-arm64.apk"
+
+
 def prepare_offline_dependencies(source, environment, output):
     """Cache the complete locked graph, then prove Tauri's metadata is offline.
 
@@ -126,6 +130,8 @@ def main():
     version = config["version"]
     if version != "2.7.2" or config["bundle"]["android"]["versionCode"] != VERSION_CODE:
         raise RuntimeError("retain version 2.7.2 and versionCode 2007003 for this release")
+    if config.get("productName") != "EasyTier":
+        raise RuntimeError("release product name must be EasyTier")
     if not checked(["rustc", "--version"]).startswith("rustc 1.95."):
         raise RuntimeError("Rust 1.95 is required")
     ndk = sdk / "ndk/26.0.10792818"
@@ -201,7 +207,7 @@ def main():
                       and path.stat().st_mtime >= started - 1]
         if len(candidates) != 1:
             raise RuntimeError(f"expected one freshly built arm64 release APK, found {len(candidates)}")
-        destination = artifacts / f"easytier-gui-{version}-adapted-{commit[:8]}-arm64.apk"
+        destination = artifacts / apk_filename(version, commit)
         shutil.copy2(candidates[0], destination)
         verify = [sys.executable, TOOLS / "verify_apk.py", "--apk", destination, "--source", source,
                   "--sdk", sdk, "--jdk", jdk, "--commit", commit,
@@ -221,6 +227,7 @@ def main():
     files = [{"path": path.name, "sha256": digest(path), "bytes": path.stat().st_size}
              for path in sorted(artifacts.iterdir()) if path.is_file()]
     manifest = {"source_commit": commit, "version": version, "platform": "android-arm64", "files": files,
+                "product_name": "EasyTier",
                 "application_id": "com.kkrainbow.easytier.adapted", "version_code": VERSION_CODE,
                 "physical_android_device_tested": False}
     (artifacts / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

@@ -39,6 +39,17 @@ def check_package_identity(badging, version):
           + json.dumps({"expected": expected, "observed": observed}, ensure_ascii=False))
 
 
+def check_product_labels(badging):
+    labels = dict(re.findall(r"^(application-label(?:-[^:]+)?):'([^']*)'$", badging, re.M))
+    check(labels.get("application-label") == "EasyTier" and all(value == "EasyTier" for value in labels.values()),
+          "APK application labels must all be EasyTier")
+    launchers = re.findall(r"^launchable-activity: name='([^']+)' label='([^']*)'", badging, re.M)
+    check(launchers == [("com.kkrainbow.easytier.MainActivity", "EasyTier")],
+          "APK launcher label must be EasyTier and retain its Java namespace")
+    return {"product_name": "EasyTier", "application_label": labels["application-label"],
+            "application_labels": labels, "launcher_label": launchers[0][1]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apk", type=Path, required=True)
@@ -67,6 +78,7 @@ def main():
           "APK signer differs from the existing adapted release certificate")
     badging = run([aapt, "dump", "badging", args.apk])
     check_package_identity(badging, version)
+    labels = check_product_labels(badging)
     check("platformBuildVersionCode='36'" in badging, "APK was not compiled against Android API 36")
     check(re.search(r"^sdkVersion:'24'$", badging, re.M), "APK minSdk must remain 24")
     check(re.search(r"^targetSdkVersion:'34'$", badging, re.M), "APK targetSdk must remain 34")
@@ -119,6 +131,7 @@ def main():
     bridge = verify_apk_bridge(args.apk, mapping)
     proof = {
         "status": "PASS", "source_commit": args.commit, "version": version,
+        **labels,
         "version_code": VERSION_CODE, "application_id": APPLICATION_ID, "abi": "arm64-v8a",
         "apk_sha256": hashlib.sha256(args.apk.read_bytes()).hexdigest(),
         "native_sha256": hashlib.sha256(library).hexdigest(), "core_version": core_version,

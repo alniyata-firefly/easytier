@@ -18,6 +18,22 @@ TAG = "fix-2.7.2-test"
 
 
 class AndroidWebNotesCompatibilityTests(unittest.TestCase):
+    def test_existing_android16_and_full_release_notes_remain_byte_exact(self):
+        cases = [
+            ({"repository": "alniyata-firefly/easytier", "run_id": 39096810004,
+              "source_commit": "5fd7bb09f14aef5dc8fccb4325a58fad6dc6c9cd",
+              "tag": "fix-2.7.2-android16-20261018", "profile": "android-web"},
+             "EasyTier 2.7.2 Android 16 VPN 修复预发布",
+             "b2c34a867a85c34c9ff7a6d660b4f73c775d5bb75d010bc86f8d525b8514a407"),
+            ({"repository": REPO, "run_id": RUN, "source_commit": COMMIT, "tag": TAG, "profile": "full"},
+             "EasyTier 2.7.2 修复版", "deba3b1a9e95d14f397e65644fb5c65fedd88da1a120e6fd4c39f5f5143d1558"),
+        ]
+        for state, title, digest in cases:
+            with self.subTest(commit=state['source_commit']):
+                actual_title, body = promote.release_text(state)
+                self.assertEqual(actual_title, title)
+                self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), digest)
+
     def test_existing_abc_notes_remain_byte_exact_for_promotion_and_fixed_retirement(self):
         state = {"repository": "alniyata-firefly/easytier", "run_id": 39087615977,
                  "source_commit": "abc526b847f2539d175940c7ba5d65a5dee270e5",
@@ -340,6 +356,77 @@ class AndroidWebPromotionTests(unittest.TestCase):
         legacy_state = {key: value for key, value in full_state.items() if key != "profile"}
         self.assertEqual(promote.release_text(full_state), promote.release_text(legacy_state))
         self.assertNotIn(":full -->", promote.release_text(full_state)[1])
+
+
+class EasyTierClientsPromotionTests(unittest.TestCase):
+    write_metadata = PromotionTests.write_metadata
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        records = []
+        for name in sorted(promote.expected_names(COMMIT, 'clients', 'EasyTier')):
+            payload = ('branded fixture: ' + name).encode()
+            (self.root / name).write_bytes(payload)
+            records.append({'path': name, 'bytes': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()})
+        self.manifest = {'source_commit': COMMIT, 'version': promote.VERSION, 'platform': 'release',
+                         'product_name': 'EasyTier', 'platforms': sorted(promote.PROFILES['clients']), 'files': records}
+        self.write_metadata()
+        self.api = FakeGitHub()
+        self.state = promote.validate_source(self.api, REPO, RUN, COMMIT, TAG, 'clients')
+
+    def test_clients_profile_requires_verified_brand_and_exact_new_names(self):
+        records = promote.validate_bundle(self.root, COMMIT, 'clients')
+        self.assertEqual(len(records), 12)
+        self.assertFalse(any('easytier-gui' in name or 'linux-' in name for name in records))
+        self.assertIn('EasyTier-2.7.2-adapted-1ec2b559-arm64.apk', records)
+        self.assertIn('EasyTier_2.7.2_x64-setup.exe', records)
+        self.assertIn('EasyTier_2.7.2_aarch64.dmg', records)
+        self.manifest.pop('product_name')
+        self.write_metadata()
+        with self.assertRaises(promote.Refused):
+            promote.promote(self.api, self.root, self.state)
+        self.assertEqual(self.api.writes, [])
+
+    def test_mixed_or_unknown_brand_and_profile_never_start_publication(self):
+        for brand in ('EasyTier GUI', 'legacy'):
+            self.manifest['product_name'] = brand
+            self.write_metadata()
+            with self.subTest(brand=brand), self.assertRaises(ValueError):
+                promote.promote(self.api, self.root, self.state)
+        self.manifest['product_name'] = 'EasyTier'
+        self.manifest['files'][0]['path'] = 'easytier-gui_2.7.2_x64-setup.exe'
+        legacy = self.root / self.manifest['files'][0]['path']
+        legacy.write_bytes(b'legacy fixture')
+        self.manifest['files'][0] = {'path': legacy.name, 'bytes': legacy.stat().st_size, 'sha256': promote.digest(legacy)}
+        self.write_metadata()
+        with self.assertRaises(promote.Refused):
+            promote.promote(self.api, self.root, self.state)
+        self.assertEqual(self.api.writes, [])
+        self.assertEqual(self.api.uploaded, [])
+
+    def test_branded_clients_publish_originals_and_resume_without_changing_old_releases(self):
+        self.api.fail_upload_at = 2
+        with self.assertRaises(promote.Refused):
+            promote.promote(self.api, self.root, self.state)
+        self.assertTrue(self.api.release['draft'])
+        completed = self.api.uploaded.copy()
+        result = promote.promote(self.api, self.root, self.state)
+        self.assertEqual(result['asset_count'], 12)
+        self.assertEqual(result['profile'], 'clients')
+        self.assertFalse(self.api.release['draft'])
+        self.assertTrue(self.api.release['prerelease'])
+        self.assertTrue(all(self.api.uploaded.count(name) == 1 for name in completed))
+        title, body = promote.release_text({**self.state, 'product_name': 'EasyTier'})
+        self.assertEqual((self.api.release['name'], self.api.release['body']), (title, body))
+        self.assertEqual(title, 'EasyTier 2.7.2 名称与图标更新预发布')
+        for text in ('对称图标', '本次仅调整客户端名称', '不新增或宣称修复 VPN', '不包含新的 Linux Core',
+                     'versionCode `2007003`', '真机验收', '本次发布不重新编译或重新签名', ':clients:EasyTier -->'):
+            self.assertIn(text, body)
+        self.assertNotIn('修复连接/断开生命周期', body)
+        with self.assertRaises(promote.Refused):
+            promote.release_text(self.state)
 
 
 if __name__ == "__main__":

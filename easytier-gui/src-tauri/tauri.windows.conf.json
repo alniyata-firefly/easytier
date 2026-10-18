@@ -1,15 +1,22 @@
 {
-    "bundle": {
-        "externalBin": [],
-        "resources": [
-            "./wintun.dll",
-            "./Packet.dll",
-            "./*.sys"
-        ],
-        "windows": {
-            "webviewInstallMode": {
-                "type": "embedBootstrapper"
-            }
-        }
+  "bundle": {
+    "externalBin": [],
+    "resources": [
+      "./wintun.dll",
+      "./Packet.dll",
+      "./*.sys"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "wix": {
+        "upgradeCode": "f8a6cf4a-bdd8-5924-ac7e-aa00c156b9c1",
+        "template": "windows/main.wxs"
+      },
+      "nsis": {
+        "template": "windows/installer.nsi"
+      }
     }
+  }
 }

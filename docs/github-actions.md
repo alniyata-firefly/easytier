@@ -18,6 +18,10 @@
 
 每次构建的 **Artifacts → release-packages** 包含汇总产物、SHA256SUMS 和 build-manifest.json。各平台通过完整 Git 提交 ID 与文件摘要核验，禁止混入其他提交的安装包。下载 Artifacts 需要登录 GitHub；发布到 Releases 的包按仓库可见性访问。
 
+只更新客户端名称或图标时，关闭 `linux`、开启 `gui` 和 `android`，构建 Android、Windows、macOS 和 Web 静态包。新客户端的显示名称及安装包前缀为 `EasyTier`，技术归档 `easytier-web-static-*` 和内部原生程序名保持兼容；各平台清单声明 `product_name: EasyTier`，汇总时拒绝混合新旧品牌产物。通过 **Publish existing verified packages** 的 `clients` profile 发布同一次成功构建的原件，保留 `2.7.2`、现有应用标识与 Android 签名，不替换历史归档或更新生产后端。
+
+Windows 下载脚本兼容 `EasyTier_*` 和历史 `easytier-gui_*` 安装包；同一格式同时出现两个名称会拒绝选择。默认仍只选择稳定版，下载预发布需显式指定已有标签，例如 `./script/install.ps1 -Version fix-2.7.2-product-name-20261018`。脚本默认仅下载并校验，不启动安装器。
+
 推送与 Cargo 版本相同的 `v*` 标签（例如当前 `v2.7.2`）会构建完整平台集合，全部成功后创建 **Draft release**。检查产物后再发布草稿。编译成功代表自动化及包内容检查通过，不能替代实体手机、Windows 和 macOS 的 VPN 实机验收。工作流不登录生产服务器，不自动部署。
 
 ## Android 签名

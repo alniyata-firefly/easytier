@@ -15,10 +15,30 @@ import zipfile
 import build
 from signing import CERTIFICATE_SHA256, SECRETS, property_value, require_secrets, signing_inputs
 from verify_page_size import inspect_native_libraries
-from verify_apk import check_package_identity
+from verify_apk import check_package_identity, check_product_labels
 
 
 class AndroidCiTests(unittest.TestCase):
+    def test_easy_tier_distribution_name_preserves_build_identity(self):
+        self.assertEqual(build.apk_filename("2.7.2", "a" * 40), "EasyTier-2.7.2-adapted-aaaaaaaa-arm64.apk")
+
+    def test_application_and_launcher_labels_are_verified_and_recorded(self):
+        badging = ("application-label:'EasyTier'\napplication-label-en:'EasyTier'\n"
+                   "application-label-zh-CN:'EasyTier'\n"
+                   "launchable-activity: name='com.kkrainbow.easytier.MainActivity' label='EasyTier' icon=''\n")
+        proof = check_product_labels(badging)
+        self.assertEqual(proof['product_name'], 'EasyTier')
+        self.assertEqual(proof['application_label'], 'EasyTier')
+        self.assertEqual(proof['launcher_label'], 'EasyTier')
+        self.assertEqual(len(proof['application_labels']), 3)
+        for invalid in [badging.replace("application-label:'EasyTier'", "application-label:'EasyTier GUI'"),
+                        badging.replace("application-label-zh-CN:'EasyTier'", "application-label-zh-CN:'easytier-gui'"),
+                        badging.replace("label='EasyTier'", "label='EasyTier GUI'"),
+                        badging.replace('com.kkrainbow.easytier.MainActivity', 'com.other.MainActivity'),
+                        "application-label:'EasyTier'\n", ""]:
+            with self.subTest(badging=invalid), self.assertRaises(RuntimeError):
+                check_product_labels(invalid)
+
     def test_apk_identity_accepts_the_exact_adapted_release(self):
         check_package_identity(
             "package: name='com.kkrainbow.easytier.adapted' versionCode='2007003' versionName='2.7.2' platformBuildVersionCode='36'\n",

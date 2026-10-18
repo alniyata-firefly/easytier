@@ -1,11 +1,13 @@
 <#
 .SYNOPSIS
-Download and verify this fork's published Windows x64 GUI installer.
+Download and verify this fork's published Windows x64 EasyTier installer.
 .DESCRIPTION
 Default is download-only. -RunInstaller explicitly starts the verified installer.
 Project origin: https://github.com/EasyTier/EasyTier. GNU LGPL v3; see ../LICENSE.
 .EXAMPLE
 .\install.ps1 -Version v2.7.2 -Directory C:\Downloads\EasyTier -Format nsis
+.EXAMPLE
+.\install.ps1 -Version fix-2.7.2-product-name-20261018 -Directory C:\Downloads\EasyTier
 #>
 [CmdletBinding()]
 param(
@@ -21,7 +23,10 @@ $script:Repository = 'alniyata-firefly/easytier'
 function Get-ReleaseApiUrl([string]$RequestedVersion) {
     $base = "https://api.github.com/repos/$script:Repository/releases"
     if ($RequestedVersion -eq 'latest') { return "$base/latest" }
-    if ($RequestedVersion -notmatch '^v?\d+\.\d+\.\d+$') { throw 'Version must be latest or a release version such as v2.7.2' }
+    if ($RequestedVersion.Length -le 84 -and $RequestedVersion -cmatch '^fix-\d+\.\d+\.\d+(?:-[A-Za-z0-9._-]+)?$') {
+        return "$base/tags/$([Uri]::EscapeDataString($RequestedVersion))"
+    }
+    if ($RequestedVersion -notmatch '^v?\d+\.\d+\.\d+$') { throw 'Version must be latest, a release version such as v2.7.2, or an explicit fix-2.7.2-* tag' }
     $tag = if ($RequestedVersion.StartsWith('v')) { $RequestedVersion } else { 'v' + $RequestedVersion }
     return "$base/tags/$([Uri]::EscapeDataString($tag))"
 }
@@ -35,16 +40,25 @@ function Assert-ReleaseAssetUrl($Asset, [string]$Tag) {
     }
 }
 
-function Select-ReleaseAssets($Release, [string]$InstallerFormat) {
-    if ($Release.draft -ne $false -or $Release.prerelease -ne $false) { throw 'A published stable release is required' }
+function Select-ReleaseAssets($Release, [string]$InstallerFormat, [string]$RequestedVersion = 'latest') {
+    $explicitFix = $RequestedVersion.Length -le 84 -and $RequestedVersion -cmatch '^fix-\d+\.\d+\.\d+(?:-[A-Za-z0-9._-]+)?$'
+    if ($Release.draft -ne $false -or ($Release.prerelease -ne $false -and -not ($explicitFix -and $Release.prerelease -eq $true))) {
+        throw 'A published stable release or an explicitly requested fix-* prerelease is required'
+    }
     $tag = [string]$Release.tag_name
-    if ($tag -cnotmatch '^v\d+\.\d+\.\d+$') { throw 'Unexpected release version tag' }
-    $number = [Regex]::Escape($tag.Substring(1))
-    $pattern = if ($InstallerFormat -eq 'msi') { '^easytier-gui_' + $number + '_x64_[A-Za-z0-9-]+\.msi$' } `
-               else { '^easytier-gui_' + $number + '_x64-setup\.exe$' }
+    if ($explicitFix) {
+        $fixVersion = [Regex]::Match($tag, '^fix-(\d+\.\d+\.\d+)(?:-|$)')
+        if ($tag -cne $RequestedVersion -or -not $fixVersion.Success) { throw 'Unexpected requested prerelease tag' }
+        $number = [Regex]::Escape($fixVersion.Groups[1].Value)
+    } else {
+        if ($tag -cnotmatch '^v\d+\.\d+\.\d+$') { throw 'Unexpected release version tag' }
+        $number = [Regex]::Escape($tag.Substring(1))
+    }
+    $pattern = if ($InstallerFormat -eq 'msi') { '^(?:EasyTier|easytier-gui)_' + $number + '_x64_[A-Za-z0-9-]+\.msi$' } `
+               else { '^(?:EasyTier|easytier-gui)_' + $number + '_x64-setup\.exe$' }
     $packages = @($Release.assets | Where-Object { $_.name -cmatch $pattern })
     $checksums = @($Release.assets | Where-Object { $_.name -ceq 'SHA256SUMS' })
-    if ($packages.Count -ne 1 -or $checksums.Count -ne 1) { throw 'Release must contain exactly one requested x64 GUI installer and SHA256SUMS' }
+    if ($packages.Count -ne 1 -or $checksums.Count -ne 1) { throw 'Release must contain exactly one requested x64 EasyTier installer and SHA256SUMS' }
     Assert-ReleaseAssetUrl $packages[0] $tag
     Assert-ReleaseAssetUrl $checksums[0] $tag
     return @{ Package = $packages[0]; Checksums = $checksums[0] }
@@ -63,13 +77,13 @@ function Get-ExpectedChecksum([string]$Text, [string]$Name) {
 
 function Invoke-EasyTierDownload {
     $architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
-    if ($architecture -ne 'AMD64') { throw 'Only the Windows x64 GUI installer is currently published by this fork' }
+    if ($architecture -ne 'AMD64') { throw 'Only the Windows x64 EasyTier installer is currently published by this fork' }
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $api = Get-ReleaseApiUrl $Version
     $headers = @{ 'User-Agent' = 'EasyTier-Fork-Installer'; Accept = 'application/vnd.github+json' }
     try { $release = Invoke-RestMethod -Uri $api -Headers $headers }
     catch { throw "No published release could be read from this fork/version. See https://github.com/$script:Repository/releases. There is no upstream fallback." }
-    $choice = Select-ReleaseAssets $release $Format
+    $choice = Select-ReleaseAssets $release $Format $Version
     $destinationDirectory = [IO.Path]::GetFullPath($Directory)
     [IO.Directory]::CreateDirectory($destinationDirectory) | Out-Null
     $destination = Join-Path $destinationDirectory $choice.Package.name

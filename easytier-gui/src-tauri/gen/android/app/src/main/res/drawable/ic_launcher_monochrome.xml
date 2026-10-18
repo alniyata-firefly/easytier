@@ -1,8 +1,8 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="40" android:viewportHeight="40">
   <group android:translateX="8" android:translateY="8">
-    <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M3,6a2,2 0 1,0 4,0a2,2 0 1,0 -4,0"/>
-    <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M17,6a2,2 0 1,0 4,0a2,2 0 1,0 -4,0"/>
-    <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M10,18a2,2 0 1,0 4,0a2,2 0 1,0 -4,0"/>
-    <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="m6 8 5 8m7-8-5 8M7 6h10"/>
+    <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M7.75 6.370835H16.25M6.625 8.319392L10.875 15.680608M17.375 8.319392L13.125 15.680608"/>
+    <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M3.25,6.37083a2.25,2.25 0 1,0 4.5,0a2.25,2.25 0 1,0 -4.5,0"/>
+    <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M16.25,6.37083a2.25,2.25 0 1,0 4.5,0a2.25,2.25 0 1,0 -4.5,0"/>
+    <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M9.75,17.6292a2.25,2.25 0 1,0 4.5,0a2.25,2.25 0 1,0 -4.5,0"/>
   </group>
 </vector>

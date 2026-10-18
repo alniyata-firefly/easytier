@@ -130,7 +130,7 @@ for (const scenario of [
   await page.getByRole('button', { name: '设置', exact: true }).click();
   await page.getByRole('button', { name: '关于', exact: true }).click();
   const about = page.getByRole('dialog', { name: '关于', exact: true });
-  assert.equal(await about.locator('dt').filter({ hasText: /^EasyTier GUI$/ }).evaluate(el => el.nextElementSibling.textContent), version);
+  assert.equal(await about.locator('dt').filter({ hasText: /^EasyTier$/ }).evaluate(el => el.nextElementSibling.textContent), version);
   assert.equal(await about.locator('dt').filter({ hasText: /^Core$/ }).evaluate(el => el.nextElementSibling.textContent), coreVersion);
   await page.reload();
   await page.getByRole('button', { name: /Imported offline/ }).waitFor();

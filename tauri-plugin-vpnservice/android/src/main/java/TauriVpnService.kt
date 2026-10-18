@@ -304,7 +304,7 @@ class TauriVpnService : VpnService() {
 
     private fun createVpnInterface(args: Bundle?): ParcelFileDescriptor {
         var builder = Builder()
-                .setSession("TauriVpnService")
+                .setSession("EasyTier")
                 .setBlocking(false)
         
         var mtu = args?.getInt(MTU) ?: 1500

@@ -18,7 +18,8 @@ VERSION = "2.7.2"
 WITHDRAWN_TAGS = {"fix-2.7.2-20261018"}
 PLATFORMS = {"android-arm64", "gui-macos-aarch64", "gui-macos-x86_64",
              "gui-windows-x86_64", "linux-aarch64", "linux-x86_64", "web-static"}
-PROFILES = {"full": PLATFORMS, "android-web": {"android-arm64", "web-static"}}
+PROFILES = {"full": PLATFORMS, "android-web": {"android-arm64", "web-static"},
+            "clients": PLATFORMS - {"linux-aarch64", "linux-x86_64"}}
 
 
 class Refused(Exception):
@@ -147,18 +148,23 @@ def check_tag(api, tag, commit):
             "Remote tag does not resolve to the approved commit; refusing to move it")
 
 
-def expected_names(commit, profile="full"):
+def expected_names(commit, profile="full", product_name=None):
     validate_profile(profile)
+    require(product_name in (None, "EasyTier"), "Unknown package product name")
+    product = product_name or "easytier-gui"
     short = commit[:8]
-    android_web = {f"easytier-gui-{VERSION}-adapted-{short}-arm64.apk",
-                   f"easytier-gui-{VERSION}-adapted-{short}-arm64.apk.sha256", "verification.json",
+    android_web = {f"{product}-{VERSION}-adapted-{short}-arm64.apk",
+                   f"{product}-{VERSION}-adapted-{short}-arm64.apk.sha256", "verification.json",
                    f"easytier-web-static-{VERSION}-{short}.tar.gz"}
     if profile == "android-web":
         return android_web
-    return android_web | {
-            f"easytier-gui_{VERSION}_aarch64.dmg", f"easytier-gui-{VERSION}-arm64.app.tgz",
-            f"easytier-gui_{VERSION}_x64.dmg", f"easytier-gui-{VERSION}-x86_64.app.tgz",
-            f"easytier-gui_{VERSION}_x64-setup.exe", f"easytier-gui_{VERSION}_x64_en-US.msi",
+    clients = android_web | {
+            f"{product}_{VERSION}_aarch64.dmg", f"{product}-{VERSION}-arm64.app.tgz",
+            f"{product}_{VERSION}_x64.dmg", f"{product}-{VERSION}-x86_64.app.tgz",
+            f"{product}_{VERSION}_x64-setup.exe", f"{product}_{VERSION}_x64_en-US.msi"}
+    if profile == "clients":
+        return clients
+    return clients | {
             f"easytier-linux-aarch64-{VERSION}-{short}.tar.gz", f"easytier-linux-x86_64-{VERSION}-{short}.tar.gz"}
 
 
@@ -173,8 +179,10 @@ def validate_bundle(root, commit, profile="full"):
             "Package platform set differs from the selected profile")
     # Deliberately explicit: checkout HEAD contains this publisher, not the older built source.
     files = validate_manifest(root, manifest, commit, VERSION)
+    product_name = manifest.get("product_name")
+    require(profile != "clients" or product_name == "EasyTier", "Client branding requires explicit EasyTier product metadata")
     names = {item.name for item in files}
-    require(names == expected_names(commit, profile) and len(files) == len(names), "Missing, duplicate or unexpected original assets")
+    require(names == expected_names(commit, profile, product_name) and len(files) == len(names), "Missing, duplicate or unexpected original assets")
     require({item.name for item in entries} == names | {"build-manifest.json", "SHA256SUMS"}, "Package has unrecorded files")
     sums = "".join(f"{item['sha256']}  {item['path']}\n" for item in manifest["files"])
     require((root / "SHA256SUMS").read_text() == sums, "SHA256SUMS differs from the original manifest")
@@ -185,6 +193,27 @@ def release_text(state):
     profile = state.get("profile", "full")
     validate_profile(profile)
     marker = f"<!-- verified-ci-promotion:{state['repository']}:{state['run_id']}:{state['source_commit']}:{state['tag']} -->"
+    if profile == "clients" or state.get("product_name") is not None:
+        require(state.get("product_name") == "EasyTier", "Client notes require verified EasyTier product metadata")
+        marker = marker.removesuffix(" -->") + f":{profile}:EasyTier -->"
+        attachments = {
+            "clients": "附件包含 Android ARM64、Windows x64、macOS Intel / Apple Silicon 客户端，以及同源 Web 静态文件；不包含新的 Linux Core、CLI 或服务端包。",
+            "android-web": "附件仅包含 Android ARM64 客户端及同源 Web 静态文件；不包含新的桌面客户端、Linux Core、CLI 或服务端包。",
+            "full": "附件包含 Android ARM64、Windows x64、macOS Intel / Apple Silicon 客户端、Linux x64/ARM64 Core、CLI、Web 及同源 Web 静态文件。",
+        }[profile]
+        body = f"""{marker}
+应用显示名称统一为 **EasyTier**，并更新为对称图标；应用版本保持 **{VERSION}**。
+
+源码提交：`{state['source_commit']}`。全部原始文件来自成功的 [Actions #{state['run_id']}](https://github.com/{state['repository']}/actions/runs/{state['run_id']})，本次发布不重新编译或重新签名。
+
+- 本次仅调整客户端名称、图标和分发文件名，不新增或宣称修复 VPN 连接行为。
+- {attachments}
+- Android 保留原应用标识、签名及 versionCode `2007003`；桌面保留原应用标识和安装升级身份。同版本替换不会成为递增版本号自动升级。
+- 已完成 CI 包校验与 SHA-256 核验。**未进行 Android 手机或 Windows/macOS 客户端真机验收。** macOS 为 ad-hoc 签名，未经 Apple 公证。
+
+安装前核对 `SHA256SUMS` 与 `build-manifest.json`。本次仅发布 CI 原件，不部署生产服务或节点，也不改写旧发布。
+"""
+        return f"EasyTier {VERSION} 名称与图标更新预发布", body
     if profile == "android-web":
         marker = marker.removesuffix(" -->") + ":android-web -->"
         if state['source_commit'] == '5fd7bb09f14aef5dc8fccb4325a58fad6dc6c9cd':
@@ -287,7 +316,8 @@ def promote(api, root, state):
     records = validate_bundle(root, state["source_commit"], profile)
     require(validate_source(api, state["repository"], state["run_id"], state["source_commit"], state["tag"], profile) == state,
             "Source artifact identity changed after preflight")
-    title, body = release_text(state)
+    product_name = json.loads((root / "build-manifest.json").read_text()).get("product_name")
+    title, body = release_text({**state, **({"product_name": product_name} if product_name else {})})
 
     def owned(release):
         require(type(release.get("id")) is int and release["id"] > 0 and release.get("tag_name") == state["tag"]

@@ -26,6 +26,7 @@ on:
         options:
           - full
           - android-web
+          - clients
 
 permissions:
   actions: read
@@ -37,7 +38,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/android16-vpn-service-exit-20261018'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/android16-vpn-service-exit-20261018' || github.ref == 'refs/heads/feature/easytier-product-name-20261018'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:

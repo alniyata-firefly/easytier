@@ -10,7 +10,7 @@
 | [上联网卡](uplink-interface-policy.md) | 自动识别、手动接口与平台边界 |
 | [部署模板](../easytier-web/deploy/README.zh-CN.md) | systemd 与可选历史采集 |
 | [React Web](../easytier-web/frontend/README.md) | 管理控制台源码与开发 |
-| [React GUI](../easytier-gui/README.md) | 桌面/移动客户端与打包入口 |
+| [EasyTier 客户端](../easytier-gui/README.md) | 桌面/移动客户端与打包入口 |
 | [设计规范](../easytier-web/frontend/DESIGN.md) | 字体、布局、控件及国际化 |
 | [贡献指南](../CONTRIBUTING_zh.md) | 工具链与按范围验证 |
 

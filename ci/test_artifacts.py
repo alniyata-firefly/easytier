@@ -70,6 +70,38 @@ class ArtifactValidation(unittest.TestCase):
             with self.assertRaises(ValueError):
                 artifacts.collect(incoming.parent, output, ["fixture"])
 
+    def test_collect_preserves_verified_brand_or_legacy_and_rejects_mixing(self):
+        for name, products in [('branded', ['EasyTier', 'EasyTier']), ('legacy', [None, None]),
+                               ('mixed', ['EasyTier', None])]:
+            incoming = self.root / name
+            for index, product in enumerate(products):
+                platform = f'client-{index}'
+                directory = incoming / platform
+                directory.mkdir(parents=True)
+                asset = directory / f'{platform}.bin'
+                asset.write_bytes(b'fixture')
+                manifest = {'source_commit': COMMIT, 'version': VERSION, 'platform': platform,
+                            'files': [artifacts.file_record(directory, asset)]}
+                if product is not None:
+                    manifest['product_name'] = product
+                artifacts.write_json(directory / 'build-manifest.json', manifest)
+            output = self.root / f'{name}-release'
+            with patch.object(artifacts, 'source', return_value=(COMMIT, VERSION)):
+                if name == 'mixed':
+                    with self.assertRaisesRegex(ValueError, 'mix EasyTier and legacy'):
+                        artifacts.collect(incoming, output, ['client-0', 'client-1'])
+                    self.assertFalse(output.exists())
+                else:
+                    artifacts.collect(incoming, output, ['client-0', 'client-1'])
+                    result = json.loads((output / 'build-manifest.json').read_text())
+                    self.assertEqual(result.get('product_name'), products[0])
+                    self.assertEqual(len(result['files']), 2)
+
+    def test_unknown_product_name_is_rejected(self):
+        self.manifest['product_name'] = 'EasyTier GUI'
+        with self.assertRaisesRegex(ValueError, 'unknown artifact product'):
+            artifacts.validate_manifest(self.root, self.manifest, COMMIT, VERSION)
+
 
 class PackagePlanning(unittest.TestCase):
     def setUp(self):
@@ -102,6 +134,16 @@ class PackagePlanning(unittest.TestCase):
             self.env['HAS_' + name] = "true"
         outputs, warning = plan(self.env, VERSION)
         self.assertEqual(outputs["android"], "true")
+        self.assertIsNone(warning)
+
+    def test_manual_clients_only_build_selects_no_linux_platform(self):
+        self.env.update(GITHUB_EVENT_NAME='workflow_dispatch', WANT_LINUX='false')
+        for name in ('ANDROID_KEYSTORE_BASE64', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD'):
+            self.env['HAS_' + name] = 'true'
+        outputs, warning = plan(self.env, VERSION)
+        self.assertEqual((outputs['linux'], outputs['gui'], outputs['android']), ('false', 'true', 'true'))
+        self.assertEqual(set(json.loads(outputs['platforms'])),
+                         {'android-arm64', 'gui-macos-aarch64', 'gui-macos-x86_64', 'gui-windows-x86_64', 'web-static'})
         self.assertIsNone(warning)
 
 

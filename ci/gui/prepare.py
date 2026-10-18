@@ -14,7 +14,26 @@ from frontend_assets import Head, freeze_frontend
 
 TARGETS = {'x86_64-pc-windows-msvc', 'x86_64-apple-darwin', 'aarch64-apple-darwin'}
 IDENTIFIER = 'com.kkrainbow.easytier'
-PRODUCT = 'easytier-gui'
+PRODUCT = 'EasyTier'
+BINARY = 'easytier-gui'
+LEGACY_PRODUCT = 'easytier-gui'
+PUBLISHER = 'kkrainbow'
+# Tauri CLI 2.7.1's old default: UUIDv5(DNS, "easytier-gui.exe.app.x64").
+MSI_UPGRADE_CODE = 'f8a6cf4a-bdd8-5924-ac7e-aa00c156b9c1'
+
+
+def verify_installer_config(config, windows, cargo):
+    if (config['version'] != '2.7.2' or config['identifier'] != IDENTIFIER
+            or config['productName'] != PRODUCT or cargo['package']['name'] != BINARY
+            or config.get('mainBinaryName', BINARY) != BINARY):
+        raise RuntimeError('Application display name or stable native identity changed')
+    if config['bundle'].get('publisher', PUBLISHER) != PUBLISHER:
+        raise RuntimeError('The existing Windows publisher must remain stable')
+    installers = windows['bundle']['windows']
+    if (installers.get('wix', {}).get('upgradeCode', '').lower() != MSI_UPGRADE_CODE
+            or installers.get('wix', {}).get('template') != 'windows/main.wxs'
+            or installers.get('nsis', {}).get('template') != 'windows/installer.nsi'):
+        raise RuntimeError('Windows installation identity compatibility settings are missing')
 
 
 def sha(path):
@@ -37,8 +56,7 @@ def main():
     config = json.loads((source / 'easytier-gui/src-tauri/tauri.conf.json').read_text())
     windows = json.loads((source / 'easytier-gui/src-tauri/tauri.windows.conf.json').read_text())
     cargo = tomllib.loads((source / 'easytier-gui/src-tauri/Cargo.toml').read_text())
-    if config['version'] != '2.7.2' or config['identifier'] != IDENTIFIER or config['productName'] != PRODUCT:
-        raise RuntimeError('GUI version or existing application identity changed')
+    verify_installer_config(config, windows, cargo)
     if windows['bundle']['externalBin'] != [] or 'easytier-core' not in cargo['dependencies']:
         raise RuntimeError('The GUI must contain Core as a Rust dependency, without external Core executables')
     dist = source / 'easytier-gui/dist'
@@ -71,6 +89,8 @@ def main():
     manifest = {'schema_version': 1, 'source_commit': commit, 'version': config['version'],
                 'expected_core_version': config['version'] + '-' + describe,
                 'target': args.target, 'identifier': IDENTIFIER, 'product_name': PRODUCT,
+                'native_binary_name': BINARY,
+                'windows_upgrade_code': MSI_UPGRADE_CODE,
                 'core_embedded': True, 'external_bin': [], **frontend, 'vendor_files': vendor,
                 'brand_files': {name: sha(source / 'easytier-gui/src-tauri/icons' / name)
                                 for name in ['icon.ico', 'icon.icns', 'icon.png']},

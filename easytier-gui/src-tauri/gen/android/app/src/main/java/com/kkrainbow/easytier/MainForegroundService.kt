@@ -55,7 +55,7 @@ class MainForegroundService : Service() {
           try {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "easytier notice",
+                "EasyTier",
                 NotificationManager.IMPORTANCE_LOW
             )
             val manager = getSystemService(NotificationManager::class.java)

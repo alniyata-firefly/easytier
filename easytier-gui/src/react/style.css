@@ -80,8 +80,8 @@ legend { font-weight: 500; padding: 0 0 10px; }
 .shell { display: grid; grid-template-columns: 88px minmax(0,1fr); grid-template-rows: 56px 1fr; min-height: 100dvh; }
 .global-topbar { grid-column: 1/-1; grid-row: 1; display: flex; align-items: center; gap: 20px; position: sticky; top: 0; z-index: 15; height: 56px; padding: 0 24px; background: var(--surface); border-bottom: 1px solid var(--border); }
 .topbar-brand { display: flex; align-items: center; gap: 9px; color: var(--text); font-size: 17px; font-weight: 500; }
-.brand-mark img { display: block; }
-.brand-mark { display: inline-flex; align-items: center; justify-content: center; color: var(--accent-text); width: 28px; height: 28px; }
+.brand-mark img { display: block; flex: none; aspect-ratio: 1; object-fit: contain; }
+.brand-mark { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; color: var(--accent-text); width: 28px; height: 28px; }
 .topbar-scope { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; padding-left: 20px; border-left: 1px solid var(--border); }
 .topbar-scope strong { color: var(--text); font-weight: 500; }
 .topbar-account { display: flex; align-items: center; gap: 14px; margin-left: auto; min-width: 0; }

@@ -9,12 +9,18 @@ export function LanguageSwitch({className=''}: {className?:string}) {
 }
 
 export function BrandMark({size = 24}: {size?: number}) {
-  return <img src={brandMarkUrl} alt="" aria-hidden="true" width={size} height={size} draggable={false}/>;
+  return <img src={brandMarkUrl} alt="" aria-hidden="true" width={size} height={size} draggable={false} style={{flexShrink:0,aspectRatio:'1',objectFit:'contain'}}/>;
 }
+
+// Eight identical teeth, rotated at 45° around the same centre as the hub.
+const settingsOutline = Array.from({length:8}, (_, tooth) =>
+  [[-22.5,7],[-12,7],[-12,9],[12,9],[12,7],[22.5,7]].map(([angle,radius]) => {
+    const radians = (tooth * 45 + angle) * Math.PI / 180;
+    return `${(12 + radius * Math.cos(radians)).toFixed(6)},${(12 + radius * Math.sin(radians)).toFixed(6)}`;
+  })).flat().map((point,index) => `${index ? 'L' : 'M'}${point}`).join(' ') + ' Z';
 
 export function Icon({name, size = 20}: {name: string; size?: number}) {
   const shapes: Record<string, ReactNode> = {
-    network: <><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="m6 8 5 8m7-8-5 8M7 6h10"/></>,
     dashboard: <><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></>,
     devices: <><rect x="3" y="4" width="18" height="12" rx="3"/><path d="M8 21h8m-4-5v5"/></>,
     key: <><circle cx="8" cy="9" r="5"/><path d="m12 13 8 8m-3-3 3-3m-6 0 3-3"/></>,
@@ -41,14 +47,18 @@ export function Icon({name, size = 20}: {name: string; size?: number}) {
     mobile: <><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M10 5h4m-2 14h.01"/></>,
     cloud: <path d="M6.5 19h11a4.5 4.5 0 0 0 .3-9 6 6 0 0 0-11.6-1.3A5.2 5.2 0 0 0 6.5 19Z"/>,
     switch: <><rect x="2" y="7" width="20" height="10" rx="1.5"/>{[5,9,13,17].map(x=><rect key={x} x={x} y="11" width="2" height="3" rx=".25"/>)}<path d="M5 9h.01m4 0h.01m4 0h.01m4 0h.01"/></>,
-    settings: <><circle cx="12" cy="12" r="3"/><path d="m10 3-1 3-3 1-3-1-1 4 3 2v3l-2 3 4 2 2-2h3l3 2 3-3-1-3 1-3 3-1-1-4-3 1-3-1-1-3Z"/></>,
+    settings: <><circle cx="12" cy="12" r="3"/><path d={settingsOutline}/></>,
     clock: <><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></>,
     search: <><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></>,
     info: <><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/></>,
     pause: <path d="M8 5v14m8-14v14"/>, play: <path d="m7 4 14 8-14 8Z"/>,
     download: <path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>,
   };
-  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{shapes[name] ?? shapes.network}</svg>;
+  if (!Object.prototype.hasOwnProperty.call(shapes,name)) {
+    const mask = `url("${brandMarkUrl.replace(/"/g,'%22')}")`;
+    return <svg width={size} height={size} viewBox="0 0 24 24" preserveAspectRatio="xMidYMid meet" aria-hidden="true" style={{flexShrink:0,aspectRatio:'1',backgroundColor:'currentColor',maskImage:mask,WebkitMaskImage:mask,maskSize:'contain',WebkitMaskSize:'contain',maskPosition:'center',WebkitMaskPosition:'center',maskRepeat:'no-repeat',WebkitMaskRepeat:'no-repeat'}}/>;
+  }
+  return <svg width={size} height={size} viewBox="0 0 24 24" preserveAspectRatio="xMidYMid meet" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{flexShrink:0,aspectRatio:'1'}}>{shapes[name]}</svg>;
 }
 
 export function Button({children, icon, busy, tone = 'primary', className = '', disabled, ...props}: ButtonHTMLAttributes<HTMLButtonElement> & {icon?: string; busy?: boolean; tone?: 'primary'|'danger'|'ghost'}) {

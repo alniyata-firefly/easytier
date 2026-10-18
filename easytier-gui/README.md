@@ -1,4 +1,4 @@
-# EasyTier React GUI
+# EasyTier
 
 本目录提供本分支的 Windows、macOS 和 Android 客户端。界面采用 React、TypeScript 与 Tauri 2，Core 编译进原生应用，不依赖另行安装的 Core 进程。来源和许可见[仓库 README](../README.md#项目来源与下游改造)及 [LICENSE](../LICENSE)。
 

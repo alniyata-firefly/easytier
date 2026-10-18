@@ -1985,8 +1985,8 @@ mod service {
             work_directory: std::env::current_dir()?,
             environment: service_environment(),
             disable_autostart: false,
-            description: Some("EasyTier Gui Service".to_string()),
-            display_name: Some("EasyTier Gui Service".to_string()),
+            description: Some("EasyTier".to_string()),
+            display_name: Some("EasyTier".to_string()),
             disable_restart_on_failure: false,
         };
         service

@@ -87,7 +87,7 @@ sudo ./easytier-core --network-name example-net --network-secret CHANGE_ME \
 
 - [GitHub Actions 与签名配置](docs/github-actions.md)
 - [贡献与本地验证](CONTRIBUTING_zh.md)
-- [React Web](easytier-web/frontend/README.md) / [React GUI](easytier-gui/README.md)
+- [React Web](easytier-web/frontend/README.md) / [EasyTier 客户端](easytier-gui/README.md)
 - [Core 架构](docs/core-architecture.md)
 
 活动界面位于 `easytier-web/frontend` 和 `easytier-gui/src/react`；`frontend-lib` 提供共享协议类型与配置转换。仓库仍保留上游的 Vue 配置生成器、贡献工具以及 Go / JS / WASI 等可选源码，它们不属于当前默认 React 交付包。旧上游工作流归档于 [`.github/upstream-workflows`](.github/upstream-workflows/README.md)，不会作为活动工作流执行。

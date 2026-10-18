@@ -1,4 +1,4 @@
-name: Build adapted desktop GUI
+name: Build EasyTier desktop clients
 
 on:
   workflow_call:
@@ -78,6 +78,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify EasyTier and legacy Windows download selection without network or installation
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./script/test_install.ps1
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:

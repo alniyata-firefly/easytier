@@ -839,7 +839,7 @@ mode:
   service: Service
   remote: Remote
   normal_description: Run EasyTier directly, suitable for local use.
-  service_description: Run as a system service, supporting auto-startup and background operation. The service continues to run in the background after exiting the GUI.
+  service_description: Run as a system service, supporting auto-startup and background operation. The service continues to run in the background after closing the EasyTier interface.
   remote_description: Connect to a remote RPC service to manage and control remote nodes.
   service_status: Service Status
   service_status_running: Running

@@ -15,7 +15,7 @@ on:
         type: boolean
         default: true
       gui:
-        description: Build Windows x64 and macOS Intel/Apple Silicon GUI
+        description: Build Windows x64 and macOS Intel/Apple Silicon clients
         type: boolean
         default: true
       android:

@@ -839,7 +839,7 @@ mode:
   service: 服务模式
   remote: 远程模式
   normal_description: 直接运行EasyTier，适合本地使用
-  service_description: 作为系统服务运行，支持开机自启和后台运行。退出GUI后服务仍在后台运行。
+  service_description: 作为系统服务运行，支持开机自启和后台运行。关闭 EasyTier 界面后服务仍在后台运行。
   remote_description: 连接到远程RPC服务，管理和控制远程节点
   service_status: 服务状态
   service_status_running: 运行中

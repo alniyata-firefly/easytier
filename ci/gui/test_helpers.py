@@ -4,11 +4,77 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
-from prepare import Head
+from prepare import BINARY, Head, MSI_UPGRADE_CODE, PRODUCT, verify_installer_config
 from frontend_assets import freeze_frontend
-from verify import native_assets
+from verify import native_assets, verify_nsis_identity, verify_wix_identity
+
+
+class InstallerBrandingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = Path(__file__).resolve().parents[2]
+        cls.config = json.loads((cls.source / 'easytier-gui/src-tauri/tauri.conf.json').read_text())
+        cls.windows = json.loads((cls.source / 'easytier-gui/src-tauri/tauri.windows.conf.json').read_text())
+        import tomllib
+        cls.cargo = tomllib.loads((cls.source / 'easytier-gui/src-tauri/Cargo.toml').read_text())
+        cls.nsis = (cls.source / 'easytier-gui/src-tauri/windows/installer.nsi').read_text()
+        cls.wix = (cls.source / 'easytier-gui/src-tauri/windows/main.wxs').read_text()
+        # This substitutes the identity fields only; the real CLI renders and
+        # compiles these templates on Windows CI before the artifact verifier.
+        fields = {'product_name': PRODUCT, 'main_binary_name': BINARY,
+                  'bundle_id': 'com.kkrainbow.easytier', 'manufacturer': 'kkrainbow',
+                  'version': '2.7.2', 'install_mode': 'currentUser', 'arch': 'x64',
+                  'upgrade_code': MSI_UPGRADE_CODE}
+        for key, value in fields.items():
+            cls.nsis = cls.nsis.replace('{{' + key + '}}', value)
+            cls.wix = cls.wix.replace('{{' + key + '}}', value)
+        cls.properties = {'ProductName': PRODUCT, 'ProductVersion': '2.7.2',
+                          'Manufacturer': 'kkrainbow', 'UpgradeCode': '{' + MSI_UPGRADE_CODE.upper() + '}',
+                          'ProductCode': '{12345678-1234-4234-9234-123456789ABC}'}
+
+    def test_display_brand_keeps_binary_package_identifier_and_upgrade_code(self):
+        verify_installer_config(self.config, self.windows, self.cargo)
+        self.assertEqual(str(uuid.uuid5(uuid.NAMESPACE_DNS, 'easytier-gui.exe.app.x64')), MSI_UPGRADE_CODE)
+        self.assertNotEqual(str(uuid.uuid5(uuid.NAMESPACE_DNS, 'EasyTier.exe.app.x64')), MSI_UPGRADE_CODE)
+
+    def test_changed_legacy_upgrade_code_is_rejected_before_build(self):
+        windows = json.loads(json.dumps(self.windows))
+        windows['bundle']['windows']['wix']['upgradeCode'] = str(uuid.uuid4())
+        with self.assertRaisesRegex(RuntimeError, 'compatibility'):
+            verify_installer_config(self.config, windows, self.cargo)
+
+    def test_nsis_easy_display_keeps_one_legacy_uninstaller_and_install_location(self):
+        identity = verify_nsis_identity(self.nsis, '2.7.2')
+        self.assertEqual(identity['PRODUCTNAME'], PRODUCT)
+        self.assertEqual(identity['MAINBINARYNAME'], BINARY)
+        self.assertLess(self.nsis.index('!macro MigrateLegacyShortcut'), self.nsis.index('Section Install'))
+        migration = self.nsis.split('!macro MigrateLegacyShortcut', 1)[1].split('!macroend', 1)[0]
+        self.assertIn('IsShortcutTarget "${OLD}" "$INSTDIR\\${MAINBINARYNAME}.exe"', migration)
+        self.assertIn('IsShortcutTarget "${NEW}" "$INSTDIR\\${MAINBINARYNAME}.exe"', migration)
+
+    def test_nsis_new_display_name_must_not_create_second_uninstall_key(self):
+        bad = self.nsis.replace('Uninstall\\${LEGACYPRODUCTNAME}', 'Uninstall\\${PRODUCTNAME}')
+        with self.assertRaisesRegex(RuntimeError, 'identity'):
+            verify_nsis_identity(bad, '2.7.2')
+
+    def test_msi_actual_properties_and_template_preserve_install_identity(self):
+        result = verify_wix_identity(self.wix, self.properties, '2.7.2')
+        self.assertEqual(result['installation_directory_name'], BINARY)
+        self.assertTrue(all(BINARY not in name for name in result['shortcut_names']))
+
+    def test_msi_new_default_upgrade_code_is_rejected(self):
+        properties = dict(self.properties, UpgradeCode='{' + str(uuid.uuid5(uuid.NAMESPACE_DNS, 'EasyTier.exe.app.x64')) + '}')
+        with self.assertRaisesRegex(RuntimeError, 'UpgradeCode'):
+            verify_wix_identity(self.wix, properties, '2.7.2')
+
+    def test_msi_install_directory_or_registry_rename_is_rejected(self):
+        for bad in [self.wix.replace('Id="INSTALLDIR" Name="easytier-gui"', 'Id="INSTALLDIR" Name="EasyTier"'),
+                    self.wix.replace('kkrainbow\\\\easytier-gui', 'kkrainbow\\\\EasyTier')]:
+            with self.assertRaisesRegex(RuntimeError, 'compatibility'):
+                verify_wix_identity(bad, self.properties, '2.7.2')
 
 
 class PayloadGateTests(unittest.TestCase):

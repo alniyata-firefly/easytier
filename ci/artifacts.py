@@ -60,6 +60,8 @@ def file_record(root: Path, path: Path) -> dict:
 def validate_manifest(root: Path, manifest: dict, commit: str, version: str) -> list[Path]:
     if manifest.get("source_commit") != commit or manifest.get("version") != version:
         raise ValueError("artifact source commit/version mismatch")
+    if manifest.get("product_name") not in (None, "EasyTier"):
+        raise ValueError("unknown artifact product name")
     records = manifest.get("files")
     if not isinstance(records, list) or not records:
         raise ValueError("empty artifact manifest")
@@ -121,10 +123,14 @@ def archive_tree(root: Path, output: Path) -> None:
                 archive.addfile(info, stream)
 
 
-def finish_artifact(output: Path, platform: str, paths: list[Path]) -> dict:
+def finish_artifact(output: Path, platform: str, paths: list[Path], product_name: str | None = None) -> dict:
     commit, version = source()
     manifest = {"source_commit": commit, "version": version, "platform": platform,
                 "files": [file_record(output, path) for path in paths]}
+    if product_name is not None:
+        if product_name != "EasyTier":
+            raise ValueError("unknown artifact product name")
+        manifest["product_name"] = product_name
     write_json(output / "build-manifest.json", manifest)
     (output / "SHA256SUMS").write_text("".join(f"{item['sha256']}  {item['path']}\n" for item in manifest["files"]))
     return manifest
@@ -149,14 +155,14 @@ def package_web() -> None:
         safe_file(DIST, path.relative_to(DIST).as_posix())
         if path.suffix.lower() in {".map", ".env", ".db", ".sqlite", ".jks", ".p12", ".pem", ".key", ".log", ".har"}:
             raise ValueError("unexpected private or debug file in the frontend")
-    write_json(DIST / "source-manifest.json", {"source_commit": commit, "version": version,
+    write_json(DIST / "source-manifest.json", {"source_commit": commit, "version": version, "product_name": "EasyTier",
                "platform": "web-static", "files": [file_record(DIST, path) for path in paths]})
     verify_web()
     output = ROOT / "artifacts/web"
     fresh_directory(output)
     package = output / f"easytier-web-static-{version}-{commit[:8]}.tar.gz"
     archive_tree(DIST, package)
-    finish_artifact(output, "web-static", [package])
+    finish_artifact(output, "web-static", [package], product_name="EasyTier")
     print(f"Packaged {len(paths)} frontend assets from {commit}")
 
 
@@ -211,30 +217,33 @@ def package_linux(target: str, arch: str) -> None:
     fresh_directory(output)
     package = output / f"easytier-linux-{arch}-{version}-{commit[:8]}.tar.gz"
     archive_tree(stage, package)
-    finish_artifact(output, f"linux-{arch}", [package])
+    finish_artifact(output, f"linux-{arch}", [package], product_name="EasyTier")
     print(f"Verified static Core, CLI and embedded Web for {arch}")
 
 
 def collect(directory: Path, output: Path, expected_platforms: list[str]) -> None:
     commit, version = source()
     manifests = sorted(directory.glob("*/build-manifest.json"))
-    observed, files = set(), []
+    observed, files, products = set(), [], set()
     for path in manifests:
         manifest = json.loads(path.read_text())
         platform = manifest.get("platform")
         if platform in observed or platform not in expected_platforms:
             raise ValueError("unexpected or duplicate platform in the release")
         observed.add(platform)
+        products.add(manifest.get("product_name"))
         for artifact in validate_manifest(path.parent, manifest, commit, version):
             if artifact.name in {item.name for item in files}:
                 raise ValueError("duplicate release asset name")
             files.append(artifact)
     if observed != set(expected_platforms):
         raise ValueError(f"missing platforms: {sorted(set(expected_platforms) - observed)}")
+    if len(products) != 1:
+        raise ValueError("refusing to mix EasyTier and legacy product artifacts")
     fresh_directory(output)
     for artifact in files:
         shutil.copy2(artifact, output / artifact.name)
-    release = finish_artifact(output, "release", [output / artifact.name for artifact in files])
+    release = finish_artifact(output, "release", [output / artifact.name for artifact in files], product_name=products.pop())
     release["platforms"] = sorted(observed)
     write_json(output / "build-manifest.json", release)
     print(f"Verified {len(files)} release assets from {commit}")

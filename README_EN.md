@@ -87,7 +87,7 @@ Builds use Rust 1.95, Node.js 22 and pnpm 10.12.4 with locked dependencies. Curr
 
 - [GitHub Actions and signing](docs/github-actions.md)
 - [Contributing and local checks](CONTRIBUTING.md)
-- [React Web](easytier-web/frontend/README.md) / [React GUI](easytier-gui/README.md)
+- [React Web](easytier-web/frontend/README.md) / [EasyTier client](easytier-gui/README.md)
 - [Core architecture](docs/core-architecture.md)
 
 The active interfaces are `easytier-web/frontend` and `easytier-gui/src/react`; `frontend-lib` contains shared protocol types and configuration conversion. Retained upstream Vue configuration tools, contribution tools and optional Go / JS / WASI sources are outside the default React packages. Original upstream workflows are [archived](.github/upstream-workflows/README.md) and are not active workflows.
