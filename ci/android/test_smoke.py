@@ -376,6 +376,11 @@ class AndroidApplicationExitInfoTest(unittest.TestCase):
                     smoke.run(output / "source", output, {}, 36)
             collect.assert_called_once_with(["adb", "-s", "emulator-5554"], {}, 36)
             self.assertEqual(json.loads((output / "reports/application-exit-info.json").read_text()), safe)
+            boundary = json.loads((output / "reports/instrumentation-boundary.json").read_text())
+            self.assertIsNone(boundary["targetUid"])
+            self.assertIsNone(boundary["startedDeviceClock"])
+            self.assertIsNone(boundary["endedDeviceClock"])
+            self.assertIsNone(boundary["observerBoundary"])
             self.assertEqual(smoke.digest(app), hashlib.sha256(b"unchanged app fixture").hexdigest())
 
 
@@ -387,15 +392,25 @@ class AndroidInstrumentationOutcomeTest(unittest.TestCase):
            "1792297760.670 2792 2903 I AndroidIpcSmoke: guiPhase=gui_complete guiStatus=PASS\n")
 
     @staticmethod
-    def crashed_result():
-        # Exact output shape preserved from real run 39096584864, not a JUnit OK.
+    def crashed_result(completed=False):
+        # Exact output shapes from real runs 39096584864 and 39097808811;
+        # the latter includes the test's success status but no final JUnit OK.
         stdout = (f"INSTRUMENTATION_STATUS: class={smoke.TEST_CLASS}\n"
                   "INSTRUMENTATION_STATUS: current=1\nINSTRUMENTATION_STATUS: id=AndroidJUnitRunner\n"
                   "INSTRUMENTATION_STATUS: numtests=1\nINSTRUMENTATION_STATUS: stream=\n\n"
                   f"{smoke.TEST_CLASS}:\nINSTRUMENTATION_STATUS: test={smoke.TEST_METHOD}\n"
-                  "INSTRUMENTATION_STATUS_CODE: 1\nINSTRUMENTATION_RESULT: shortMsg=Process crashed.\n"
-                  "INSTRUMENTATION_CODE: 0\n")
+                  "INSTRUMENTATION_STATUS_CODE: 1\n")
+        if completed:
+            stdout += AndroidInstrumentationOutcomeTest.completed_block()
+        stdout += "INSTRUMENTATION_RESULT: shortMsg=Process crashed.\nINSTRUMENTATION_CODE: 0\n"
         return subprocess.CompletedProcess([], 0, stdout, "")
+
+    @staticmethod
+    def completed_block():
+        return (f"INSTRUMENTATION_STATUS: class={smoke.TEST_CLASS}\n"
+                "INSTRUMENTATION_STATUS: current=1\nINSTRUMENTATION_STATUS: id=AndroidJUnitRunner\n"
+                "INSTRUMENTATION_STATUS: numtests=1\nINSTRUMENTATION_STATUS: stream=.\n"
+                f"INSTRUMENTATION_STATUS: test={smoke.TEST_METHOD}\nINSTRUMENTATION_STATUS_CODE: 0\n")
 
     def exit_info(self, **changes):
         record = {"reason": 1, "reasonName": "EXIT_SELF", "status": 0, "pid": 2792, "uid": 10123,
@@ -428,6 +443,50 @@ class AndroidInstrumentationOutcomeTest(unittest.TestCase):
                                 started=dict(self.start, offsetMinutes=480), ended=dict(self.end, offsetMinutes=480))
         self.assertEqual(outcome["classification"], "expected_final_window_exit")
         self.assertEqual(outcome["evidence"]["exitEpochMs"], 1792297764123)
+
+    def test_exact_optional_success_status_from_actual_runner_is_supported(self):
+        result = self.crashed_result(completed=True)
+        self.assertTrue(smoke.exact_process_crashed_result(result))
+        outcome = self.classify(result=result)
+        self.assertEqual(outcome["classification"], "expected_final_window_exit")
+        self.assertFalse(outcome["junitFinalized"])
+        self.assertIn("INSTRUMENTATION_STATUS: stream=.\n", result.stdout)
+        self.assertNotIn("OK (1 test)", result.stdout)
+        self.assertEqual(self.classify(result=result, exit_info=self.exit_info(reason=5))["classification"], "failed")
+
+    def test_optional_success_block_refuses_failures_wrong_identity_duplicates_and_extra_text(self):
+        block = self.completed_block()
+        mutants = [block + block, block + "java.lang.AssertionError: private\n",
+                   block.replace("STATUS_CODE: 0", "STATUS_CODE: -1"),
+                   block.replace("STATUS_CODE: 0", "STATUS_CODE: -2"),
+                   block.replace(smoke.TEST_CLASS, smoke.TEST_CLASS + "Other"),
+                   block.replace(smoke.TEST_METHOD, smoke.TEST_METHOD + "Other"),
+                   block.replace("current=1", "current=2"), block.replace("numtests=1", "numtests=2"),
+                   block.replace("id=AndroidJUnitRunner", "id=OtherRunner"),
+                   block.replace("stream=.", "stream=F"), block.replace("stream=.", "stream="),
+                   block.replace("INSTRUMENTATION_STATUS: current=1\n", "")]
+        original = self.crashed_result(completed=True)
+        for changed in mutants:
+            result = subprocess.CompletedProcess([], 0, original.stdout.replace(block, changed), "")
+            with self.subTest(block=changed):
+                self.assertFalse(smoke.exact_process_crashed_result(result))
+                self.assertEqual(self.classify(result=result)["classification"], "failed")
+
+    def test_boundary_metadata_keeps_only_validated_numeric_identity_and_clock_fields(self):
+        boundary = smoke.instrumentation_boundary(10123, self.start, self.end, self.log)
+        self.assertEqual(boundary, {"schema": 1, "process": smoke.PACKAGE, "targetUid": 10123,
+                                   "startedDeviceClock": self.start, "endedDeviceClock": self.end,
+                                   "observerBoundary": {"pid": 2792, "guiCompleteEpochMs": self.complete_ms}})
+        invalid = smoke.instrumentation_boundary("private UID", {"epochSeconds": "private", "offsetMinutes": 0},
+                                                {"epochSeconds": self.end["epochSeconds"], "offsetMinutes": 9999},
+                                                "private AndroidIpcSmoke log")
+        self.assertEqual(invalid["targetUid"], None)
+        self.assertEqual(invalid["startedDeviceClock"], None)
+        self.assertEqual(invalid["endedDeviceClock"], None)
+        self.assertEqual(invalid["observerBoundary"], None)
+        self.assertNotIn("private", json.dumps(invalid))
+        safe = smoke.instrumentation_boundary(10123, self.start | {"raw": "private"}, self.end, self.log)
+        self.assertNotIn("private", json.dumps(safe))
 
     def test_normal_junit_completion_still_requires_the_complete_behavior_report(self):
         result = subprocess.CompletedProcess([], 0, "Time: 12.3\nOK (1 test)\n", "")
@@ -567,6 +626,11 @@ class AndroidInstrumentationOutcomeTest(unittest.TestCase):
                 smoke.run(output / "source", output, {}, 36)
             build.assert_not_called()
             outcome = json.loads((output / "reports/instrumentation-outcome.json").read_text())
+            boundary = json.loads((output / "reports/instrumentation-boundary.json").read_text())
+            self.assertEqual(boundary["targetUid"], 10123)
+            self.assertEqual(boundary["startedDeviceClock"], self.start)
+            self.assertEqual(boundary["endedDeviceClock"], self.end)
+            self.assertEqual(boundary["observerBoundary"]["pid"], 2792)
             self.assertEqual(outcome["classification"], "expected_final_window_exit")
             self.assertFalse(outcome["junitFinalized"])
             self.assertTrue(outcome["apkReused"])

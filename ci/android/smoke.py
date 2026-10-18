@@ -306,13 +306,41 @@ def observer_exit_boundary(log):
 def exact_process_crashed_result(result):
     if result.returncode or result.stderr.strip():
         return False
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()] == [
+    started = [
         f"INSTRUMENTATION_STATUS: class={TEST_CLASS}",
         "INSTRUMENTATION_STATUS: current=1", "INSTRUMENTATION_STATUS: id=AndroidJUnitRunner",
         "INSTRUMENTATION_STATUS: numtests=1", "INSTRUMENTATION_STATUS: stream=", f"{TEST_CLASS}:",
         f"INSTRUMENTATION_STATUS: test={TEST_METHOD}", "INSTRUMENTATION_STATUS_CODE: 1",
-        "INSTRUMENTATION_RESULT: shortMsg=Process crashed.", "INSTRUMENTATION_CODE: 0",
     ]
+    completed = [
+        f"INSTRUMENTATION_STATUS: class={TEST_CLASS}",
+        "INSTRUMENTATION_STATUS: current=1", "INSTRUMENTATION_STATUS: id=AndroidJUnitRunner",
+        "INSTRUMENTATION_STATUS: numtests=1", "INSTRUMENTATION_STATUS: stream=.",
+        f"INSTRUMENTATION_STATUS: test={TEST_METHOD}", "INSTRUMENTATION_STATUS_CODE: 0",
+    ]
+    crashed = ["INSTRUMENTATION_RESULT: shortMsg=Process crashed.", "INSTRUMENTATION_CODE: 0"]
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    # The same test can send its success status before Tauri exits the process,
+    # while the runner's final JUnit result is still absent. This exact optional
+    # block was observed in run 39097808811; no other status/stack is accepted.
+    return lines in (started + crashed, started + completed + crashed)
+
+
+def instrumentation_boundary(uid, started, ended, log):
+    """Persist only independently parsed identity/clock values, even on failure."""
+    def clock(value):
+        if not isinstance(value, dict):
+            return None
+        epoch, offset = value.get("epochSeconds"), value.get("offsetMinutes")
+        if (type(epoch) is not int or not 0 < epoch < 10**12
+                or type(offset) is not int or not -840 <= offset <= 840):
+            return None
+        return {"epochSeconds": epoch, "offsetMinutes": offset}
+
+    return {"schema": 1, "process": PACKAGE,
+            "targetUid": uid if type(uid) is int and 0 < uid <= 2**31 - 1 else None,
+            "startedDeviceClock": clock(started), "endedDeviceClock": clock(ended),
+            "observerBoundary": observer_exit_boundary(log)}
 
 
 def instrumentation_outcome(result, report, exit_info, log, uid, started, ended):
@@ -609,6 +637,8 @@ def run(source, output, env, api_level=34):
             (output / "reports/filtered-logcat.txt").write_text(log)
         except (RuntimeError, subprocess.TimeoutExpired):
             pass
+        boundary = instrumentation_boundary(uid, started, ended, log)
+        (output / "reports/instrumentation-boundary.json").write_text(json.dumps(boundary, indent=2) + "\n")
         outcome = instrumentation_outcome(result, report, exit_info, log, uid, started, ended)
         outcome.update(provenance)
         (output / "reports/instrumentation-outcome.json").write_text(json.dumps(outcome, indent=2) + "\n")
