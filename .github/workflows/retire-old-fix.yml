@@ -1,0 +1,33 @@
+name: Retire superseded 2.7.2 fix release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: retire-fixed-release-416165641
+  cancel-in-progress: false
+
+jobs:
+  retire:
+    if: github.ref == 'refs/heads/main' && github.repository == 'alniyata-firefly/easytier'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Test release identity and replacement safeguards
+        run: python3 -m unittest discover -s ci -p test_retire_old_fix.py -v
+      - name: Update exact replacement notes and retire only release 416165641
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 ci/retire_old_fix.py --apply --output "$RUNNER_TEMP/retirement-proof.json"
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: fixed-release-retirement-proof
+          path: ${{ runner.temp }}/retirement-proof.json
+          if-no-files-found: error
+          retention-days: 14

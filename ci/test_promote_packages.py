@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import promote_packages as promote
 
@@ -74,6 +74,12 @@ class FakeGitHub:
 
 
 class PromotionTests(unittest.TestCase):
+    def test_withdrawn_release_cannot_be_recreated(self):
+        api = Mock()
+        with self.assertRaisesRegex(promote.Refused, "withdrawn"):
+            promote.validate_source(api, REPO, RUN, COMMIT, "fix-2.7.2-20261018")
+        api.request.assert_not_called()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -180,7 +186,7 @@ class PromotionTests(unittest.TestCase):
         self.assertIn("  actions: read\n  contents: write", workflow)
         self.assertIn("run-id: ${{ inputs.source-run-id }}", workflow)
         self.assertIn("github-token: ${{ github.token }}", workflow)
-        self.assertRegex(workflow, r"profile:\n(?:[^\n]*\n){3}        default: full\n        options:\n          - full\n          - android-web")
+        self.assertRegex(workflow, r"profile:\n(?:[^\n]*\n){3}        default: android-web\n        options:\n          - full\n          - android-web")
         self.assertIn("RELEASE_PROFILE: ${{ inputs.profile }}", workflow)
         self.assertEqual(workflow.count('--profile "$RELEASE_PROFILE"'), 2)
         for action in re.findall(r"uses: ([^\s]+)", workflow):

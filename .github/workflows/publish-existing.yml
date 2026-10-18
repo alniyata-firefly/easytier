@@ -7,22 +7,22 @@ on:
         description: Successful packages workflow run ID
         required: true
         type: string
-        default: '38998168675'
+        default: '39087615977'
       expected-commit:
         description: Exact source commit of the existing packages
         required: true
         type: string
-        default: '1ec2b559205d3df15669c0b63270fbedd89f81d3'
+        default: 'abc526b847f2539d175940c7ba5d65a5dee270e5'
       release-tag:
         description: Existing fix-* tag pointing to that source commit
         required: true
         type: string
-        default: 'fix-2.7.2-20261018'
+        default: 'fix-2.7.2-android-20261018'
       profile:
         description: Exact platform set in the original packages artifact
         required: true
         type: choice
-        default: full
+        default: android-web
         options:
           - full
           - android-web

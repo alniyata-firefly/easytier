@@ -15,6 +15,7 @@ import urllib.request
 from artifacts import validate_manifest
 
 VERSION = "2.7.2"
+WITHDRAWN_TAGS = {"fix-2.7.2-20261018"}
 PLATFORMS = {"android-arm64", "gui-macos-aarch64", "gui-macos-x86_64",
              "gui-windows-x86_64", "linux-aarch64", "linux-x86_64", "web-static"}
 PROFILES = {"full": PLATFORMS, "android-web": {"android-arm64", "web-static"}}
@@ -40,6 +41,7 @@ def validate_profile(profile):
 
 def validate_inputs(repo, run_id, commit, tag, profile="full"):
     validate_profile(profile)
+    require(tag not in WITHDRAWN_TAGS, "This repair release was withdrawn; use the current repair packages")
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo), "Invalid repository")
     require(type(run_id) is int and run_id > 0, "Invalid source run ID")
     require(re.fullmatch(r"[0-9a-f]{40}", commit), "Expected a full source commit SHA")
@@ -186,17 +188,17 @@ def release_text(state):
     if profile == "android-web":
         marker = marker.removesuffix(" -->") + ":android-web -->"
         body = f"""{marker}
-保留应用版本 **{VERSION}** 的 Android / Web 修复构建；原版本标签及完整平台发布保持不变。
+保留应用版本 **{VERSION}** 的 Android / Web 修复构建。
 
 源码提交：`{state['source_commit']}`。全部原始文件来自成功的 [Actions #{state['run_id']}](https://github.com/{state['repository']}/actions/runs/{state['run_id']})，本次发布不重新编译或重新签名。
 
 - 修复 Android VPN 恢复后残留错误、旧请求错误覆盖新连接状态的问题，并移除 Web 成员行的内部配置版本摘要。
-- 仅包含 Android ARM64 APK、对应校验/验证报告及 Web 静态文件。Linux、Windows、macOS 未重新构建，继续使用此前的[完整平台修复版](https://github.com/{state['repository']}/releases/tag/fix-2.7.2-20261018)。
+- 仅包含 Android ARM64 APK、对应校验/验证报告及 Web 静态文件。Linux、Windows、macOS 未重新构建；本次补丁未修改这些平台的运行时代码。
 - 已完成 CI 构建及签名/包校验；发布前重新核验每个原始文件与远端 SHA-256。本工作流不执行额外的本机原生测试。
 - Android 保留原应用标识、签名及 versionCode `2007003`；同版本替换不会成为递增版本号自动升级。
 - **未进行 Android 手机真机测试。** Android 已校验签名、嵌入 Core/前端与 DEX；VPN 恢复仍需在手机上验收。
 
-安装前核对 `SHA256SUMS` 与 `build-manifest.json`。本次发布不修改生产服务或节点，也不替换完整平台的最新发布。
+安装前核对 `SHA256SUMS` 与 `build-manifest.json`。本工作流只发布安装包；生产服务或节点的部署另行验收。
 """
         return f"EasyTier {VERSION} Android / Web 修复版", body
     native_note = ("本次源提交另通过 Linux 本机原生审批、管理日志及隔离 TUN/TCP/UDP/WireGuard 回归。"
